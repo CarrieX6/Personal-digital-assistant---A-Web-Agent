@@ -25,6 +25,11 @@
 
 - [学习笔记索引](learning/README.md)：团队知识记录规范、建议学习顺序与选题清单。
 
+### 团队协作
+
+- [多人 Git 协作 Skill](../.codex/skills/team-git-workflow/SKILL.md)：任务领取、
+  分支与提交、同步、Pull Request、Review、冲突处理、敏感文件检查和交接规范。
+
 ## 文档规范
 
 每篇文档建议包含：
