@@ -98,7 +98,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-000` | [Apple 锁屏与空间场景路线](apple-spatial-scene-research.md) | 产品与技术调研 | `🧪 待实验` | `🧱 局部实现` | 目标应参考 iOS/visionOS 空间场景，不是 macOS 航拍锁屏 | SHARP/3DGS 尚未实测，商业许可需要持续核对 |
 | `SPATIAL-BASELINE` | [空间照片端侧部署与资产格式](spatial-scene-device-deployment.md) | 实现说明 | `🟠 初步结论` | `🧱 局部实现` | 当前使用 Depth Anything V2 Small、双层 LDI 与 Three.js | 缺少多模型基准、移动端实测和高质量路线验证 |
 | `LEARN-000` | [学习笔记索引](learning/README.md) | 学习计划 | `🟡 调研中` | 不适用 | 已定义建议学习顺序 | 多数主题尚未形成独立笔记和实验记录 |
-| `GOV-001` | [调研与实现中心](project-board.md) | 协作治理 | `✅ 已决策` | `👀 评审中` | 使用统一看板、调研/实验/ADR 模板和 Git Skill 条件式同步 | [PR #3](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/3) 合并后更新完成状态；完全自动化需要 GitHub Action |
+| `GOV-001` | [调研与实现中心](project-board.md) | 协作治理 | `✅ 已决策` | `✅ 已完成` | 使用统一看板、调研/实验/ADR 模板和 Git Skill 条件式同步 | [PR #3](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/3) 已于 2026-07-27 合并，合并提交 `eb95a1c`；完全无人触发的同步仍需 GitHub Action |
 
 ## 4. 架构与 Agent
 
