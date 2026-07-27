@@ -1,4 +1,4 @@
 interface:
-  display_name: "Team Git Workflow"
-  short_description: "Coordinate safe multi-person Git and GitHub collaboration"
-  default_prompt: "Use $team-git-workflow to prepare this repository change for team review and safe publication."
+  display_name: "团队 Git 协作 / Team Git Workflow"
+  short_description: "多人 Git/GitHub 分支、评审、冲突与交付协作流程"
+  default_prompt: "使用 $team-git-workflow 检查当前改动，并按团队规范准备评审和安全发布。"
