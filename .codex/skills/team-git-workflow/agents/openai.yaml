@@ -1,0 +1,4 @@
+interface:
+  display_name: "Team Git Workflow"
+  short_description: "Coordinate safe multi-person Git and GitHub collaboration"
+  default_prompt: "Use $team-git-workflow to prepare this repository change for team review and safe publication."

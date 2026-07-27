@@ -232,6 +232,19 @@ pnpm run test
 - 新功能必须注册到 Capability Registry，并附带最小测试和文档；
 - 调研放在 `docs/research/`，学习笔记放在 `docs/learning/`。
 
+仓库内置项目级 Codex Skill：
+[`.codex/skills/team-git-workflow/SKILL.md`](.codex/skills/team-git-workflow/SKILL.md)。
+它统一任务领取、分支命名、增量暂存、提交、同步、PR、Review、冲突处理和交接流程，
+并保护 API Key、个人媒体、本地数据库与模型权重不被误提交。
+
+在 Codex 中可以直接说：
+
+```text
+使用 $team-git-workflow 开始飞书接入任务
+使用 $team-git-workflow 检查当前改动并创建草稿 PR
+使用 $team-git-workflow 处理这个 PR 的冲突并生成交接说明
+```
+
 ## 近期路线图
 
 1. 抽象 `ChannelAdapter` 和统一消息数据模型；
@@ -246,6 +259,7 @@ pnpm run test
 ## 文档与资料
 
 - [文档中心](docs/README.md)
+- [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)
 - [系统架构](docs/architecture/system-architecture.md)
 - [外部聊天控制调研](docs/research/external-chat-control.md)
 - [Apple 空间场景技术路线核对](docs/apple-spatial-scene-research.md)
