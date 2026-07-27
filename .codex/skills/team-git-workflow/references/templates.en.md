@@ -1,9 +1,9 @@
 # Collaboration Templates
 
-作者：**Zhuofan Xie**
+Author: **Zhuofan Xie**
 
-Use these templates when the core workflow calls for a pull request, handoff, or
-conflict record. Fill every field and remove sections that do not apply.
+Use these templates for a pull request, handoff, or conflict record. Fill every
+field and remove sections that do not apply.
 
 ## Pull Request
 

@@ -28,7 +28,9 @@
 ### 团队协作
 
 - [多人 Git 协作 Skill](../.codex/skills/team-git-workflow/SKILL.md)：任务领取、
-  分支与提交、同步、Pull Request、Review、冲突处理、敏感文件检查和交接规范。
+  分支与提交、同步、Pull Request、Review、冲突处理、敏感文件检查和交接规范；
+  默认中文并支持切换英文（[中文说明](../.codex/skills/team-git-workflow/references/workflow.zh-CN.md) /
+  [English](../.codex/skills/team-git-workflow/references/workflow.en.md)）。
 
 ## 文档规范
 

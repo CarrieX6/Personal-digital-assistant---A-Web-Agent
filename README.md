@@ -236,6 +236,10 @@ pnpm run test
 [`.codex/skills/team-git-workflow/SKILL.md`](.codex/skills/team-git-workflow/SKILL.md)。
 它统一任务领取、分支命名、增量暂存、提交、同步、PR、Review、冲突处理和交接流程，
 并保护 API Key、个人媒体、本地数据库与模型权重不被误提交。
+说明默认跟随当前会话语言，支持中文和英文两个版本，也可以在指令中明确指定语言。
+
+[中文说明](.codex/skills/team-git-workflow/references/workflow.zh-CN.md) |
+[English](.codex/skills/team-git-workflow/references/workflow.en.md)
 
 在 Codex 中可以直接说：
 
@@ -243,6 +247,7 @@ pnpm run test
 使用 $team-git-workflow 开始飞书接入任务
 使用 $team-git-workflow 检查当前改动并创建草稿 PR
 使用 $team-git-workflow 处理这个 PR 的冲突并生成交接说明
+Use $team-git-workflow in English to prepare this change for review
 ```
 
 ## 近期路线图
