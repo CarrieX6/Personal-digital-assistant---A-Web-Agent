@@ -50,6 +50,32 @@ Record task ownership in the related issue or pull request when one exists.
 Before broad refactors, announce the intended modules so teammates can avoid the
 same files.
 
+## Synchronize the Research and Implementation Center
+
+Treat `docs/project-board.md` as the single project-level status entry point
+when the file exists:
+
+1. Resolve the task ID from the request, branch, issue, pull request, or research
+   document.
+2. At task start, read its priority, owner, dependencies, research status, and
+   implementation status.
+3. Register a unique ID when scoped project research or implementation has no
+   entry. Do not require a board item for formatting or branch-only maintenance.
+4. Synchronize facts on the same task branch:
+   - on claim, set the owner and move research to `🟡 调研中` or implementation
+     to `🟡 开发中`;
+   - when research, experiments, or ADRs are added, update status and links;
+   - when a PR is created, set implementation to `👀 评审中` and record its
+     confirmed URL;
+   - set `✅ 已完成` only after merge and acceptance are confirmed.
+5. A PR URL exists only after creation. When the board needs it, add a small
+   documentation commit on the same branch and push again.
+6. Compare the board with actual state before committing. Update only the
+   current task and do not guess or bulk-edit unrelated rows.
+7. Never claim completion merely because a commit or PR exists.
+8. If the board is absent from the current branch, report the dependency. Do not
+   create a duplicate board or broken links.
+
 ## Implement Safely
 
 - Keep commits small and cohesive, but do not create meaningless micro-commits.
@@ -147,6 +173,23 @@ tests, documentation, and reviewer guidance are complete.
 - Delete a remote branch only after merge and only when no teammate still uses
   it.
 
+## Follow the Fixed Post-Merge Cleanup Order
+
+Only after GitHub confirms the pull request is merged and the head branch is
+known:
+
+1. merge the pull request;
+2. delete its remote feature branch;
+3. switch to local `main` and run `git pull --ff-only origin main`;
+4. delete the local feature branch with `git branch -d <branch>`;
+5. run `git fetch origin --prune` and confirm remote branches, local branches,
+   and worktree state.
+
+Never delete an unmerged branch, a branch another contributor still uses, or one
+with unpublished commits. If the merged task still needs a `✅ 已完成` board
+update, use a dedicated documentation branch and PR; do not commit directly to
+`main` without authorization.
+
 ## Handle Conflicts and Recovery
 
 - Fetch first and inspect the divergence graph.
@@ -165,6 +208,7 @@ End with:
 - task and owner;
 - branch and latest commit;
 - pull request URL and state;
+- task ID and board status;
 - completed and skipped checks;
 - files or interfaces likely to conflict;
 - remaining decisions, risks, migrations, and model or data dependencies;

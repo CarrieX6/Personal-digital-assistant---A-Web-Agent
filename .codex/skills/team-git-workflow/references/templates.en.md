@@ -13,6 +13,12 @@ field and remove sections that do not apply.
 - What changed
 - Why this approach was chosen
 
+## Task and board
+
+- Task ID: `<TASK-ID or not applicable>`
+- [ ] Owner, research/implementation status, and related documents are updated,
+      or the reason this does not apply is recorded
+
 ## User impact
 
 - Visible behavior and compatibility
@@ -52,6 +58,8 @@ Owner:
 Branch:
 Latest commit:
 Pull request:
+Task ID:
+Board status:
 
 Completed:
 - ...
