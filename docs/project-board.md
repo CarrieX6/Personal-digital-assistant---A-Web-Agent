@@ -22,6 +22,20 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 5. 需要确定项目级方案时，从 [ADR 模板](decisions/ADR-template.md)创建决策记录。
 6. 进入实现后关联分支、PR、测试与文档，完成后同时更新两个状态。
 
+### Git Skill 自动同步
+
+使用 `$team-git-workflow` 执行项目任务时，Skill 会把看板检查纳入 Git 流程：
+
+- 开始任务时识别任务 ID，并读取负责人、优先级和当前状态；
+- 提交前同步已经发生的负责人、调研、实验、ADR 和实现状态变化；
+- PR 创建后，把实现状态更新为 `👀 评审中`，并在需要时追加真实 PR 链接；
+- 只有 GitHub 已确认合并且验收通过后，才更新为 `✅ 已完成`；
+- 合并后按照“删除远程分支 → 更新本地 main → 删除本地分支”的顺序清理。
+
+这是由 Codex Skill 驱动的自动同步，不是常驻后台任务。团队成员手工在 GitHub
+合并后，需要再次调用 `$team-git-workflow` 执行清理和最终状态同步。完全无人触发
+的自动更新需要后续增加 GitHub Action。
+
 ### 调研状态
 
 | 状态 | 含义 |
@@ -84,6 +98,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-000` | [Apple 锁屏与空间场景路线](apple-spatial-scene-research.md) | 产品与技术调研 | `🧪 待实验` | `🧱 局部实现` | 目标应参考 iOS/visionOS 空间场景，不是 macOS 航拍锁屏 | SHARP/3DGS 尚未实测，商业许可需要持续核对 |
 | `SPATIAL-BASELINE` | [空间照片端侧部署与资产格式](spatial-scene-device-deployment.md) | 实现说明 | `🟠 初步结论` | `🧱 局部实现` | 当前使用 Depth Anything V2 Small、双层 LDI 与 Three.js | 缺少多模型基准、移动端实测和高质量路线验证 |
 | `LEARN-000` | [学习笔记索引](learning/README.md) | 学习计划 | `🟡 调研中` | 不适用 | 已定义建议学习顺序 | 多数主题尚未形成独立笔记和实验记录 |
+| `GOV-001` | [调研与实现中心](project-board.md) | 协作治理 | `✅ 已决策` | `👀 评审中` | 使用统一看板、调研/实验/ADR 模板和 Git Skill 条件式同步 | [PR #3](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/3) 合并后更新完成状态；完全自动化需要 GitHub Action |
 
 ## 4. 架构与 Agent
 

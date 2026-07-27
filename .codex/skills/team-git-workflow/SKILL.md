@@ -1,6 +1,6 @@
 ---
 name: team-git-workflow
-description: Bilingual Chinese/English Git and GitHub collaboration workflow for the Personal Digital Assistant repository. Use when claiming tasks, branching, staging, committing, syncing, pushing, opening or reviewing pull requests, resolving conflicts, handing off work, or releasing；用于项目任务领取、分支提交、同步、PR、评审、冲突处理、工作交接与发布。
+description: Bilingual Chinese/English Git and GitHub collaboration workflow for the Personal Digital Assistant repository, including automatic synchronization of the research and implementation board. Use when claiming tasks, branching, staging, committing, syncing, pushing, opening or reviewing pull requests, resolving conflicts, handing off work, merging, cleaning branches, or releasing；用于项目任务领取、看板同步、分支提交、PR、评审、合并清理、冲突处理、工作交接与发布。
 ---
 
 # 团队 Git 协作 / Team Git Workflow
