@@ -1,0 +1,15 @@
+fastapi>=0.116,<1.0
+cryptography>=45,<47
+eval-type-backport>=0.2,<1.0
+httpx>=0.28,<1.0
+keyring>=25,<27
+numpy>=1.26,<3.0
+Pillow>=11,<13
+pydantic>=2.11,<3.0
+python-dotenv>=1.2,<2.0
+pytest>=8.4,<10.0
+python-multipart>=0.0.20,<1.0
+torch>=2.7,<3.0
+torchvision>=0.22,<1.0
+transformers>=4.53,<5.0
+uvicorn[standard]>=0.35,<1.0
