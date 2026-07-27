@@ -263,6 +263,7 @@ Use $team-git-workflow in English to prepare this change for review
 
 ## 文档与资料
 
+- [调研与实现中心](docs/project-board.md)
 - [文档中心](docs/README.md)
 - [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)
 - [系统架构](docs/architecture/system-architecture.md)
