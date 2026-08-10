@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +19,13 @@ from backend.app.settings import (
     SettingsService,
     StoredLLMSettings,
 )
+
+
+def assert_private_file_permissions(path: Path) -> None:
+    """Require owner-only mode bits where the platform exposes POSIX modes."""
+    assert path.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 class MemorySecretStore:
@@ -274,7 +282,7 @@ def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
     settings_text = (tmp_path / "settings.json").read_text(encoding="utf-8")
     assert "sk-private-example" not in settings_text
     assert json.loads(settings_text)["model"] == "qwen3.7-plus"
-    assert stat.S_IMODE((tmp_path / "settings.json").stat().st_mode) == 0o600
+    assert_private_file_permissions(tmp_path / "settings.json")
 
     health = client.get("/health").json()
     assert health["llm_configured"] is True
@@ -372,8 +380,8 @@ def test_encrypted_secret_store_never_writes_plaintext(tmp_path: Path) -> None:
 
     assert store.get() == "sk-sensitive-value"
     assert b"sk-sensitive-value" not in secret_path.read_bytes()
-    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(master_key_path.stat().st_mode) == 0o600
+    assert_private_file_permissions(secret_path)
+    assert_private_file_permissions(master_key_path)
 
     store.delete()
     assert store.get() is None
