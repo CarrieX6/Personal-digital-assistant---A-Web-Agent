@@ -30,12 +30,15 @@ from .models import (
     AgentRunResponse,
     AssetListResponse,
     AssetPublic,
+    CapabilityInfo,
     ConnectionTestResponse,
     HealthResponse,
     JobListResponse,
     JobPublic,
     LLMSettingsPublic,
     LLMSettingsUpdate,
+    PhotoStyleCreateResponse,
+    PhotoStyleProviderStatus,
     ProviderCatalogResponse,
     SourceImagePublic,
     SpatialSceneCreateResponse,
@@ -45,6 +48,11 @@ from .settings import (
     SettingsError,
     SettingsService,
     create_default_settings_service,
+)
+from .style_transfer import (
+    PhotoStyleService,
+    StyleParameters,
+    register_style_tools,
 )
 from .tools import ToolError, ToolRegistry, build_default_registry
 
@@ -61,12 +69,17 @@ def create_app(
     planner: Planner | None = None,
     settings_service: SettingsService | None = None,
     spatial_service: SpatialSceneService | None = None,
+    style_service: PhotoStyleService | None = None,
 ) -> FastAPI:
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
         DEFAULT_ASSET_DATA_PATH
     )
     register_asset_tools(registry, selected_spatial_service)
+    selected_style_service = style_service or PhotoStyleService(
+        selected_spatial_service
+    )
+    register_style_tools(registry, selected_style_service)
     selected_settings_service = settings_service or create_default_settings_service(
         DEFAULT_SETTINGS_PATH
     )
@@ -81,9 +94,9 @@ def create_app(
         title="Agent Lab API",
         description=(
             "A local-first personal AI assistant with tool calling, private assets, "
-            "and spatial photo generation."
+            "spatial photo generation, and photo style transfer."
         ),
-        version="0.4.0",
+        version="0.5.0",
     )
     app.add_middleware(
         CORSMiddleware,
@@ -99,6 +112,7 @@ def create_app(
     app.state.runner = runner
     app.state.settings_service = selected_settings_service
     app.state.spatial_service = selected_spatial_service
+    app.state.style_service = selected_style_service
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
@@ -116,6 +130,11 @@ def create_app(
     def list_tools(request: Request) -> list[ToolInfo]:
         current_registry: ToolRegistry = request.app.state.registry
         return current_registry.list_tools()
+
+    @app.get("/api/capabilities", response_model=list[CapabilityInfo])
+    def list_capability_manifests(request: Request) -> list[CapabilityInfo]:
+        current_registry: ToolRegistry = request.app.state.registry
+        return current_registry.list_capabilities()
 
     @app.post(
         "/api/source-images",
@@ -169,6 +188,63 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
             await file.close()
+
+    @app.post(
+        "/api/photo-style-transfers",
+        response_model=PhotoStyleCreateResponse,
+        status_code=202,
+    )
+    async def create_photo_style_transfer(
+        request: Request,
+        content_file: UploadFile = File(...),
+        style_files: list[UploadFile] = File(...),
+        title: str | None = Form(default=None),
+        prompt: str = Form(default=""),
+        mode: str = Form(default="preserve_layout"),
+        quality: str = Form(default="standard"),
+        style_strength: float = Form(default=0.7),
+        content_strength: float = Form(default=0.8),
+        detail_strength: float = Form(default=0.7),
+        seed: int | None = Form(default=None),
+    ) -> PhotoStyleCreateResponse:
+        service: PhotoStyleService = request.app.state.style_service
+        try:
+            content_bytes = await content_file.read(MAX_UPLOAD_BYTES + 1)
+            reference_bytes = [
+                await style_file.read(MAX_UPLOAD_BYTES + 1)
+                for style_file in style_files
+            ]
+            return service.create_transfer(
+                content_bytes,
+                reference_bytes,
+                original_name=content_file.filename or "图片风格化",
+                title=title,
+                parameters=StyleParameters(
+                    mode=mode,
+                    quality=quality,
+                    style_strength=style_strength,
+                    content_strength=content_strength,
+                    detail_strength=detail_strength,
+                    prompt=prompt,
+                    seed=seed,
+                ),
+            )
+        except AssetError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            await content_file.close()
+            for style_file in style_files:
+                await style_file.close()
+
+    @app.get(
+        "/api/photo-style-transfers/provider",
+        response_model=PhotoStyleProviderStatus,
+    )
+    def get_photo_style_provider(
+        request: Request,
+    ) -> PhotoStyleProviderStatus:
+        service: PhotoStyleService = request.app.state.style_service
+        return PhotoStyleProviderStatus.model_validate(service.provider_status())
 
     @app.get("/api/assets", response_model=AssetListResponse)
     def list_assets(
@@ -295,9 +371,14 @@ def create_app(
                 if payload.source_image_id
                 else None
             )
+            style_contexts = [
+                spatial.get_source_image(source_id).model_dump()
+                for source_id in payload.style_image_ids
+            ]
             return current_runner.run(
                 payload.message,
                 source_image_context=source_context,
+                style_image_contexts=style_contexts,
             )
         except AssetError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

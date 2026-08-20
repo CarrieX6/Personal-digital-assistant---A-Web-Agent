@@ -39,14 +39,45 @@ type AgentConsoleProps = {
   health: HealthInfo | null;
   onConnectionChange: (ready: boolean) => void;
   onSpatialSceneReady: (assetId: string) => void;
+  onPhotoStyleReady: (assetId: string) => void;
 };
 
 const examples = [
-  "把这张图片生成可拖动视角的空间照片",
-  "分析这段文字：医学人工智能正在改变影像诊断流程，模型评估与数据质量同样重要。",
-  "查看我的个人资产",
-  "现在几点？",
+  {
+    label: "生成空间照片",
+    message: "把这张图片生成可拖动视角的空间照片",
+  },
+  {
+    label: "图片风格化",
+    message: "使用第 1 张图片作为内容图，其余图片作为风格参考，进行图片风格化",
+  },
+  {
+    label: "组合分析",
+    message:
+      "分析这段文字：医学人工智能正在改变影像诊断流程，模型评估与数据质量同样重要。",
+  },
+  { label: "个人资产", message: "查看我的个人资产" },
+  { label: "时间", message: "现在几点？" },
 ];
+
+type LocalAttachment = {
+  file: File;
+  previewUrl: string;
+};
+
+function AttachmentIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path
+        d="M8.5 12.5 14.8 6.2a3 3 0 0 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8.1-8.1"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
 
 type SourceImage = {
   id: string;
@@ -58,6 +89,7 @@ type SourceImage = {
 
 type AgentJob = {
   id: string;
+  kind?: "spatial_scene" | "photo_style_transfer";
   status: "queued" | "running" | "completed" | "failed";
   progress: number;
   message: string;
@@ -76,12 +108,15 @@ export function AgentConsole({
   health,
   onConnectionChange,
   onSpatialSceneReady,
+  onPhotoStyleReady,
 }: AgentConsoleProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const previewUrlRef = useRef("");
-  const [message, setMessage] = useState(examples[1]);
-  const [attachment, setAttachment] = useState<File | null>(null);
-  const [attachmentPreview, setAttachmentPreview] = useState("");
+  const contentInputRef = useRef<HTMLInputElement>(null);
+  const styleInputRef = useRef<HTMLInputElement>(null);
+  const previewUrlRef = useRef<string[]>([]);
+  const [message, setMessage] = useState(examples[2].message);
+  const [contentAttachment, setContentAttachment] =
+    useState<LocalAttachment | null>(null);
+  const [styleAttachments, setStyleAttachments] = useState<LocalAttachment[]>([]);
   const [result, setResult] = useState<AgentRun | null>(null);
   const [job, setJob] = useState<AgentJob | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,7 +124,7 @@ export function AgentConsole({
 
   useEffect(() => {
     return () => {
-      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
 
@@ -103,7 +138,11 @@ export function AgentConsole({
         setJob(nextJob);
         onConnectionChange(true);
         if (nextJob.status === "completed") {
-          onSpatialSceneReady(nextJob.asset_id);
+          if (nextJob.kind === "photo_style_transfer") {
+            onPhotoStyleReady(nextJob.asset_id);
+          } else {
+            onSpatialSceneReady(nextJob.asset_id);
+          }
         } else if (nextJob.status === "failed") {
           setError(nextJob.error || nextJob.message);
         }
@@ -111,56 +150,144 @@ export function AgentConsole({
         setError(
           requestError instanceof Error
             ? requestError.message
-            : "无法读取空间照片任务状态。",
+            : "无法读取 Agent 图片任务状态。",
         );
       }
     }, 800);
     return () => window.clearTimeout(timer);
-  }, [apiBase, job, onConnectionChange, onSpatialSceneReady]);
+  }, [
+    apiBase,
+    job,
+    onConnectionChange,
+    onPhotoStyleReady,
+    onSpatialSceneReady,
+  ]);
 
-  function chooseAttachment(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    setError("");
-    if (!file) return;
-    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      setError("附件仅支持 JPG、PNG 或 WebP 图片。");
-      event.target.value = "";
-      return;
+  function validateAttachments(files: File[], maxCount: number) {
+    if (files.length > maxCount) {
+      return maxCount === 1
+        ? "内容图只能选择一张。"
+        : "风格参考图最多选择三张。";
     }
-    if (file.size > 20 * 1024 * 1024) {
-      setError("图片附件不能超过 20MB。");
-      event.target.value = "";
-      return;
+    if (
+      files.some(
+        (file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type),
+      )
+    ) {
+      return "附件仅支持 JPG、PNG 或 WebP 图片。";
     }
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = URL.createObjectURL(file);
-    setAttachmentPreview(previewUrlRef.current);
-    setAttachment(file);
-    setMessage(examples[0]);
+    if (files.some((file) => file.size > 20 * 1024 * 1024)) {
+      return "每张图片附件不能超过 20MB。";
+    }
+    return "";
   }
 
-  function clearAttachment() {
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = "";
-    setAttachmentPreview("");
-    setAttachment(null);
-    if (inputRef.current) inputRef.current.value = "";
+  function releasePreview(attachment: LocalAttachment) {
+    URL.revokeObjectURL(attachment.previewUrl);
+    previewUrlRef.current = previewUrlRef.current.filter(
+      (url) => url !== attachment.previewUrl,
+    );
+  }
+
+  function chooseContentAttachment(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    setError("");
+    if (!files.length) return;
+    const validationError = validateAttachments(files, 1);
+    if (validationError) {
+      setError(validationError);
+      event.target.value = "";
+      return;
+    }
+    if (contentAttachment) releasePreview(contentAttachment);
+    const nextAttachment = {
+      file: files[0],
+      previewUrl: URL.createObjectURL(files[0]),
+    };
+    previewUrlRef.current.push(nextAttachment.previewUrl);
+    setContentAttachment(nextAttachment);
+    setMessage(
+      styleAttachments.length ? examples[1].message : examples[0].message,
+    );
+    event.target.value = "";
+  }
+
+  function chooseStyleAttachments(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    setError("");
+    if (!files.length) return;
+    const validationError = validateAttachments(files, 3);
+    if (validationError) {
+      setError(validationError);
+      event.target.value = "";
+      return;
+    }
+    styleAttachments.forEach(releasePreview);
+    const nextAttachments = files.map((file) => ({
+      file,
+      previewUrl: URL.createObjectURL(file),
+    }));
+    previewUrlRef.current.push(
+      ...nextAttachments.map((attachment) => attachment.previewUrl),
+    );
+    setStyleAttachments(nextAttachments);
+    setMessage(examples[1].message);
+    event.target.value = "";
+  }
+
+  function clearAttachments() {
+    previewUrlRef.current.forEach((url) => URL.revokeObjectURL(url));
+    previewUrlRef.current = [];
+    setContentAttachment(null);
+    setStyleAttachments([]);
+    if (contentInputRef.current) contentInputRef.current.value = "";
+    if (styleInputRef.current) styleInputRef.current.value = "";
+  }
+
+  function removeContentAttachment() {
+    if (!contentAttachment) return;
+    releasePreview(contentAttachment);
+    setContentAttachment(null);
+  }
+
+  function removeStyleAttachment(index: number) {
+    const selected = styleAttachments[index];
+    if (selected) releasePreview(selected);
+    const nextAttachments = styleAttachments.filter(
+      (_, itemIndex) => itemIndex !== index,
+    );
+    setStyleAttachments(nextAttachments);
+    if (
+      nextAttachments.length === 0 &&
+      contentAttachment &&
+      message === examples[1].message
+    ) {
+      setMessage(examples[0].message);
+    }
   }
 
   async function runAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!message.trim() || loading) return;
+    if (styleAttachments.length && !contentAttachment) {
+      setError("请先选择内容图，再运行图片风格化任务。");
+      return;
+    }
 
     setLoading(true);
     setError("");
     setResult(null);
     setJob(null);
-    let sourceImage: SourceImage | null = null;
+    const stagedImages: SourceImage[] = [];
+    const orderedAttachments = [
+      ...(contentAttachment ? [contentAttachment] : []),
+      ...styleAttachments,
+    ];
 
     try {
-      if (attachment) {
+      for (const attachment of orderedAttachments) {
         const uploadPayload = new FormData();
-        uploadPayload.append("file", attachment);
+        uploadPayload.append("file", attachment.file);
         const uploadResponse = await fetch(`${apiBase}/api/source-images`, {
           method: "POST",
           body: uploadPayload,
@@ -168,14 +295,15 @@ export function AgentConsole({
         if (!uploadResponse.ok) {
           throw new Error(await responseError(uploadResponse));
         }
-        sourceImage = (await uploadResponse.json()) as SourceImage;
+        stagedImages.push((await uploadResponse.json()) as SourceImage);
       }
       const response = await fetch(`${apiBase}/api/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: message.trim(),
-          source_image_id: sourceImage?.id,
+          source_image_id: stagedImages[0]?.id,
+          style_image_ids: stagedImages.slice(1).map((image) => image.id),
         }),
       });
       if (!response.ok) {
@@ -191,8 +319,13 @@ export function AgentConsole({
             typeof output?.asset_id === "string",
         );
       if (sceneOutput) {
+        const jobKind =
+          sceneOutput.kind === "photo_style_transfer"
+            ? "photo_style_transfer"
+            : "spatial_scene";
         setJob({
           id: sceneOutput.job_id as string,
+          kind: jobKind,
           asset_id: sceneOutput.asset_id as string,
           status:
             sceneOutput.status === "running" ? "running" : "queued",
@@ -203,23 +336,22 @@ export function AgentConsole({
           message:
             typeof sceneOutput.message === "string"
               ? sceneOutput.message
-              : "空间照片任务已创建。",
+              : jobKind === "photo_style_transfer"
+                ? "图片风格化任务已创建。"
+                : "空间照片任务已创建。",
           error: null,
         });
-        clearAttachment();
-      } else if (sourceImage) {
-        await fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
-          method: "DELETE",
-        });
+        if (jobKind === "spatial_scene") {
+          await deleteSourceImages(apiBase, stagedImages.slice(1));
+        }
+        clearAttachments();
+      } else {
+        await deleteSourceImages(apiBase, stagedImages);
       }
       onConnectionChange(true);
     } catch (requestError) {
       onConnectionChange(false);
-      if (sourceImage) {
-        void fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
-          method: "DELETE",
-        });
-      }
+      await deleteSourceImages(apiBase, stagedImages);
       setError(
         requestError instanceof Error
           ? requestError.message
@@ -261,55 +393,120 @@ export function AgentConsole({
           />
           <div className="agent-attachment-row">
             <input
-              ref={inputRef}
+              ref={contentInputRef}
               className="sr-only"
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              onChange={chooseAttachment}
+              aria-label="内容图文件输入"
+              onChange={chooseContentAttachment}
             />
-            {attachment ? (
-              <div className="attachment-chip">
-                {/* Local object URL; the image has not left this device. */}
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={attachmentPreview} alt="待处理附件预览" />
-                <div>
-                  <strong>{attachment.name}</strong>
-                  <span>
-                    {(attachment.size / 1024 / 1024).toFixed(1)} MB · 仅本机
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={clearAttachment}
-                  aria-label="移除图片附件"
-                >
-                  移除
-                </button>
+            <input
+              ref={styleInputRef}
+              className="sr-only"
+              type="file"
+              multiple
+              accept="image/jpeg,image/png,image/webp"
+              aria-label="风格参考图文件输入"
+              onChange={chooseStyleAttachments}
+            />
+            {contentAttachment || styleAttachments.length ? (
+              <div className="attachment-groups">
+                {contentAttachment ? (
+                  <div className="attachment-group content-group">
+                    <span className="attachment-group-label">内容图</span>
+                    <div
+                      className="attachment-chip content"
+                      key={contentAttachment.previewUrl}
+                    >
+                      {/* Local object URL; the image has not left this device. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={contentAttachment.previewUrl}
+                        alt="内容图片预览"
+                      />
+                      <div>
+                        <span className="attachment-role">内容图</span>
+                        <strong>{contentAttachment.file.name}</strong>
+                        <span>
+                          {(contentAttachment.file.size / 1024 / 1024).toFixed(1)} MB · 仅本机
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={removeContentAttachment}
+                        aria-label={`移除内容图 ${contentAttachment.file.name}`}
+                      >
+                        移除
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {styleAttachments.length ? (
+                  <div className="attachment-group style-group">
+                    <span className="attachment-group-label">
+                      风格参考图 · {styleAttachments.length}/3
+                    </span>
+                    <div
+                      className="attachment-style-list"
+                      data-count={styleAttachments.length}
+                    >
+                      {styleAttachments.map((attachment, index) => (
+                        <div
+                          className="attachment-chip"
+                          key={attachment.previewUrl}
+                        >
+                          {/* Local object URL; the image has not left this device. */}
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={attachment.previewUrl}
+                            alt="风格参考图片预览"
+                          />
+                          <div>
+                            <span className="attachment-role">
+                              风格参考 {index + 1}
+                            </span>
+                            <strong>{attachment.file.name}</strong>
+                            <span>
+                              {(attachment.file.size / 1024 / 1024).toFixed(1)} MB · 仅本机
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeStyleAttachment(index)}
+                            aria-label={`移除风格参考图 ${attachment.file.name}`}
+                          >
+                            移除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-            ) : (
+            ) : null}
+            <div className="attachment-actions">
               <button
                 className="attach-button"
                 type="button"
-                onClick={() => inputRef.current?.click()}
+                onClick={() => contentInputRef.current?.click()}
               >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="16"
-                  height="16"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M8.5 12.5 14.8 6.2a3 3 0 0 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8.1-8.1"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeWidth="1.8"
-                  />
-                </svg>
-                添加本地图片
+                <AttachmentIcon />
+                {contentAttachment ? "更换内容图" : "选择内容图"}
               </button>
-            )}
-            <span>图片不会发送给大模型，Agent 只获得临时资产 ID</span>
+              <button
+                className="attach-button secondary"
+                type="button"
+                onClick={() => styleInputRef.current?.click()}
+              >
+                <AttachmentIcon />
+                {styleAttachments.length
+                  ? `更换风格参考（${styleAttachments.length}/3）`
+                  : "选择风格参考（可多选）"}
+              </button>
+            </div>
+            <span className="attachment-help">
+              内容图与风格参考分开选择，角色不会受文件排序影响；参考图最多 3 张。图片不会发送给大模型。
+            </span>
           </div>
           <div className="composer-footer">
             <span>{message.length} / 4000</span>
@@ -321,15 +518,13 @@ export function AgentConsole({
 
         <div className="examples">
           <span>示例</span>
-          {examples.map((example, index) => (
-            <button key={example} type="button" onClick={() => setMessage(example)}>
-              {index === 0
-                ? "生成空间照片"
-                : index === 1
-                  ? "组合分析"
-                  : index === 2
-                    ? "个人资产"
-                    : "时间"}
+          {examples.map((example) => (
+            <button
+              key={example.label}
+              type="button"
+              onClick={() => setMessage(example.message)}
+            >
+              {example.label}
             </button>
           ))}
         </div>
@@ -345,15 +540,21 @@ export function AgentConsole({
         <section
           className={`agent-job-card ${job.status}`}
           aria-live="polite"
-          aria-label="Agent 空间照片任务进度"
+          aria-label={`Agent ${job.kind === "photo_style_transfer" ? "图片风格化" : "空间照片"}任务进度`}
         >
           <div>
-            <p className="eyebrow">Agent → Spatial photo</p>
+            <p className="eyebrow">
+              Agent → {job.kind === "photo_style_transfer" ? "Photo style" : "Spatial photo"}
+            </p>
             <strong>{job.message}</strong>
             <span>
               {job.status === "completed"
-                ? "生成完成，正在打开空间照片"
-                : "深度估计与分层均在本机执行"}
+                ? job.kind === "photo_style_transfer"
+                  ? "生成完成，正在打开风格化结果"
+                  : "生成完成，正在打开空间照片"
+                : job.kind === "photo_style_transfer"
+                  ? "风格编码与 SDXL 生成均在本机执行"
+                  : "深度估计与分层均在本机执行"}
             </span>
           </div>
           <div className="job-progress">
@@ -429,4 +630,12 @@ async function responseError(response: Response) {
   } catch {
     return `请求失败（${response.status}）`;
   }
+}
+
+async function deleteSourceImages(apiBase: string, images: SourceImage[]) {
+  await Promise.allSettled(
+    images.map((image) =>
+      fetch(`${apiBase}/api/source-images/${image.id}`, { method: "DELETE" }),
+    ),
+  );
 }

@@ -19,6 +19,8 @@ from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
 from .models import (
     AssetPublic,
+    CapabilityInfo,
+    CapabilityRequirements,
     JobPublic,
     SourceImagePublic,
     SpatialSceneCreateResponse,
@@ -376,6 +378,8 @@ class AssetRepository:
         job_id: str,
         name: str,
         metadata: dict,
+        kind: str = "spatial_scene",
+        queued_message: str = "任务已进入本地处理队列。",
     ) -> None:
         timestamp = _now()
         with self._lock, self._connect() as connection:
@@ -383,10 +387,11 @@ class AssetRepository:
                 """
                 INSERT INTO assets
                 (id, kind, name, status, metadata_json, created_at, updated_at)
-                VALUES (?, 'spatial_scene', ?, 'processing', ?, ?, ?)
+                VALUES (?, ?, ?, 'processing', ?, ?, ?)
                 """,
                 (
                     asset_id,
+                    kind,
                     name,
                     json.dumps(metadata, ensure_ascii=False),
                     timestamp,
@@ -398,10 +403,9 @@ class AssetRepository:
                 INSERT INTO jobs
                 (id, kind, status, progress, stage, message, asset_id, error,
                  created_at, updated_at)
-                VALUES (?, 'spatial_scene', 'queued', 0, 'queued',
-                        '任务已进入本地处理队列。', ?, NULL, ?, ?)
+                VALUES (?, ?, 'queued', 0, 'queued', ?, ?, NULL, ?, ?)
                 """,
-                (job_id, asset_id, timestamp, timestamp),
+                (job_id, kind, queued_message, asset_id, timestamp, timestamp),
             )
 
     def update_job(
@@ -631,7 +635,7 @@ class SpatialSceneService:
 
     def _upgrade_existing_assets(self) -> None:
         for row in self.repository.list_asset_rows(limit=500):
-            if row["status"] != "ready":
+            if row["kind"] != "spatial_scene" or row["status"] != "ready":
                 continue
             metadata = json.loads(row["metadata_json"])
             if metadata.get("background_file") and metadata.get(
@@ -871,7 +875,7 @@ class SpatialSceneService:
 
         return AssetPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             name=row["name"],
             status=row["status"],
             width=metadata.get("width"),
@@ -882,7 +886,15 @@ class SpatialSceneService:
             background_url=url_for("background_file"),
             foreground_url=url_for("foreground_file"),
             manifest_url=url_for("manifest_file"),
+            result_url=url_for("result_file"),
+            style_reference_urls=[
+                f"{base}/{filename}"
+                for filename in metadata.get("style_files", [])
+                if isinstance(filename, str)
+            ],
             model_name=metadata.get("model_name"),
+            provider_name=metadata.get("provider_name"),
+            parameters=metadata.get("parameters", {}),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -891,7 +903,7 @@ class SpatialSceneService:
     def _job_from_row(row: sqlite3.Row) -> JobPublic:
         return JobPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             status=row["status"],
             progress=row["progress"],
             stage=row["stage"],
@@ -936,6 +948,13 @@ class SpatialSceneService:
             for key, value in metadata.items()
             if key.endswith("_file") and isinstance(value, str)
         }
+        allowed.update(
+            filename
+            for key, value in metadata.items()
+            if key.endswith("_files") and isinstance(value, list)
+            for filename in value
+            if isinstance(filename, str)
+        )
         if filename not in allowed or Path(filename).name != filename:
             raise AssetError("找不到这个资产文件。")
         path = self.asset_dir / asset_id / filename
@@ -1011,6 +1030,22 @@ def register_asset_tools(
             "message": "空间照片任务已在本机创建，正在进行深度估计。",
         }
 
+    spatial_input_schema = {
+        "type": "object",
+        "properties": {
+            "source_image_id": {
+                "type": "string",
+                "description": "系统提供的本地图片附件 ID，必须原样传入",
+            },
+            "title": {
+                "type": "string",
+                "description": "空间照片名称；用户未指定时可省略",
+                "maxLength": 80,
+            },
+        },
+        "required": ["source_image_id"],
+        "additionalProperties": False,
+    }
     registry.register(
         ToolSpec(
             "list_personal_assets",
@@ -1026,23 +1061,23 @@ def register_asset_tools(
                 "把用户已经附加到本机的 2D 图片生成可拖动视角的空间照片。"
                 "仅在上下文提供 source_image_id 且用户明确要求生成时调用"
             ),
-            {
-                "type": "object",
-                "properties": {
-                    "source_image_id": {
-                        "type": "string",
-                        "description": "系统提供的本地图片附件 ID，必须原样传入",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "空间照片名称；用户未指定时可省略",
-                        "maxLength": 80,
-                    },
-                },
-                "required": ["source_image_id"],
-                "additionalProperties": False,
-            },
+            spatial_input_schema,
             create_spatial_scene,
+            CapabilityInfo(
+                id="spatial-photo",
+                name="空间照片",
+                version="1.0.0",
+                author="Zhuofan Xie",
+                description="把单张本地图片转换为可交互的双层深度空间场景。",
+                entrypoint="create_spatial_scene",
+                input_schema=spatial_input_schema,
+                requirements=CapabilityRequirements(
+                    local_model="Depth Anything V2 Small",
+                    storage="本机 SQLite 与 backend/data/assets 私有文件目录",
+                    permissions=["读取临时本地图片", "写入本地个人资产"],
+                    downloads="首次运行约 100MB；之后可离线使用",
+                ),
+            ),
         )
     )
     registry.register(

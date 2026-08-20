@@ -34,6 +34,8 @@
   2.5D、LDI 与 3DGS 路线。
 - [空间照片端侧部署与资产格式](spatial-scene-device-deployment.md)：当前网络模型、
   图像处理、渲染流程、训练需求、性能和部署格式。
+- [图片风格化 Skill 集成说明](photo-style-transfer.md)：Provider 中立接口、Web/PC
+  工作台、Capability Manifest、存储权限和真实模型接入要求。
 
 ### 学习笔记
 

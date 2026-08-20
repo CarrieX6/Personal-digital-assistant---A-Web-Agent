@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from .models import ToolInfo
+from .models import CapabilityInfo, ToolInfo
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -23,6 +23,7 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    capability: CapabilityInfo | None = None
 
 
 class ToolRegistry:
@@ -45,6 +46,13 @@ class ToolRegistry:
         return [
             ToolInfo(name=tool.name, description=tool.description)
             for tool in self._tools.values()
+        ]
+
+    def list_capabilities(self) -> list[CapabilityInfo]:
+        return [
+            tool.capability
+            for tool in self._tools.values()
+            if tool.capability is not None
         ]
 
     def openai_schemas(self) -> list[dict[str, Any]]:
@@ -115,6 +123,7 @@ def list_capabilities(_: dict[str, Any]) -> dict[str, Any]:
             "统计字数：……",
             "现在几点？",
             "查看我的个人资产",
+            "把一张内容图按参考图进行风格化",
         ]
     }
 

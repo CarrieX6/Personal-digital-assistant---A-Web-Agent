@@ -10,7 +10,9 @@
 
 | 实验 ID | 任务 ID | 主题 | 日期 | 负责人 | 结论 | 文档 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 暂无 |  |  |  |  |  |  |
+| `STYLE-EXP-001` | `STYLE-001` | 图片风格化本地预览与工程链路 | 2026-08-12 | Ma Xianggang | API、Registry、Agent、Web/PC 与本地预览链路通过；真实 SDXL 质量待独立门禁 | [记录](style-001-local-preview.md) |
+| `STYLE-EXP-002` | `STYLE-001` | 本机 SDXL Provider 准备与失败关闭 | 2026-08-13 | Ma Xianggang | 固定模型、许可、门禁、离线加载与诊断合同通过；模型未下载，GPU 生成待显式许可 | [记录](style-002-native-sdxl-readiness.md) |
+| `STYLE-EXP-003` | `STYLE-001` | 本机 SDXL、IP-Adapter 与 LCM-LoRA GPU 冒烟 | 2026-08-13 | Ma Xianggang | 正式 CUDA 环境与两条真实推理路径通过 8 GB 工程冒烟；生产质量与稳定性仍待固定图集评测 | [记录](style-003-native-sdxl-gpu-smoke.md) |
 
 ## 规则
 

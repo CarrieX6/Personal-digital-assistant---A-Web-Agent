@@ -22,6 +22,7 @@ test("server-renders the personal Agent Lab shell", async () => {
   assert.match(html, /<title>Agent Lab · 个人数字助手<\/title>/i);
   assert.match(html, /Agent Lab/);
   assert.match(html, /让一张平面照片拥有空间视角/);
+  assert.match(html, /图片风格化/);
   assert.match(html, /虚拟试衣/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });

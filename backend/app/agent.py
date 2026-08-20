@@ -73,8 +73,25 @@ class DemoPlanner:
             r"source_image_id=([A-Za-z0-9-]{1,100})",
             message,
         )
+        style_matches = re.findall(
+            r"style_image_id=([A-Za-z0-9-]{1,100})",
+            message,
+        )
 
-        if source_match and any(
+        if source_match and style_matches and any(
+            keyword in lowered
+            for keyword in ("图片风格", "风格化", "风格迁移", "style transfer")
+        ):
+            calls = [
+                ToolCall(
+                    name="create_photo_style_transfer",
+                    arguments={
+                        "content_image_id": source_match.group(1),
+                        "style_image_ids": style_matches,
+                    },
+                )
+            ]
+        elif source_match and any(
             keyword in lowered
             for keyword in ("空间照片", "空间场景", "可动视角", "2d", "视角")
         ):
@@ -146,11 +163,16 @@ class DemoPlanner:
                     )
                     sections.append("你的本地个人资产：\n" + items)
                 else:
-                    sections.append("个人资产库还是空的，可以先生成一张空间照片。")
+                    sections.append("个人资产库还是空的，可以先生成空间照片或风格化图片。")
             elif name == "create_spatial_scene":
                 sections.append(
                     "空间照片任务已创建，正在本机进行深度估计和分层处理。"
                     "完成后会自动打开可交互视角。"
+                )
+            elif name == "create_photo_style_transfer":
+                sections.append(
+                    "图片风格化任务已创建，正在按参考图迁移色彩与纹理。"
+                    "完成后会写入本地个人资产库。"
                 )
             elif name == "list_capabilities":
                 examples = "\n".join(f"- {item}" for item in output["examples"])
@@ -189,6 +211,7 @@ class AgentRunner:
         message: str,
         *,
         source_image_context: dict[str, Any] | None = None,
+        style_image_contexts: list[dict[str, Any]] | None = None,
     ) -> AgentRunResponse:
         run_started = time.perf_counter()
         steps: list[TraceStep] = []
@@ -202,6 +225,21 @@ class AgentRunner:
                 f"dimensions={source_image_context['width']}x"
                 f"{source_image_context['height']}\n"
                 "附件原图保留在本机，模型不可查看图片内容。"
+            )
+        if style_image_contexts:
+            style_lines = "\n".join(
+                (
+                    f"style_image_id={item['id']} "
+                    f"original_name={item['original_name']} "
+                    f"dimensions={item['width']}x{item['height']}"
+                )
+                for item in style_image_contexts
+            )
+            planner_message = (
+                f"{planner_message}\n\n"
+                "[系统提供的本地风格参考图附件]\n"
+                f"{style_lines}\n"
+                "参考图原图保留在本机，模型不可查看图片内容。"
             )
 
         plan_started = time.perf_counter()

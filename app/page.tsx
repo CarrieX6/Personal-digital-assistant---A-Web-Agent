@@ -6,6 +6,7 @@ import {
   HealthInfo,
 } from "./components/AgentConsole";
 import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
+import { PhotoStyleStudio } from "./components/PhotoStyleStudio";
 import { SpatialStudio } from "./components/SpatialStudio";
 
 type ToolInfo = {
@@ -13,7 +14,7 @@ type ToolInfo = {
   description: string;
 };
 
-type View = "spatial" | "agent";
+type View = "spatial" | "style" | "agent";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://127.0.0.1:8000";
@@ -24,6 +25,7 @@ const fallbackTools: ToolInfo[] = [
   { name: "current_time", description: "当前时间" },
   { name: "list_personal_assets", description: "个人资产" },
   { name: "create_spatial_scene", description: "生成空间照片" },
+  { name: "create_photo_style_transfer", description: "图片风格化" },
 ];
 
 export default function Home() {
@@ -33,6 +35,9 @@ export default function Home() {
   const [backendReady, setBackendReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [requestedSpatialAssetId, setRequestedSpatialAssetId] = useState<
+    string | null
+  >(null);
+  const [requestedStyleAssetId, setRequestedStyleAssetId] = useState<
     string | null
   >(null);
 
@@ -69,7 +74,7 @@ export default function Home() {
         <div className="brand">
           <span className="brand-mark">A</span>
           <span>Agent Lab</span>
-          <span className="version">Personal · 0.4</span>
+          <span className="version">Personal · 0.5</span>
         </div>
         <div className="topbar-actions">
           <div className={`connection ${backendReady ? "is-ready" : ""}`}>
@@ -96,7 +101,7 @@ export default function Home() {
             <p className="eyebrow">Personal AI studio</p>
             <h1>个人数字助手</h1>
             <p className="sidebar-copy">
-              一套本地优先的生成框架，逐步承载空间照片、虚拟试衣与桌面宠物。
+              一套本地优先的生成框架，逐步承载空间照片、图片风格化与更多个人内容能力。
             </p>
           </div>
 
@@ -112,15 +117,26 @@ export default function Home() {
                 <small>2D → 可动视角</small>
               </div>
             </button>
-            <button type="button" disabled>
+            <button
+              type="button"
+              className={activeView === "style" ? "active" : ""}
+              onClick={() => setActiveView("style")}
+            >
               <span>02</span>
+              <div>
+                <strong>图片风格化</strong>
+                <small>参考图 → 风格迁移</small>
+              </div>
+            </button>
+            <button type="button" disabled>
+              <span>03</span>
               <div>
                 <strong>虚拟试衣</strong>
                 <small>下一阶段 · 先 2D</small>
               </div>
             </button>
             <button type="button" disabled>
-              <span>03</span>
+              <span>04</span>
               <div>
                 <strong>桌面宠物</strong>
                 <small>规划中 · 3D 动作</small>
@@ -131,7 +147,7 @@ export default function Home() {
               className={activeView === "agent" ? "active" : ""}
               onClick={() => setActiveView("agent")}
             >
-              <span>04</span>
+              <span>05</span>
               <div>
                 <strong>Agent 控制台</strong>
                 <small>{availableTools.length} 个本地工具</small>
@@ -143,7 +159,7 @@ export default function Home() {
             <span className="privacy-mark" aria-hidden="true" />
             <div>
               <strong>本地优先</strong>
-              <p>图片与生成物保存在 backend/data，不上传第三方服务。</p>
+              <p>默认图片与生成物仅保存在 backend/data；远端 Provider 必须显式启用。</p>
             </div>
           </div>
         </aside>
@@ -156,6 +172,13 @@ export default function Home() {
               onClick={() => setActiveView("spatial")}
             >
               空间照片
+            </button>
+            <button
+              type="button"
+              className={activeView === "style" ? "active" : ""}
+              onClick={() => setActiveView("style")}
+            >
+              图片风格
             </button>
             <button
               type="button"
@@ -172,6 +195,12 @@ export default function Home() {
               onConnectionChange={setBackendReady}
               requestedAssetId={requestedSpatialAssetId}
             />
+          ) : activeView === "style" ? (
+            <PhotoStyleStudio
+              apiBase={API_BASE}
+              onConnectionChange={setBackendReady}
+              requestedAssetId={requestedStyleAssetId}
+            />
           ) : (
             <AgentConsole
               apiBase={API_BASE}
@@ -180,6 +209,10 @@ export default function Home() {
               onSpatialSceneReady={(assetId) => {
                 setRequestedSpatialAssetId(assetId);
                 setActiveView("spatial");
+              }}
+              onPhotoStyleReady={(assetId) => {
+                setRequestedStyleAssetId(assetId);
+                setActiveView("style");
               }}
             />
           )}

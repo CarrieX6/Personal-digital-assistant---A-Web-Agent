@@ -140,6 +140,33 @@ permissions:
   local_files: capability-sandbox
 ```
 
+运行时还注册图片风格化能力：
+
+```yaml
+id: photo-style-transfer
+version: 1.2.0
+author: Ma Xianggang
+entrypoint: create_photo_style_transfer
+inputs:
+  - content-image
+  - style-images: 1..3
+outputs:
+  - styled-image
+runtime:
+  default_provider: local-preview
+  native_provider: sdxl-local
+  service_provider: pic-style-http
+  unload_after_generation: true
+permissions:
+  local_files: personal-asset-store
+  network: model-preparation-or-configured-provider-only
+```
+
+当前运行时清单可从 `GET /api/capabilities` 查询；清单与实际 Tool Schema 由同一注册项
+生成，避免文档能力和 Agent 可调用能力不一致。`sdxl-local` 只在准备阶段访问模型源，
+推理使用固定 revision、许可证明和 model lock 校验后的本地文件；单 Worker 串行生成，
+使用 model CPU offload 与 VAE tiling 适配 8 GB 显存。
+
 安装器未来需要校验版本、哈希、许可、依赖冲突、磁盘占用和设备能力。模型下载必须
 由用户明确选择，不能由聊天中的任意文本静默触发。
 
@@ -208,7 +235,7 @@ sequenceDiagram
 | Agent Orchestrator | `backend/app/agent.py` | 基础完成 |
 | Capability Registry | `backend/app/tools.py` | 基础完成 |
 | LLM Planner | `backend/app/llm.py` | 基础完成 |
-| Job Queue | `backend/app/assets.py` | 空间照片专用 |
+| Job Queue | `backend/app/assets.py`、`backend/app/style_transfer.py` | 空间照片与图片风格化共用资产/任务底座 |
 | Asset Store | `backend/app/assets.py` | 基础完成 |
 | Web Control UI | `app/components/AgentConsole.tsx` | 完成 |
 | Channel Gateway | 尚无 | 待开发 |

@@ -22,6 +22,9 @@ SYSTEM_PROMPT = """你是 Agent Lab 的工具调用规划器。
 6. 如果系统提供本地图片附件 ID，且用户要求生成空间照片，调用
    create_spatial_scene 并原样传入 source_image_id。模型不可查看附件原图，
    不要推测图片内容。
+7. 如果系统同时提供内容图 source_image_id 和一至三个 style_image_id，且用户要求
+   图片风格化，调用 create_photo_style_transfer，把前者作为 content_image_id，
+   后者组成 style_image_ids；不要编造或交换这些 ID。
 """
 
 

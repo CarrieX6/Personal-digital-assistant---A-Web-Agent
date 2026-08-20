@@ -10,6 +10,7 @@ class AgentRunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=100)
     source_image_id: str | None = Field(default=None, max_length=100)
+    style_image_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 class ToolCall(BaseModel):
@@ -39,6 +40,25 @@ class AgentRunResponse(BaseModel):
 class ToolInfo(BaseModel):
     name: str
     description: str
+
+
+class CapabilityRequirements(BaseModel):
+    local_model: str
+    storage: str
+    permissions: list[str]
+    downloads: str
+
+
+class CapabilityInfo(BaseModel):
+    id: str
+    name: str
+    version: str
+    author: str
+    description: str
+    entrypoint: str
+    async_task: bool = True
+    input_schema: dict[str, Any]
+    requirements: CapabilityRequirements
 
 
 class HealthResponse(BaseModel):
@@ -98,7 +118,7 @@ JobStatus = Literal["queued", "running", "completed", "failed"]
 
 class AssetPublic(BaseModel):
     id: str
-    kind: Literal["spatial_scene"]
+    kind: Literal["spatial_scene", "photo_style_transfer"]
     name: str
     status: AssetStatus
     width: int | None = None
@@ -109,14 +129,18 @@ class AssetPublic(BaseModel):
     background_url: str | None = None
     foreground_url: str | None = None
     manifest_url: str | None = None
+    result_url: str | None = None
+    style_reference_urls: list[str] = Field(default_factory=list)
     model_name: str | None = None
+    provider_name: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
 
 class JobPublic(BaseModel):
     id: str
-    kind: Literal["spatial_scene"]
+    kind: Literal["spatial_scene", "photo_style_transfer"]
     status: JobStatus
     progress: int = Field(ge=0, le=100)
     stage: str
@@ -130,6 +154,18 @@ class JobPublic(BaseModel):
 class SpatialSceneCreateResponse(BaseModel):
     asset: AssetPublic
     job: JobPublic
+
+
+class PhotoStyleCreateResponse(BaseModel):
+    asset: AssetPublic
+    job: JobPublic
+
+
+class PhotoStyleProviderStatus(BaseModel):
+    name: str
+    model_name: str
+    ready: bool | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceImagePublic(BaseModel):

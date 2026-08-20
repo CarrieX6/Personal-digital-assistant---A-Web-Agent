@@ -18,9 +18,9 @@ Agent 理解任务、读取记忆并选择本地功能
 图片 / 视频 / 文件 / 安全预览链接返回聊天窗口
 ```
 
-当前版本已经完成 Web Agent、模型供应商配置、工具调用、本地异步任务、个人资产库
-和空间照片功能。这些模块将作为未来“功能库”的第一批能力，而不是彼此孤立的
-Demo。
+当前工作分支已接入 Web Agent、模型供应商配置、工具调用、Capability Registry、
+本地异步任务、个人资产库、空间照片和图片风格化功能。这些模块将作为未来
+“功能库”的第一批能力，而不是彼此孤立的 Demo。
 
 ## 项目状态
 
@@ -28,9 +28,10 @@ Demo。
 | --- | --- | --- |
 | Web Agent 控制台 | 已完成 | 展示规划、工具调用和最终回答 |
 | LLM 供应商配置 | 已完成 | DeepSeek、OpenAI、Qwen、GLM、自定义兼容接口 |
-| 本地工具注册表 | 已完成 | 文本工具、资产查询、任务查询、空间照片生成 |
+| Capability Registry | 基础完成 | 工具 Schema、运行时 Manifest、作者及运行要求查询 |
 | 本地资产与异步任务 | 已完成 | SQLite 索引、文件资产、任务进度 |
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
+| 图片风格化 | MVP 待评审 | 1–3 张参考图、本机 SDXL + IP-Adapter、本地预览与 pic-style HTTP 适配 |
 | 外部聊天入口 | 未实现 | 首期计划接入飞书长连接 |
 | 结果回传适配 | 未实现 | 图片、短视频、文件、交互预览链接 |
 | 长期记忆 | 未实现 | 用户、会话、任务和偏好记忆 |
@@ -66,7 +67,8 @@ Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示
 - 当前时间和能力列表；
 - 查询本地个人资产；
 - 查询异步任务状态；
-- 接收本地图片资产 ID，创建空间照片任务。
+- 接收本地图片资产 ID，创建空间照片任务；
+- 接收内容图和一至三张参考图资产 ID，创建图片风格化任务。
 
 图片原始字节不会发给 DeepSeek、Qwen 或 GLM。上传图片先暂存在本机，LLM 只看到
 随机资产 ID、文件名和尺寸；任务创建后临时附件会被删除。
@@ -84,6 +86,19 @@ Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示
 
 它是低成本的 2.5D MVP，不是完整 3D 重建。实现细节见
 [空间照片端侧部署与资产格式](docs/spatial-scene-device-deployment.md)。
+
+### 3. 图片风格化
+
+图片风格化工作台接收一张内容图和一至三张风格参考图，提供布局模式、质量档位、
+风格强度、内容保持与细节保持控制。任务使用与空间照片相同的异步任务和本地个人
+资产底座，并在 `GET /api/capabilities` 注册 `photo-style-transfer` Manifest。
+
+默认 `local-preview` Provider 无需下载模型，适合 CPU 开发和回归测试。真实生成既可用
+`sdxl-local` 在本机隔离进程运行固定版本的 SDXL + IP-Adapter，也可通过 `pic-style-http`
+适配 [`frogi-m/pic-style`](https://github.com/frogi-m/pic-style) 服务。启用本机路径前必须
+单独完成约 9.84 GiB 模型下载、许可证确认和 8 GB 显存预检。桌面运行默认使用单次隔离
+进程，任务结束后由系统回收约 10 GB 权重；Agent 控制台可一次选择内容图和最多三张参考图。
+详见[图片风格化 Skill 集成说明](docs/photo-style-transfer.md)。
 
 ## 外部聊天控制的实现路线
 
@@ -129,6 +144,7 @@ app/
   components/
     AgentConsole.tsx          Web Agent、图片附件、任务进度
     ModelSettingsDialog.tsx   模型供应商和密钥配置
+    PhotoStyleStudio.tsx      图片风格化与结果资产库
     SpatialStudio.tsx         空间照片生成与个人资产库
     SpatialViewer.tsx         低功耗 Three.js 视差 Viewer
 backend/
@@ -137,6 +153,10 @@ backend/
     llm.py                    OpenAI 兼容 Tool Calling
     tools.py                  工具注册表
     assets.py                 深度模型、任务、资产与文件安全
+    style_transfer.py         图片风格化 Provider、服务与 Capability Manifest
+    sdxl_style_provider.py    本机 SDXL + IP-Adapter 推理实现
+    sdxl_worker.py            单次隔离模型进程与 UTF-8 进度通道
+    style_model_manifest.py   固定模型清单、许可与完整性校验
     settings.py               模型配置与密钥安全存储
     main.py                   FastAPI 路由
   tests/                      后端测试
@@ -172,6 +192,32 @@ uvicorn backend.app.main:app --reload --port 8000
 API 文档：`http://127.0.0.1:8000/docs`
 
 首次生成空间照片会下载约 100MB 的深度模型，之后可以离线推理。
+
+图片风格化默认无需模型下载。若要连接已部署的真实 `pic-style` 服务，请复制
+`.env.example` 中的 `PHOTO_STYLE_*` 配置；API Key 只填写在本机 `.env`，不要提交。
+
+本机真实 SDXL 路径必须显式准备：
+
+先安装与当前 NVIDIA 驱动兼容的 CUDA 版 PyTorch，并确认
+`torch.cuda.is_available()` 为 `True`，再安装其余可选依赖。RTX 4060 Laptop 的已验证
+组合为 PyTorch 2.11.0、Torchvision 0.26.0 与 CUDA 12.8 wheel：
+
+```powershell
+python -m pip install torch==2.11.0 torchvision==0.26.0 `
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r backend/requirements-gpu.txt
+python backend/scripts/prepare_photo_style_models.py --plan
+# 审阅命令列出的全部许可证 URL 后，再由操作者明确执行：
+python backend/scripts/prepare_photo_style_models.py `
+  --download --accept-model-licenses --verify-checksums
+```
+
+确认 CUDA 版 PyTorch 可用后，在本机 `.env` 中设置
+`PHOTO_STYLE_PROVIDER=sdxl-local`。Web 工作台会通过
+`GET /api/photo-style-transfers/provider` 显示模型是否就绪。模型目录、lock、权重、缓存
+和生成样本均被排除在 Git 之外；运行时强制离线加载，绝不自动下载。默认的
+`PHOTO_STYLE_UNLOAD_AFTER_GENERATION=true` 会在隔离子进程退出时释放模型内存；连续
+批处理可显式改为 `false`，以常驻内存换取后续任务更快启动。
 
 ### 前端
 
@@ -221,7 +267,8 @@ pnpm run lint
 pnpm run test
 ```
 
-自动测试使用假的深度估计器和假的 LLM 响应，不下载模型、不消耗 Token。
+自动测试使用假的深度估计器、确定性的本地风格预览 Provider 和假的 LLM 响应，
+不下载模型、不消耗 Token。
 
 ## 协作约定
 
@@ -270,6 +317,7 @@ Use $team-git-workflow in English to prepare this change for review
 - [外部聊天控制调研](docs/research/external-chat-control.md)
 - [Apple 空间场景技术路线核对](docs/apple-spatial-scene-research.md)
 - [空间照片端侧部署与资产格式](docs/spatial-scene-device-deployment.md)
+- [图片风格化 Skill 集成说明](docs/photo-style-transfer.md)
 
 ---
 

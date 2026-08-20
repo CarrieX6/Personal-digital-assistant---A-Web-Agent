@@ -19,6 +19,12 @@ from backend.app.settings import (
     SettingsService,
     StoredLLMSettings,
 )
+from backend.app.style_transfer import (
+    LocalColorStyleProvider,
+    PhotoStyleService,
+    PicStyleHttpProvider,
+    StyleParameters,
+)
 
 
 def assert_private_file_permissions(path: Path) -> None:
@@ -91,7 +97,7 @@ def test_health_and_tools(tmp_path: Path) -> None:
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["llm_configured"] is False
-    assert health.json()["tool_count"] == 7
+    assert health.json()["tool_count"] == 8
     assert tools.status_code == 200
     assert {tool["name"] for tool in tools.json()} >= {
         "text_stats",
@@ -99,8 +105,23 @@ def test_health_and_tools(tmp_path: Path) -> None:
         "current_time",
         "list_personal_assets",
         "create_spatial_scene",
+        "create_photo_style_transfer",
         "get_job_status",
     }
+    capabilities = client.get("/api/capabilities")
+    assert capabilities.status_code == 200
+    manifests = {item["id"]: item for item in capabilities.json()}
+    assert manifests["photo-style-transfer"]["author"] == "Ma Xianggang"
+    assert manifests["photo-style-transfer"]["entrypoint"] == (
+        "create_photo_style_transfer"
+    )
+    assert "9.84 GiB" in manifests["photo-style-transfer"]["requirements"][
+        "downloads"
+    ]
+    provider_status = client.get("/api/photo-style-transfers/provider")
+    assert provider_status.status_code == 200
+    assert provider_status.json()["name"] == "local-preview"
+    assert provider_status.json()["ready"] is True
 
 
 def test_analysis_runs_multiple_tools_and_writes_trace(tmp_path: Path) -> None:
@@ -551,4 +572,202 @@ def test_spatial_scene_rejects_invalid_upload(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert "图片" in response.json()["detail"]
+    spatial.close()
+
+
+def test_photo_style_pipeline_and_manifest(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+
+    def png(color: str, size: tuple[int, int] = (320, 224)) -> bytes:
+        buffer = BytesIO()
+        Image.new("RGB", size, color).save(buffer, "PNG")
+        return buffer.getvalue()
+
+    created = client.post(
+        "/api/photo-style-transfers",
+        files=[
+            ("content_file", ("portrait.png", png("#b88d72"), "image/png")),
+            ("style_files", ("style-a.png", png("#315a84"), "image/png")),
+            ("style_files", ("style-b.png", png("#c49a44"), "image/png")),
+        ],
+        data={
+            "title": "蓝金肖像",
+            "mode": "preserve_layout",
+            "quality": "preview",
+            "style_strength": "0.8",
+            "content_strength": "0.85",
+            "detail_strength": "0.7",
+            "seed": "1701",
+        },
+    )
+
+    assert created.status_code == 202
+    body = created.json()
+    assert body["asset"]["kind"] == "photo_style_transfer"
+    style.wait_for_idle()
+    job = client.get(f"/api/jobs/{body['job']['id']}").json()
+    asset = client.get(f"/api/assets/{body['asset']['id']}").json()
+    assert job["status"] == "completed"
+    assert asset["status"] == "ready"
+    assert asset["provider_name"] == "local-preview"
+    assert asset["parameters"]["seed"] == 1701
+    assert len(asset["style_reference_urls"]) == 2
+    assert client.get(asset["result_url"]).status_code == 200
+    for reference_url in asset["style_reference_urls"]:
+        assert client.get(reference_url).status_code == 200
+    manifest = client.get(asset["manifest_url"]).json()
+    assert manifest["schema"] == "personal-agent.photo-style-transfer"
+    assert manifest["author"] == "Ma Xianggang"
+    assert manifest["provider_metadata"]["model_download_required"] is False
+    style.close()
+    spatial.close()
+
+
+def test_pic_style_http_provider_matches_reference_contract() -> None:
+    requests: list[httpx.Request] = []
+    result_buffer = BytesIO()
+    Image.new("RGB", (96, 64), "#527aa3").save(result_buffer, "PNG")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/v1/assets":
+            return httpx.Response(201, json={"asset_id": f"asset-{len(requests)}"})
+        if request.method == "POST" and request.url.path.endswith("/jobs"):
+            payload = json.loads(request.content)
+            assert payload["content_image"]["asset_id"] == "asset-1"
+            assert payload["style_images"][0]["image"]["asset_id"] == "asset-2"
+            assert payload["mode"] == "preserve_layout"
+            assert payload["num_outputs"] == 1
+            return httpx.Response(202, json={"job_id": "upstream-job"})
+        if request.method == "GET" and request.url.path.endswith(
+            "/jobs/upstream-job"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "progress": 100,
+                    "stage": "completed",
+                    "result": {
+                        "outputs": [{"url": "/v1/assets/result.png"}],
+                        "provider": "sdxl_ip_adapter_8gb_v1",
+                        "provider_version": "1.0.0",
+                        "model_versions": {"base": "test-checkpoint"},
+                        "normalized_parameters": {"seed": 1701},
+                    },
+                },
+            )
+        if request.method == "GET" and request.url.path == "/v1/assets/result.png":
+            return httpx.Response(
+                200,
+                content=result_buffer.getvalue(),
+                headers={"content-type": "image/png"},
+            )
+        return httpx.Response(404)
+
+    model_client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = PicStyleHttpProvider(
+        "http://pic-style.local",
+        api_key="test-only-key",
+        tenant_id="test-tenant",
+        client=model_client,
+    )
+    result = provider.stylize(
+        Image.new("RGB", (128, 96), "#b58a6d"),
+        [Image.new("RGB", (128, 96), "#315a84")],
+        StyleParameters(quality="preview", seed=1701),
+        lambda *_: None,
+    )
+
+    assert result.image.size == (96, 64)
+    assert result.model_name == "sdxl_ip_adapter_8gb_v1"
+    assert result.metadata["normalized_parameters"]["seed"] == 1701
+    assert all(request.headers["X-Tenant-ID"] == "test-tenant" for request in requests)
+    assert all(request.headers["X-API-Key"] == "test-only-key" for request in requests)
+    provider.close()
+    model_client.close()
+
+
+def test_agent_creates_photo_style_from_local_attachments(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+
+    def stage(name: str, color: str) -> dict:
+        buffer = BytesIO()
+        Image.new("RGB", (256, 192), color).save(buffer, "PNG")
+        response = client.post(
+            "/api/source-images",
+            files={"file": (name, buffer.getvalue(), "image/png")},
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    content = stage("content.png", "#b78b6c")
+    reference = stage("reference.png", "#3d688c")
+    response = client.post(
+        "/api/agent/run",
+        json={
+            "message": "把内容图按参考图进行图片风格化",
+            "source_image_id": content["id"],
+            "style_image_ids": [reference["id"]],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    tool_step = next(
+        step
+        for step in body["steps"]
+        if step["label"] == "调用 create_photo_style_transfer"
+    )
+    assert tool_step["output"]["kind"] == "photo_style_transfer"
+    assert not (spatial.source_image_dir / content["id"]).exists()
+    assert not (spatial.source_image_dir / reference["id"]).exists()
+    style.wait_for_idle()
+    assert client.get(f"/api/jobs/{tool_step['output']['job_id']}").json()[
+        "status"
+    ] == "completed"
+    style.close()
+    spatial.close()
+
+
+def test_photo_style_rejects_missing_reference(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+    buffer = BytesIO()
+    Image.new("RGB", (128, 128), "#708090").save(buffer, "PNG")
+    response = client.post(
+        "/api/photo-style-transfers",
+        files={"content_file": ("content.png", buffer.getvalue(), "image/png")},
+    )
+    assert response.status_code == 422
+    style.close()
     spatial.close()

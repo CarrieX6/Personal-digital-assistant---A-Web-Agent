@@ -1,0 +1,115 @@
+{
+  "version": "personal_agent_model_manifest_v1",
+  "provider": "sdxl_ip_adapter_8gb_v1",
+  "source_repository": "https://github.com/frogi-m/pic-style",
+  "source_commit": "c8e0b641f7f334faf73167211b5f0a8033e3b1dc",
+  "source_model_manifest_fingerprint": "4b42cfcbd6febc8c79a6970dcb3ff580b080d1a53aaaf4b908ab0a77c38a23d8",
+  "runtime_downloads_allowed": false,
+  "base": {
+    "id": "stabilityai/stable-diffusion-xl-base-1.0",
+    "revision": "462165984030d82259a11f4367a4eed129e94a7b",
+    "local_path": "sdxl-base-1.0",
+    "source_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0",
+    "license": "openrail++",
+    "license_url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/462165984030d82259a11f4367a4eed129e94a7b/LICENSE.md",
+    "requires_license_acceptance": true,
+    "estimated_download_bytes": 6941210313,
+    "variant": "fp16",
+    "allow_patterns": [
+      "LICENSE.md",
+      "README.md",
+      "model_index.json",
+      "scheduler/scheduler_config.json",
+      "text_encoder/config.json",
+      "text_encoder/model.fp16.safetensors",
+      "text_encoder_2/config.json",
+      "text_encoder_2/model.fp16.safetensors",
+      "tokenizer/merges.txt",
+      "tokenizer/special_tokens_map.json",
+      "tokenizer/tokenizer_config.json",
+      "tokenizer/vocab.json",
+      "tokenizer_2/merges.txt",
+      "tokenizer_2/special_tokens_map.json",
+      "tokenizer_2/tokenizer_config.json",
+      "tokenizer_2/vocab.json",
+      "unet/config.json",
+      "unet/diffusion_pytorch_model.fp16.safetensors",
+      "vae/config.json",
+      "vae/diffusion_pytorch_model.fp16.safetensors"
+    ],
+    "required_files": [
+      {"path": "LICENSE.md", "size_bytes": 14109},
+      {"path": "README.md", "size_bytes": 8668},
+      {"path": "model_index.json", "size_bytes": 609},
+      {"path": "scheduler/scheduler_config.json", "size_bytes": 479},
+      {"path": "text_encoder/config.json", "size_bytes": 565},
+      {"path": "text_encoder/model.fp16.safetensors", "size_bytes": 246144152, "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"},
+      {"path": "text_encoder_2/config.json", "size_bytes": 575},
+      {"path": "text_encoder_2/model.fp16.safetensors", "size_bytes": 1389382176, "sha256": "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4"},
+      {"path": "tokenizer/merges.txt", "size_bytes": 524619},
+      {"path": "tokenizer/special_tokens_map.json", "size_bytes": 472},
+      {"path": "tokenizer/tokenizer_config.json", "size_bytes": 737},
+      {"path": "tokenizer/vocab.json", "size_bytes": 1059962},
+      {"path": "tokenizer_2/merges.txt", "size_bytes": 524619},
+      {"path": "tokenizer_2/special_tokens_map.json", "size_bytes": 460},
+      {"path": "tokenizer_2/tokenizer_config.json", "size_bytes": 725},
+      {"path": "tokenizer_2/vocab.json", "size_bytes": 1059962},
+      {"path": "unet/config.json", "size_bytes": 1680},
+      {"path": "unet/diffusion_pytorch_model.fp16.safetensors", "size_bytes": 5135149760, "sha256": "83e012a805b84c7ca28e5646747c90a243c65c8ba4f070e2d7ddc9d74661e139"},
+      {"path": "vae/config.json", "size_bytes": 642},
+      {"path": "vae/diffusion_pytorch_model.fp16.safetensors", "size_bytes": 167335342, "sha256": "bcb60880a46b63dea58e9bc591abe15f8350bde47b405f9c38f4be70c6161e68"}
+    ]
+  },
+  "ip_adapter": {
+    "id": "h94/IP-Adapter",
+    "revision": "018e402774aeeddd60609b4ecdb7e298259dc729",
+    "local_path": "ip-adapter",
+    "source_url": "https://huggingface.co/h94/IP-Adapter",
+    "license": "apache-2.0",
+    "license_url": "https://huggingface.co/h94/IP-Adapter/blob/018e402774aeeddd60609b4ecdb7e298259dc729/README.md",
+    "requires_license_acceptance": true,
+    "estimated_download_bytes": 3226768163,
+    "subfolder": "sdxl_models",
+    "weight_name": "ip-adapter_sdxl_vit-h.safetensors",
+    "image_encoder_subfolder": "models/image_encoder",
+    "allow_patterns": [
+      "README.md",
+      "models/image_encoder/config.json",
+      "models/image_encoder/model.safetensors",
+      "sdxl_models/ip-adapter_sdxl_vit-h.safetensors"
+    ],
+    "required_files": [
+      {"path": "README.md", "size_bytes": 3091},
+      {"path": "models/image_encoder/config.json", "size_bytes": 560},
+      {"path": "models/image_encoder/model.safetensors", "size_bytes": 2528373448, "sha256": "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030"},
+      {"path": "sdxl_models/ip-adapter_sdxl_vit-h.safetensors", "size_bytes": 698391064, "sha256": "ebf05d918348aec7abb02a5e9ecef77e0aaea6914a5c4ea13f50d45eb1681831"}
+    ]
+  },
+  "preview_accelerator": {
+    "id": "latent-consistency/lcm-lora-sdxl",
+    "revision": "a18548dd4956b174ec5b0d78d340c8dae0a129cd",
+    "local_path": "lcm-lora-sdxl",
+    "source_url": "https://huggingface.co/latent-consistency/lcm-lora-sdxl",
+    "license": "openrail++",
+    "license_url": "https://huggingface.co/latent-consistency/lcm-lora-sdxl/blob/a18548dd4956b174ec5b0d78d340c8dae0a129cd/README.md",
+    "requires_license_acceptance": true,
+    "estimated_download_bytes": 393864512,
+    "weight_name": "pytorch_lora_weights.safetensors",
+    "allow_patterns": [
+      "README.md",
+      "pytorch_lora_weights.safetensors"
+    ],
+    "required_files": [
+      {"path": "README.md", "size_bytes": 9288},
+      {"path": "pytorch_lora_weights.safetensors", "size_bytes": 393855224, "sha256": "a764e6859b6e04047cd761c08ff0cee96413a8e004c9f07707530cd776b19141"}
+    ]
+  },
+  "runtime": {
+    "precision": "fp16",
+    "attention_backend": "sdpa",
+    "vae_tiling": true,
+    "cpu_offload": "model",
+    "max_concurrency": 1,
+    "local_files_only": true
+  }
+}
