@@ -1,7 +1,7 @@
 # 调研与实现中心
 
 作者：**Zhuofan Xie**
-更新日期：2026-08-13
+更新日期：2026-08-20
 
 本文件是项目技术调研与实现进度的统一入口。它回答四个问题：
 
@@ -159,7 +159,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `STYLE-001` | P2 | 如何把一至三张参考图的风格安全迁移到内容图，并通过 Web/PC Agent 稳定调用 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang（2026-08-12 开始） | [实现说明](photo-style-transfer.md)；[本地预览实验](experiments/style-001-local-preview.md)；[Native SDXL 准备实验](experiments/style-002-native-sdxl-readiness.md)；[本机 GPU 冒烟与内存复验](experiments/style-003-native-sdxl-gpu-smoke.md)；参考 `frogi-m/pic-style@c8e0b641`；分支 `feature/pic-style`；API/Agent/Registry/Web、本机离线 SDXL + IP-Adapter、可选 LCM-LoRA、Agent 多图入口与隔离进程内存回收均通过工程验证，生产质量、固定图集和十次稳定性仍待验收；无需项目级 ADR（沿用现有本地资产与任务架构）；Issue/PR 尚未创建 |
+| `STYLE-001` | P2 | 如何把一至三张参考图的风格安全迁移到内容图，并通过 Web/PC Agent 稳定调用 | `🟠 初步结论` | `👀 评审中` | Ma Xianggang（2026-08-12 开始） | [实现说明](photo-style-transfer.md)；[本地预览实验](experiments/style-001-local-preview.md)；[Native SDXL 准备实验](experiments/style-002-native-sdxl-readiness.md)；[本机 GPU 冒烟与内存复验](experiments/style-003-native-sdxl-gpu-smoke.md)；参考 `frogi-m/pic-style@c8e0b641`；分支 `feature/pic-style`；[Draft PR #5](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/5)；API/Agent/Registry/Web、本机离线 SDXL + IP-Adapter、可选 LCM-LoRA、Agent 多图入口与隔离进程内存回收均通过工程验证，生产质量、固定图集和十次稳定性仍待验收；无需项目级 ADR（沿用现有本地资产与任务架构） |
 
 ## 10. 虚拟宠物
 
