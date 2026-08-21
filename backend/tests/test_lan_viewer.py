@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from backend.app.lan_viewer import LanViewerService, ViewerLinkError
+from backend.app.lan_viewer import (
+    LanViewerService,
+    ViewerLinkError,
+    _lan_candidate_rank,
+)
 from backend.tests.test_api import build_test_spatial
 
 
@@ -38,3 +42,15 @@ def test_signed_lan_viewer_token_and_mobile_page(tmp_path: Path) -> None:
     finally:
         service.close()
         spatial.close()
+
+
+def test_lan_candidate_prefers_physical_private_network_over_vpn() -> None:
+    candidates = [
+        ("utun5", "10.8.0.3"),
+        ("en10", "192.168.0.100"),
+        ("bridge0", "172.20.0.1"),
+    ]
+
+    selected = min(candidates, key=_lan_candidate_rank)
+
+    assert selected == ("en10", "192.168.0.100")

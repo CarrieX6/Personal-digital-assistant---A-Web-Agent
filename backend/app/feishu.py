@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol
 from lark_channel import (
     FeishuChannel,
     KeepaliveConfig,
+    LogLevel,
     OutboundConfig,
     PolicyConfig,
     RetryConfig,
@@ -356,6 +357,7 @@ class FeishuChannelRuntime:
                     app_id=settings.app_id,
                     app_secret=app_secret,
                     domain=FeishuSettingsService.domain_urls[settings.domain],
+                    log_level=LogLevel.WARNING,
                     transport=TransportConfig(
                         kind="ws",
                         auto_reconnect=True,

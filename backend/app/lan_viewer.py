@@ -4,10 +4,13 @@ import base64
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import mimetypes
 import os
+import re
 import socket
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,7 +34,7 @@ class LanViewerService:
         *,
         secret_path: Path,
         bind_host: str = "0.0.0.0",
-        port: int = 8765,
+        port: int = 8766,
         ttl_seconds: int = 12 * 60 * 60,
         public_base_url: str | None = None,
     ) -> None:
@@ -57,7 +60,7 @@ class LanViewerService:
             assets,
             secret_path=data_path / "viewer-secret.key",
             bind_host=os.getenv("LAN_VIEWER_BIND", "0.0.0.0"),
-            port=_safe_int(os.getenv("LAN_VIEWER_PORT"), 8765, 1024, 65535),
+            port=_safe_int(os.getenv("LAN_VIEWER_PORT"), 8766, 1024, 65535),
             ttl_seconds=_safe_int(
                 os.getenv("LAN_VIEWER_TTL_SECONDS"),
                 12 * 60 * 60,
@@ -132,6 +135,10 @@ class LanViewerService:
 
     @staticmethod
     def lan_ip() -> str:
+        candidates = _interface_ipv4_candidates()
+        if candidates:
+            return min(candidates, key=_lan_candidate_rank)[1]
+
         connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             connection.connect(("1.1.1.1", 80))
@@ -301,6 +308,75 @@ def _safe_int(value: str | None, default: int, minimum: int, maximum: int) -> in
     except ValueError:
         return default
     return max(minimum, min(parsed, maximum))
+
+
+def _interface_ipv4_candidates() -> list[tuple[str, str]]:
+    """Return private IPv4 candidates while excluding common tunnel interfaces."""
+    command = ["ipconfig"] if os.name == "nt" else ["ifconfig"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    interface = "unknown"
+    candidates: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        if os.name == "nt":
+            if line and not line[0].isspace() and line.rstrip().endswith(":"):
+                interface = line.rstrip(": ").strip()
+        else:
+            match = re.match(r"^([A-Za-z0-9_.:-]+):", line)
+            if match:
+                interface = match.group(1)
+        for address in re.findall(r"(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])", line):
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            if (
+                isinstance(ip, ipaddress.IPv4Address)
+                and ip.is_private
+                and not ip.is_loopback
+                and not ip.is_link_local
+            ):
+                candidates.append((interface, address))
+    return list(dict.fromkeys(candidates))
+
+
+def _lan_candidate_rank(candidate: tuple[str, str]) -> tuple[int, int, str]:
+    interface, address = candidate
+    lowered = interface.lower()
+    tunnel_prefixes = (
+        "utun",
+        "tun",
+        "tap",
+        "ppp",
+        "ipsec",
+        "wg",
+        "docker",
+        "veth",
+        "vmnet",
+        "bridge",
+        "awdl",
+        "llw",
+    )
+    tunnel_penalty = 1 if any(part in lowered for part in tunnel_prefixes) else 0
+    ip = ipaddress.ip_address(address)
+    if ip in ipaddress.ip_network("192.168.0.0/16"):
+        subnet_rank = 0
+    elif ip in ipaddress.ip_network("172.16.0.0/12"):
+        subnet_rank = 1
+    else:
+        subnet_rank = 2
+    return tunnel_penalty, subnet_rank, address
 
 
 def _b64encode(value: bytes) -> str:

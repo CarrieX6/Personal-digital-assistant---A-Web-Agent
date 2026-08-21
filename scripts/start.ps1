@@ -15,7 +15,7 @@ $Backend = Start-Process -FilePath $Python -ArgumentList @(
 
 try {
   Write-Host "控制台: http://localhost:3000" -ForegroundColor Cyan
-  Write-Host "空间照片局域网 Viewer 会按需监听 8765 端口。" -ForegroundColor Cyan
+  Write-Host "空间照片局域网 Viewer 会按需监听 8766 端口。" -ForegroundColor Cyan
   & pnpm run dev
 } finally {
   if (-not $Backend.HasExited) { Stop-Process -Id $Backend.Id }

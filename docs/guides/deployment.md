@@ -5,7 +5,7 @@
 ## 推荐拓扑
 
 默认采用原生部署：Web 控制台和 API 只监听本机回环地址，飞书通过出站长连接收发
-消息；只有带 HMAC 签名、短时有效的空间照片 Viewer 按需监听局域网 `8765` 端口。
+消息；只有带 HMAC 签名、短时有效的空间照片 Viewer 按需监听局域网 `8766` 端口。
 这样既能使用 macOS MPS 或 Windows CUDA，也不会为了手机预览暴露整个 Root 控制台。
 
 ## Windows 10 / 11
@@ -33,18 +33,21 @@ chmod +x scripts/setup.sh scripts/start.sh
 
 ## 局域网空间照片
 
-生成完成后，飞书会收到形如 `http://192.168.x.x:8765/v/<签名>` 的链接。手机和电脑
+生成完成后，飞书会收到形如 `http://192.168.x.x:8766/v/<签名>` 的链接。手机和电脑
 必须在同一局域网，且 AP 隔离/VPN/防火墙不能阻断端口。链接默认 12 小时过期，只能
 读取该空间照片的白名单分层文件，不能访问 Agent API、配置、记忆或其他资产。
 
 可配置：
 
 ```text
-LAN_VIEWER_PORT=8765
+LAN_VIEWER_PORT=8766
 LAN_VIEWER_TTL_SECONDS=43200
 LAN_VIEWER_BIND=0.0.0.0
 LAN_VIEWER_PUBLIC_BASE_URL=
 ```
+
+若电脑同时连接 VPN，程序会优先选择非隧道局域网网卡；自动选择仍不正确时，可把
+`LAN_VIEWER_PUBLIC_BASE_URL` 显式设为 `http://<电脑局域网IP>:8766`。
 
 ## 为什么当前不把 Docker 作为默认方案
 
@@ -55,6 +58,6 @@ Docker 适合复现 CPU API 环境，但 macOS 容器不能直接使用 Apple MP
 
 ## 公网阶段计划
 
-公网版本不能直接映射 `8000/8765`。需增加域名、HTTPS 反向代理、用户身份、资产级
+公网版本不能直接映射 `8000/8766`。需增加域名、HTTPS 反向代理、用户身份、资产级
 授权、速率限制、审计、撤销、对象存储/CDN 或中继，并完成 Viewer URL 泄露与重放
 测试后才能上线。
