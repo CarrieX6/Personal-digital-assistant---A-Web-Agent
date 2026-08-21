@@ -785,6 +785,18 @@ class FeishuChannelRuntime:
                 "card-spatial-help",
             )
             return
+        if command == "photo_style_transfer":
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    "图片风格化已上线，需要 1 张内容图和 1–3 张风格参考图。\n"
+                    "当前请在电脑端 Web 控制台的“工具库 → 图片风格化”中上传；"
+                    "飞书多图角色收集链路仍在开发中，暂不能在聊天内直接提交。"
+                ),
+                "card-photo-style-help",
+            )
+            return
         prompts = {
             "list_assets": "查看我的个人资产",
             "capabilities": "你能做什么？请简洁列出当前可用能力。",
@@ -851,17 +863,25 @@ class FeishuChannelRuntime:
                         "style": "primary",
                     },
                     {
-                        "label": "查看个人资产",
-                        "action": {"command": "list_assets"},
+                        "label": "图片风格化",
+                        "action": {"command": "photo_style_transfer"},
                     },
                 ]
             )
             .buttons(
                 [
                     {
+                        "label": "查看个人资产",
+                        "action": {"command": "list_assets"},
+                    },
+                    {
                         "label": "能力列表",
                         "action": {"command": "capabilities"},
                     },
+                ]
+            )
+            .buttons(
+                [
                     {
                         "label": "当前时间",
                         "action": {"command": "current_time"},
@@ -888,7 +908,10 @@ class FeishuChannelRuntime:
             sender_id=None,
             direction="outbound",
             kind="card",
-            content="[功能卡片] 空间照片、个人资产、能力列表、当前时间",
+            content=(
+                "[功能卡片] 空间照片、图片风格化、个人资产、"
+                "能力列表、当前时间"
+            ),
         )
 
     async def _process_image_message(
@@ -1260,6 +1283,7 @@ class FeishuChannelRuntime:
     def _card_command_label(command: str) -> str:
         return {
             "spatial_photo": "生成空间照片",
+            "photo_style_transfer": "图片风格化",
             "list_assets": "查看个人资产",
             "capabilities": "能力列表",
             "current_time": "当前时间",

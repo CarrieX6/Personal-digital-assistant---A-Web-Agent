@@ -533,6 +533,53 @@ def test_runtime_handles_feature_card_action(tmp_path: Path) -> None:
     assert any("markdown" in item[1] for item in channel.sent)
 
 
+def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    runner = FakeRunner()
+    channel = FakeChannel()
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        runner,  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+    )
+    event = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_style_card",
+        operator=SimpleNamespace(open_id="ou_allowed"),
+        action=SimpleNamespace(value={"command": "photo_style_transfer"}),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await runtime._send_feature_menu("oc_chat", "om_menu")
+        await channel.handlers["cardAction"](event)
+        await asyncio.sleep(0)
+        if runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    asyncio.run(scenario())
+
+    card_payload = next(item[1]["card"] for item in channel.sent if "card" in item[1])
+    assert "图片风格化" in json.dumps(card_payload, ensure_ascii=False)
+    assert any(
+        "1 张内容图和 1–3 张风格参考图" in item[1].get("text", "")
+        for item in channel.sent
+    )
+    assert runner.messages == []
+    assert "图片风格化" in store.list_events()[-2].content
+
+
 def test_channel_message_history_api_returns_local_events(
     tmp_path: Path,
 ) -> None:
