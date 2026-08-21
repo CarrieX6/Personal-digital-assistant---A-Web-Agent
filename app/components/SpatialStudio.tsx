@@ -93,6 +93,7 @@ export function SpatialStudio({
   const [title, setTitle] = useState("");
   const [currentJob, setCurrentJob] = useState<Job | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(true);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -100,9 +101,18 @@ export function SpatialStudio({
 
   const loadAssets = useCallback(async () => {
     try {
-      const response = await fetch(`${apiBase}/api/assets`);
-      if (!response.ok) throw new Error(await errorMessage(response));
-      const data = (await response.json()) as { assets: Asset[] };
+      const [assetsResponse, jobsResponse] = await Promise.all([
+        fetch(`${apiBase}/api/assets`),
+        fetch(`${apiBase}/api/jobs?limit=50`, { cache: "no-store" }),
+      ]);
+      if (!assetsResponse.ok) {
+        throw new Error(await errorMessage(assetsResponse));
+      }
+      if (!jobsResponse.ok) {
+        throw new Error(await errorMessage(jobsResponse));
+      }
+      const data = (await assetsResponse.json()) as { assets: Asset[] };
+      const jobsData = (await jobsResponse.json()) as { jobs: Job[] };
       const spatialAssets = data.assets.filter(
         (asset) => asset.kind === "spatial_scene",
       );
@@ -113,6 +123,12 @@ export function SpatialStudio({
         }
         return spatialAssets.find((asset) => asset.status === "ready")?.id ?? null;
       });
+      const recoverableJob = jobsData.jobs.find(
+        (job) =>
+          job.kind === "spatial_scene" &&
+          ["queued", "running", "failed"].includes(job.status),
+      );
+      setCurrentJob((current) => current ?? recoverableJob ?? null);
       onConnectionChange(true);
     } catch (requestError) {
       onConnectionChange(false);
@@ -243,6 +259,37 @@ export function SpatialStudio({
       );
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function retryJob() {
+    if (!currentJob || currentJob.status !== "failed" || retrying) return;
+    setRetrying(true);
+    setError("");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/jobs/${encodeURIComponent(currentJob.id)}/retry`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await errorMessage(response));
+      const nextJob = (await response.json()) as Job;
+      setCurrentJob(nextJob);
+      setAssets((current) =>
+        current.map((asset) =>
+          asset.id === nextJob.asset_id
+            ? { ...asset, status: "processing" }
+            : asset,
+        ),
+      );
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "重新生成失败，请稍后再试。",
+      );
+    } finally {
+      setRetrying(false);
     }
   }
 
@@ -420,10 +467,25 @@ export function SpatialStudio({
           <div>
             <p className="eyebrow">Local task</p>
             <strong>{currentJob.message}</strong>
+            {currentJob.status === "failed" ? (
+              <small>原始图片仍保存在本机，可以直接重新生成。</small>
+            ) : null}
           </div>
-          <div className="job-progress">
-            <progress max="100" value={currentJob.progress} />
-            <span>{currentJob.progress}%</span>
+          <div className="job-progress-actions">
+            <div className="job-progress">
+              <progress max="100" value={currentJob.progress} />
+              <span>{currentJob.progress}%</span>
+            </div>
+            {currentJob.status === "failed" ? (
+              <button
+                type="button"
+                className="job-retry-button"
+                onClick={() => void retryJob()}
+                disabled={retrying}
+              >
+                {retrying ? "重新排队中…" : "重新生成"}
+              </button>
+            ) : null}
           </div>
         </section>
       ) : null}

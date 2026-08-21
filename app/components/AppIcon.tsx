@@ -16,6 +16,7 @@ type IconName =
   | "download"
   | "check"
   | "sparkles"
+  | "trash"
   | "chevron";
 
 type AppIconProps = SVGProps<SVGSVGElement> & {
@@ -91,6 +92,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3Z" />
       <path d="m18.5 14 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3ZM5 14l.8 2.5 2.5.8-2.5.8L5 20.5l-.8-2.4-2.5-.8 2.5-.8L5 14Z" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" />
+      <path d="M10 11v6m4-6v6" />
     </>
   ),
   chevron: <path d="m9 18 6-6-6-6" />,

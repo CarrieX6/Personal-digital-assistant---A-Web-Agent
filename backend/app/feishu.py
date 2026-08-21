@@ -137,15 +137,22 @@ class SQLiteChannelStore:
         direction: str,
         kind: str,
         content: str,
+        message_id: str | None = None,
+        media_url: str | None = None,
     ) -> None:
         safe_content = content.strip()[:4000] or "[空消息]"
+        safe_media_url = (
+            media_url[:1000]
+            if media_url and media_url.startswith("/api/assets/")
+            else None
+        )
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO channel_events (
                     platform, chat_id, sender_id, direction,
-                    kind, content, created_at
-                ) VALUES ('feishu', ?, ?, ?, ?, ?, ?)
+                    kind, content, message_id, media_url, created_at
+                ) VALUES ('feishu', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -153,6 +160,8 @@ class SQLiteChannelStore:
                     direction,
                     kind,
                     safe_content,
+                    message_id,
+                    safe_media_url,
                     time.time(),
                 ),
             )
@@ -172,7 +181,7 @@ class SQLiteChannelStore:
             rows = connection.execute(
                 """
                 SELECT id, platform, chat_id, sender_id, direction,
-                       kind, content, created_at
+                       kind, content, media_url, created_at
                 FROM channel_events
                 ORDER BY id DESC
                 LIMIT ?
@@ -188,8 +197,9 @@ class SQLiteChannelStore:
                 direction=row[4],
                 kind=row[5],
                 content=row[6],
+                media_url=row[7],
                 created_at=datetime.fromtimestamp(
-                    float(row[7]),
+                    float(row[8]),
                     tz=timezone.utc,
                 ),
             )
@@ -199,6 +209,33 @@ class SQLiteChannelStore:
     def clear_events(self) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM channel_events")
+
+    def attach_event_media(self, message_id: str, media_url: str) -> bool:
+        if not media_url.startswith("/api/assets/"):
+            return False
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE channel_events
+                SET media_url = ?
+                WHERE id = (
+                    SELECT id FROM channel_events
+                    WHERE message_id = ? AND kind = 'image'
+                    ORDER BY id DESC LIMIT 1
+                )
+                """,
+                (media_url[:1000], message_id),
+            )
+            return cursor.rowcount == 1
+
+    def delete_chat_events(self, chat_id: str) -> bool:
+        """Delete only the local read-only mirror, never Feishu messages."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM channel_events WHERE chat_id = ?",
+                (chat_id,),
+            )
+            return cursor.rowcount > 0
 
     def claim_feature_menu(self, chat_id: str) -> bool:
         with self._lock, self._connect() as connection:
@@ -265,6 +302,8 @@ class SQLiteChannelStore:
                     direction TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    message_id TEXT,
+                    media_url TEXT,
                     created_at REAL NOT NULL
                 );
 
@@ -274,6 +313,20 @@ class SQLiteChannelStore:
                 );
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_events)"
+                ).fetchall()
+            }
+            if "message_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE channel_events ADD COLUMN message_id TEXT"
+                )
+            if "media_url" not in columns:
+                connection.execute(
+                    "ALTER TABLE channel_events ADD COLUMN media_url TEXT"
+                )
         os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
@@ -504,6 +557,7 @@ class FeishuChannelRuntime:
             direction="inbound",
             kind=kind,
             content=content,
+            message_id=message_id,
         )
 
         self._spawn(self._process_message(message))
@@ -692,6 +746,7 @@ class FeishuChannelRuntime:
         sender_id = str(getattr(operator, "open_id", "") or "")
         value = getattr(getattr(event, "action", None), "value", None)
         command = value.get("command") if isinstance(value, dict) else None
+        job_id = value.get("job_id") if isinstance(value, dict) else None
         if (
             not chat_id
             or not message_id
@@ -704,7 +759,11 @@ class FeishuChannelRuntime:
             sender_id=sender_id,
             direction="inbound",
             kind="card",
-            content=f"[功能卡片] {self._card_command_label(command)}",
+            content=(
+                f"[重试卡片] {self._card_command_label(command)}"
+                if command == "retry_spatial_job"
+                else f"[功能卡片] {self._card_command_label(command)}"
+            ),
         )
         self._spawn(
             self._process_card_action(
@@ -712,6 +771,7 @@ class FeishuChannelRuntime:
                 message_id=message_id,
                 sender_id=sender_id,
                 command=command,
+                job_id=job_id if isinstance(job_id, str) else None,
             )
         )
 
@@ -722,13 +782,34 @@ class FeishuChannelRuntime:
         message_id: str,
         sender_id: str,
         command: str,
+        job_id: str | None = None,
     ) -> None:
+        if command == "retry_spatial_job":
+            await self._retry_spatial_job(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+                job_id=job_id,
+            )
+            return
         if command == "spatial_photo":
             await self._reply_safely(
                 chat_id,
                 message_id,
                 "请直接发送一张 JPG、PNG 或 WebP 图片。我会在本机生成空间照片并返回封面。",
                 "card-spatial-help",
+            )
+            return
+        if command == "photo_style_transfer":
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    "图片风格化已上线，需要 1 张内容图和 1–3 张风格参考图。\n"
+                    "当前请在电脑端 Web 控制台的“工具库 → 图片风格化”中上传；"
+                    "飞书多图角色收集链路仍在开发中，暂不能在聊天内直接提交。"
+                ),
+                "card-photo-style-help",
             )
             return
         prompts = {
@@ -797,17 +878,25 @@ class FeishuChannelRuntime:
                         "style": "primary",
                     },
                     {
-                        "label": "查看个人资产",
-                        "action": {"command": "list_assets"},
+                        "label": "图片风格化",
+                        "action": {"command": "photo_style_transfer"},
                     },
                 ]
             )
             .buttons(
                 [
                     {
+                        "label": "查看个人资产",
+                        "action": {"command": "list_assets"},
+                    },
+                    {
                         "label": "能力列表",
                         "action": {"command": "capabilities"},
                     },
+                ]
+            )
+            .buttons(
+                [
                     {
                         "label": "当前时间",
                         "action": {"command": "current_time"},
@@ -834,7 +923,10 @@ class FeishuChannelRuntime:
             sender_id=None,
             direction="outbound",
             kind="card",
-            content="[功能卡片] 空间照片、个人资产、能力列表、当前时间",
+            content=(
+                "[功能卡片] 空间照片、图片风格化、个人资产、"
+                "能力列表、当前时间"
+            ),
         )
 
     async def _process_image_message(
@@ -879,6 +971,10 @@ class FeishuChannelRuntime:
                 title="飞书空间照片",
                 owner_id=self._owner_id(sender_id),
             )
+            self.store.attach_event_media(
+                message_id,
+                created.asset.source_url,
+            )
             await self._reply_safely(
                 chat_id,
                 message_id,
@@ -889,59 +985,12 @@ class FeishuChannelRuntime:
                 ),
                 "image-job-created",
             )
-            job = await self._wait_for_job(created.job.id)
-            if job.status == "failed":
-                self.store.mark_failed(message_id, "spatial_job_failed")
-                await self._reply_safely(
-                    chat_id,
-                    message_id,
-                    f"空间照片生成失败：{job.error or job.message}",
-                    "image-job-failed",
-                )
-                return
-
-            asset = await asyncio.to_thread(spatial.get_asset, job.asset_id)
-            self.store.mark_completed(message_id, job.id)
-            viewer_line = "可动视角请在电脑端个人资产库中打开。"
-            if self.viewer_link_factory is not None:
-                try:
-                    viewer_url = await asyncio.to_thread(
-                        self.viewer_link_factory,
-                        asset.id,
-                    )
-                    viewer_line = (
-                        "手机全屏可动预览（需与电脑同一局域网）：\n"
-                        f"{viewer_url}"
-                    )
-                except Exception as exc:
-                    self._last_error = self._safe_error(exc)
-            await self._reply_safely(
-                chat_id,
-                message_id,
-                (
-                    f"空间照片“{asset.name}”已生成完成。\n"
-                    f"尺寸：{asset.width} × {asset.height}\n"
-                    f"下方先返回封面图。\n{viewer_line}"
-                ),
-                "image-job-completed",
+            await self._deliver_spatial_job_result(
+                chat_id=chat_id,
+                message_id=message_id,
+                job_id=created.job.id,
+                tracked_message_id=message_id,
             )
-            if asset.preview_url:
-                preview_name = asset.preview_url.rsplit("/", maxsplit=1)[-1]
-                preview_path = await asyncio.to_thread(
-                    spatial.resolve_asset_file,
-                    asset.id,
-                    preview_name,
-                )
-                try:
-                    await self._send_image(
-                        chat_id,
-                        message_id,
-                        preview_path,
-                        self._uuid(message_id, "image-preview"),
-                    )
-                except Exception as exc:
-                    self._status = "error"
-                    self._last_error = self._safe_error(exc)
         except AssetError as exc:
             self.store.mark_failed(message_id, "invalid_image")
             await self._reply_safely(
@@ -966,6 +1015,190 @@ class FeishuChannelRuntime:
                 "图片下载或空间照片创建失败，请检查消息资源权限和电脑端日志。",
                 "image-processing-failed",
             )
+
+    async def _retry_spatial_job(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        sender_id: str,
+        job_id: str | None,
+    ) -> None:
+        spatial = self.spatial_service
+        if spatial is None or not job_id or len(job_id) > 100:
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "无法识别要重试的空间照片任务，请重新发送图片。",
+                "retry-spatial-invalid",
+            )
+            return
+        try:
+            job, started = await asyncio.to_thread(
+                spatial.retry_job,
+                job_id,
+                owner_id=self._owner_id(sender_id),
+            )
+        except AssetError as exc:
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                f"无法重新生成：{exc}",
+                "retry-spatial-rejected",
+            )
+            return
+
+        if job.status == "completed":
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "这个空间照片任务已经生成完成，无需再次重试。",
+                "retry-spatial-completed",
+            )
+            return
+        if not started:
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "空间照片已经在重新生成中，请稍候。",
+                "retry-spatial-running",
+            )
+            return
+
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            "已复用原始图片，空间照片重新进入本地处理队列。",
+            "retry-spatial-started",
+        )
+        await self._deliver_spatial_job_result(
+            chat_id=chat_id,
+            message_id=message_id,
+            job_id=job.id,
+            tracked_message_id=None,
+        )
+
+    async def _deliver_spatial_job_result(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        job_id: str,
+        tracked_message_id: str | None,
+    ) -> None:
+        spatial = self.spatial_service
+        if spatial is None:
+            raise AssetError("空间照片能力当前不可用。")
+        job = await self._wait_for_job(job_id)
+        if job.status == "failed":
+            if tracked_message_id:
+                self.store.mark_failed(
+                    tracked_message_id,
+                    "spatial_job_failed",
+                )
+            await self._send_spatial_retry_card(
+                chat_id,
+                message_id,
+                job.id,
+                job.error or job.message,
+            )
+            return
+
+        asset = await asyncio.to_thread(spatial.get_asset, job.asset_id)
+        if tracked_message_id:
+            self.store.mark_completed(tracked_message_id, job.id)
+        viewer_line = "可动视角请在电脑端个人资产库中打开。"
+        if self.viewer_link_factory is not None:
+            try:
+                viewer_url = await asyncio.to_thread(
+                    self.viewer_link_factory,
+                    asset.id,
+                )
+                viewer_line = (
+                    "手机全屏可动预览（需与电脑同一局域网）：\n"
+                    f"{viewer_url}"
+                )
+            except Exception as exc:
+                self._last_error = self._safe_error(exc)
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            (
+                f"空间照片“{asset.name}”已生成完成。\n"
+                f"尺寸：{asset.width} × {asset.height}\n"
+                f"下方先返回封面图。\n{viewer_line}"
+            ),
+            f"spatial-job-{job.id}-completed",
+        )
+        if asset.preview_url:
+            preview_name = asset.preview_url.rsplit("/", maxsplit=1)[-1]
+            preview_path = await asyncio.to_thread(
+                spatial.resolve_asset_file,
+                asset.id,
+                preview_name,
+            )
+            try:
+                await self._send_image(
+                    chat_id,
+                    message_id,
+                    preview_path,
+                    self._uuid(message_id, f"spatial-job-{job.id}-preview"),
+                    media_url=asset.preview_url,
+                )
+            except Exception as exc:
+                self._status = "error"
+                self._last_error = self._safe_error(exc)
+
+    async def _send_spatial_retry_card(
+        self,
+        chat_id: str,
+        message_id: str,
+        job_id: str,
+        error: str,
+    ) -> None:
+        card = (
+            new_card()
+            .header(
+                title="空间照片生成失败",
+                subtitle="原始图片仍保存在本机，可以直接重新生成",
+                template="red",
+            )
+            .markdown(f"失败原因：{error[:500]}")
+            .buttons(
+                [
+                    {
+                        "label": "重新生成",
+                        "action": {
+                            "command": "retry_spatial_job",
+                            "job_id": job_id,
+                        },
+                        "style": "primary",
+                    }
+                ]
+            )
+            .footer("重复点击不会创建多个任务")
+            .build()
+        )
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("飞书长连接当前不可用")
+        result = await channel.send(
+            chat_id,
+            {"card": card.data},
+            {
+                "reply_to": message_id,
+                "uuid": self._uuid(message_id, f"retry-spatial-{job_id}"),
+            },
+        )
+        self._ensure_send_success(result)
+        self.store.record_event(
+            chat_id=chat_id,
+            sender_id=None,
+            direction="outbound",
+            kind="card",
+            content=f"[重试卡片] 空间照片生成失败、重新生成：{error[:500]}",
+            message_id=message_id,
+        )
 
     async def _download_image_resource(
         self,
@@ -1138,6 +1371,8 @@ class FeishuChannelRuntime:
         message_id: str,
         path: Path,
         uuid: str,
+        *,
+        media_url: str | None = None,
     ) -> None:
         channel = self._channel
         if channel is None:
@@ -1154,6 +1389,8 @@ class FeishuChannelRuntime:
             direction="outbound",
             kind="image",
             content=f"[图片] {path.name}",
+            message_id=message_id,
+            media_url=media_url,
         )
 
     def _ensure_send_success(self, result: Any) -> None:
@@ -1197,6 +1434,8 @@ class FeishuChannelRuntime:
     def _card_command_label(command: str) -> str:
         return {
             "spatial_photo": "生成空间照片",
+            "photo_style_transfer": "图片风格化",
+            "retry_spatial_job": "重新生成空间照片",
             "list_assets": "查看个人资产",
             "capabilities": "能力列表",
             "current_time": "当前时间",

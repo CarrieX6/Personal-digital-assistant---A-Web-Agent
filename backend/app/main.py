@@ -386,6 +386,16 @@ def create_app(
         store: SQLiteChannelStore = request.app.state.channel_store
         return ChannelMessageListResponse(messages=store.list_events(limit))
 
+    @app.delete(
+        "/api/channels/conversations/{chat_id}",
+        status_code=204,
+    )
+    def delete_channel_conversation(chat_id: str, request: Request) -> Response:
+        store: SQLiteChannelStore = request.app.state.channel_store
+        if not store.delete_chat_events(chat_id):
+            raise HTTPException(status_code=404, detail="找不到这个飞书会话镜像。")
+        return Response(status_code=204)
+
     @app.post(
         "/api/source-images",
         response_model=SourceImagePublic,
@@ -573,6 +583,19 @@ def create_app(
             return service.get_job(job_id)
         except AssetError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/jobs/{job_id}/retry",
+        response_model=JobPublic,
+        status_code=202,
+    )
+    def retry_job(job_id: str, request: Request) -> JobPublic:
+        service: SpatialSceneService = request.app.state.spatial_service
+        try:
+            job, _ = service.retry_job(job_id)
+            return job
+        except AssetError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get(
         "/api/settings/providers",
