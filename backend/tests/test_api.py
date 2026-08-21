@@ -85,7 +85,7 @@ def test_health_and_tools(tmp_path: Path) -> None:
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["llm_configured"] is False
-    assert health.json()["tool_count"] == 7
+    assert health.json()["tool_count"] == 8
     assert tools.status_code == 200
     assert {tool["name"] for tool in tools.json()} >= {
         "text_stats",

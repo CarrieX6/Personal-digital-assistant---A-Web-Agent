@@ -10,6 +10,7 @@ type Filter = "all" | ToolStatus;
 type ToolLibraryProps = {
   health: HealthInfo | null;
   onOpenSpatial: () => void;
+  onOpenStyle: () => void;
   onOpenModelSettings: () => void;
   onOpenChannelSettings: () => void;
 };
@@ -22,6 +23,14 @@ const catalog = [
     status: "installed" as const,
     icon: "cube" as const,
     meta: "Depth Anything V2 · 本地运行",
+  },
+  {
+    id: "photo-style-transfer",
+    name: "图片个性化",
+    description: "用一至三张参考图迁移色彩、纹理和视觉风格。",
+    status: "installed" as const,
+    icon: "image" as const,
+    meta: "CPU 预览 · 可选本地 SDXL + IP-Adapter",
   },
   {
     id: "text-kit",
@@ -89,6 +98,7 @@ const statusLabels: Record<ToolStatus, string> = {
 export function ToolLibrary({
   health,
   onOpenSpatial,
+  onOpenStyle,
   onOpenModelSettings,
   onOpenChannelSettings,
 }: ToolLibraryProps) {
@@ -164,6 +174,11 @@ export function ToolLibrary({
               <div className="tool-card-actions">
                 {tool.id === "spatial-photo" ? (
                   <button type="button" onClick={onOpenSpatial}>
+                    打开工具
+                    <AppIcon name="chevron" width="15" height="15" />
+                  </button>
+                ) : tool.id === "photo-style-transfer" ? (
+                  <button type="button" onClick={onOpenStyle}>
                     打开工具
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>

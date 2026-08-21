@@ -13,8 +13,12 @@ from typing import Any, Callable, Protocol
 
 from lark_channel import (
     FeishuChannel,
+    KeepaliveConfig,
+    OutboundConfig,
     PolicyConfig,
+    RetryConfig,
     SecurityConfig,
+    TransportConfig,
     new_card,
 )
 
@@ -48,6 +52,10 @@ class FeishuChannelLike(Protocol):
         resource_type: str = "image",
         message_id: str | None = None,
     ) -> bytes | None: ...
+
+
+class FeishuResourceError(AssetError):
+    """User-actionable media failure without exposing credentials."""
 
 
 class SQLiteChannelStore:
@@ -288,6 +296,7 @@ class FeishuChannelRuntime:
         store: SQLiteChannelStore,
         channel_factory: ChannelFactory = FeishuChannel,
         spatial_service: SpatialSceneService | None = None,
+        viewer_link_factory: Callable[[str], str] | None = None,
         job_poll_interval: float = 2,
         job_timeout_seconds: float = 10 * 60,
     ) -> None:
@@ -296,6 +305,7 @@ class FeishuChannelRuntime:
         self.store = store
         self.channel_factory = channel_factory
         self.spatial_service = spatial_service
+        self.viewer_link_factory = viewer_link_factory
         self.job_poll_interval = job_poll_interval
         self.job_timeout_seconds = job_timeout_seconds
         self._channel: FeishuChannelLike | None = None
@@ -306,9 +316,20 @@ class FeishuChannelRuntime:
         self._lifecycle_lock = asyncio.Lock()
 
     def public_status(self) -> FeishuRuntimePublic:
+        snapshot_method = getattr(self._channel, "connection_snapshot", None)
+        snapshot = snapshot_method() if callable(snapshot_method) else None
+        connected_at = getattr(snapshot, "last_connected_at", None)
         return FeishuRuntimePublic(
             status=self._status,
             last_error=self._last_error,
+            reconnect_attempts=int(
+                getattr(snapshot, "reconnect_attempts", 0) or 0
+            ),
+            last_connected_at=(
+                datetime.fromtimestamp(float(connected_at), tz=timezone.utc)
+                if connected_at
+                else None
+            ),
         )
 
     async def start_if_enabled(self) -> None:
@@ -335,7 +356,20 @@ class FeishuChannelRuntime:
                     app_id=settings.app_id,
                     app_secret=app_secret,
                     domain=FeishuSettingsService.domain_urls[settings.domain],
-                    transport="ws",
+                    transport=TransportConfig(
+                        kind="ws",
+                        auto_reconnect=True,
+                        keepalive=KeepaliveConfig(
+                            enabled=True,
+                            check_interval_seconds=30,
+                            wake_threshold_seconds=90,
+                            probe_timeout_seconds=5,
+                            failure_threshold=2,
+                        ),
+                    ),
+                    outbound=OutboundConfig(
+                        retry=RetryConfig(max_attempts=4, base_delay_ms=500),
+                    ),
                     policy=PolicyConfig(
                         dm_policy="open",
                         group_policy=(
@@ -356,6 +390,8 @@ class FeishuChannelRuntime:
                 channel.on("message", self._on_message)
                 channel.on("cardAction", self._on_card_action)
                 channel.on("error", self._on_channel_error)
+                channel.on("reconnecting", self._on_reconnecting)
+                channel.on("reconnected", self._on_reconnected)
                 self._channel = channel
                 await channel.connect_until_ready(timeout=12)
                 self._status = "connected"
@@ -402,6 +438,12 @@ class FeishuChannelRuntime:
             self._status = "disabled"
 
     async def _stop_unlocked(self) -> None:
+        tasks = list(self._tasks)
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         channel = self._channel
         self._channel = None
         if channel is not None:
@@ -412,6 +454,27 @@ class FeishuChannelRuntime:
 
     async def _on_channel_error(self, error: Exception) -> None:
         self._last_error = self._safe_error(error)
+
+    def _on_reconnecting(self) -> None:
+        self._status = "reconnecting"
+
+    def _on_reconnected(self) -> None:
+        self._status = "connected"
+        self._last_error = None
+
+    def _spawn(self, coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        self._tasks.add(task)
+
+        def completed(done: asyncio.Task[Any]) -> None:
+            self._tasks.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                self._last_error = self._safe_error(error)
+
+        task.add_done_callback(completed)
 
     async def _on_message(self, message: Any) -> None:
         message_id = str(
@@ -441,9 +504,7 @@ class FeishuChannelRuntime:
             content=content,
         )
 
-        task = asyncio.create_task(self._process_message(message))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn(self._process_message(message))
 
     async def _process_message(self, message: Any) -> None:
         message_id = str(getattr(message, "message_id", None) or message.id)
@@ -643,7 +704,7 @@ class FeishuChannelRuntime:
             kind="card",
             content=f"[功能卡片] {self._card_command_label(command)}",
         )
-        task = asyncio.create_task(
+        self._spawn(
             self._process_card_action(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -651,8 +712,6 @@ class FeishuChannelRuntime:
                 command=command,
             )
         )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
 
     async def _process_card_action(
         self,
@@ -806,15 +865,11 @@ class FeishuChannelRuntime:
             channel = self._channel
             if channel is None:
                 raise RuntimeError("飞书长连接当前不可用")
-            image_bytes = await channel.download_resource(
-                file_key,
-                resource_type="image",
+            image_bytes = await self._download_image_resource(
+                channel,
+                file_key=file_key,
                 message_id=message_id,
             )
-            if not image_bytes:
-                raise AssetError(
-                    "无法下载图片，请检查应用是否具有读取消息资源的权限。"
-                )
             created = await asyncio.to_thread(
                 spatial.create_scene,
                 image_bytes,
@@ -845,13 +900,26 @@ class FeishuChannelRuntime:
 
             asset = await asyncio.to_thread(spatial.get_asset, job.asset_id)
             self.store.mark_completed(message_id, job.id)
+            viewer_line = "可动视角请在电脑端个人资产库中打开。"
+            if self.viewer_link_factory is not None:
+                try:
+                    viewer_url = await asyncio.to_thread(
+                        self.viewer_link_factory,
+                        asset.id,
+                    )
+                    viewer_line = (
+                        "手机全屏可动预览（需与电脑同一局域网）：\n"
+                        f"{viewer_url}"
+                    )
+                except Exception as exc:
+                    self._last_error = self._safe_error(exc)
             await self._reply_safely(
                 chat_id,
                 message_id,
                 (
                     f"空间照片“{asset.name}”已生成完成。\n"
                     f"尺寸：{asset.width} × {asset.height}\n"
-                    "下方先返回封面图；可动视角请在电脑端个人资产库中打开。"
+                    f"下方先返回封面图。\n{viewer_line}"
                 ),
                 "image-job-completed",
             )
@@ -896,6 +964,78 @@ class FeishuChannelRuntime:
                 "图片下载或空间照片创建失败，请检查消息资源权限和电脑端日志。",
                 "image-processing-failed",
             )
+
+    async def _download_image_resource(
+        self,
+        channel: FeishuChannelLike,
+        *,
+        file_key: str,
+        message_id: str,
+    ) -> bytes:
+        """Try both Feishu image routes and retain permission diagnostics."""
+        client = getattr(channel, "client", None)
+        errors: list[tuple[int | None, str]] = []
+        if client is not None:
+            from lark_channel.api.im.v1.model.get_image_request import (
+                GetImageRequest,
+            )
+            from lark_channel.api.im.v1.model.get_message_resource_request import (
+                GetMessageResourceRequest,
+            )
+
+            requests = (
+                (
+                    client.im.v1.message_resource,
+                    GetMessageResourceRequest.builder()
+                    .message_id(message_id)
+                    .file_key(file_key)
+                    .type("image")
+                    .build(),
+                ),
+                (
+                    client.im.v1.image,
+                    GetImageRequest.builder().image_key(file_key).build(),
+                ),
+            )
+            for resource, request in requests:
+                try:
+                    response = await resource.aget(request)
+                    code = getattr(response, "code", None)
+                    if code in {None, 0}:
+                        payload = await self._response_file_bytes(response)
+                        if payload:
+                            return payload
+                    errors.append(
+                        (code, str(getattr(response, "msg", "") or ""))
+                    )
+                except Exception as exc:
+                    errors.append((None, type(exc).__name__))
+        else:
+            for linked_message_id in (message_id, None):
+                payload = await channel.download_resource(
+                    file_key,
+                    resource_type="image",
+                    message_id=linked_message_id,
+                )
+                if payload:
+                    return payload
+
+        permission_denied = any(code == 99991672 for code, _ in errors)
+        suffix = "（平台错误码 99991672）" if permission_denied else ""
+        raise FeishuResourceError(
+            "无法下载飞书图片。请在开发者后台开通 im:resource，"
+            "并开通 im:message:readonly（或 im:message），发布新版本后"
+            f"重新授权再试{suffix}。"
+        )
+
+    @staticmethod
+    async def _response_file_bytes(response: Any) -> bytes | None:
+        file = getattr(response, "file", None)
+        if isinstance(file, (bytes, bytearray)):
+            return bytes(file)
+        if callable(getattr(file, "read", None)):
+            return await asyncio.to_thread(file.read)
+        return None
 
     async def _wait_for_job(self, job_id: str) -> Any:
         spatial = self.spatial_service

@@ -391,6 +391,8 @@ class AssetRepository:
         name: str,
         metadata: dict,
         owner_id: str = "local",
+        kind: str = "spatial_scene",
+        queued_message: str = "任务已进入本地处理队列。",
     ) -> None:
         timestamp = _now()
         with self._lock, self._connect() as connection:
@@ -399,11 +401,12 @@ class AssetRepository:
                 INSERT INTO assets
                 (id, owner_id, kind, name, status, metadata_json,
                  created_at, updated_at)
-                VALUES (?, ?, 'spatial_scene', ?, 'processing', ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'processing', ?, ?, ?)
                 """,
                 (
                     asset_id,
                     owner_id,
+                    kind,
                     name,
                     json.dumps(metadata, ensure_ascii=False),
                     timestamp,
@@ -415,10 +418,16 @@ class AssetRepository:
                 INSERT INTO jobs
                 (id, kind, status, progress, stage, message, asset_id, error,
                  created_at, updated_at)
-                VALUES (?, 'spatial_scene', 'queued', 0, 'queued',
-                        '任务已进入本地处理队列。', ?, NULL, ?, ?)
+                VALUES (?, ?, 'queued', 0, 'queued', ?, ?, NULL, ?, ?)
                 """,
-                (job_id, asset_id, timestamp, timestamp),
+                (
+                    job_id,
+                    kind,
+                    queued_message,
+                    asset_id,
+                    timestamp,
+                    timestamp,
+                ),
             )
 
     def update_job(
@@ -968,7 +977,7 @@ class SpatialSceneService:
 
         return AssetPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             name=row["name"],
             status=row["status"],
             width=metadata.get("width"),
@@ -979,7 +988,15 @@ class SpatialSceneService:
             background_url=url_for("background_file"),
             foreground_url=url_for("foreground_file"),
             manifest_url=url_for("manifest_file"),
+            result_url=url_for("result_file"),
+            style_reference_urls=[
+                f"{base}/{filename}"
+                for filename in metadata.get("style_files", [])
+                if isinstance(filename, str)
+            ],
             model_name=metadata.get("model_name"),
+            provider_name=metadata.get("provider_name"),
+            parameters=metadata.get("parameters", {}),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -988,7 +1005,7 @@ class SpatialSceneService:
     def _job_from_row(row: sqlite3.Row) -> JobPublic:
         return JobPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             status=row["status"],
             progress=row["progress"],
             stage=row["stage"],
@@ -1053,6 +1070,13 @@ class SpatialSceneService:
             for key, value in metadata.items()
             if key.endswith("_file") and isinstance(value, str)
         }
+        allowed.update(
+            filename
+            for key, value in metadata.items()
+            if key.endswith("_files") and isinstance(value, list)
+            for filename in value
+            if isinstance(filename, str)
+        )
         if filename not in allowed or Path(filename).name != filename:
             raise AssetError("找不到这个资产文件。")
         path = self.asset_dir / asset_id / filename
@@ -1138,6 +1162,7 @@ def register_asset_tools(
             "job_id": created.job.id,
             "status": created.job.status,
             "progress": created.job.progress,
+            "kind": created.asset.kind,
             "message": "空间照片任务已在本机创建，正在进行深度估计。",
         }
 

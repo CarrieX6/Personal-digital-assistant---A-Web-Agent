@@ -99,6 +99,7 @@ class ExplicitMemory:
 @dataclass(frozen=True)
 class AttachmentMetadata:
     source_image_id: str
+    attachment_role: Literal["content", "style"]
     original_name: str | None
     width: int | None
     height: int | None
@@ -112,6 +113,9 @@ class AttachmentMetadata:
 
         return cls(
             source_image_id=str(raw.get("id", ""))[:100],
+            attachment_role=(
+                "style" if raw.get("attachment_role") == "style" else "content"
+            ),
             original_name=(
                 str(raw.get("original_name", ""))[:255] or None
             ),
@@ -160,6 +164,7 @@ class BuiltContext:
                 {
                     "trusted_system": {
                         "source_image_id": item.source_image_id,
+                        "attachment_role": item.attachment_role,
                         "width": item.width,
                         "height": item.height,
                     },
@@ -419,6 +424,7 @@ class ContextBuilder:
         trusted = [
             {
                 "source_image_id": item.source_image_id,
+                "attachment_role": item.attachment_role,
                 "width": item.width,
                 "height": item.height,
             }

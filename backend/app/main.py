@@ -41,6 +41,7 @@ from .channel_settings import (
     create_default_feishu_settings_service,
 )
 from .feishu import FeishuChannelRuntime, SQLiteChannelStore
+from .lan_viewer import LanViewerService, ViewerLinkError
 from .models import (
     AgentRunRequest,
     AgentRunDecisionRequest,
@@ -49,6 +50,7 @@ from .models import (
     AssetListResponse,
     AssetPublic,
     ChannelMessageListResponse,
+    CapabilityInfo,
     ConnectionTestResponse,
     ConversationCreateRequest,
     ConversationListResponse,
@@ -64,16 +66,20 @@ from .models import (
     JobPublic,
     LLMSettingsPublic,
     LLMSettingsUpdate,
+    PhotoStyleCreateResponse,
+    PhotoStyleProviderStatus,
     ProviderCatalogResponse,
     SourceImagePublic,
     SpatialSceneCreateResponse,
     ToolInfo,
+    ViewerLinkPublic,
 )
 from .settings import (
     SettingsError,
     SettingsService,
     create_default_settings_service,
 )
+from .style_transfer import PhotoStyleService, StyleParameters, register_style_tools
 from .tools import ToolError, ToolRegistry, build_default_registry
 
 
@@ -119,14 +125,20 @@ def create_app(
     planner: Planner | None = None,
     settings_service: SettingsService | None = None,
     spatial_service: SpatialSceneService | None = None,
+    style_service: PhotoStyleService | None = None,
     feishu_settings_service: FeishuSettingsService | None = None,
     feishu_runtime: FeishuChannelRuntime | None = None,
+    viewer_service: LanViewerService | None = None,
 ) -> FastAPI:
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
         DEFAULT_ASSET_DATA_PATH
     )
     register_asset_tools(registry, selected_spatial_service)
+    selected_style_service = style_service or PhotoStyleService(
+        selected_spatial_service
+    )
+    register_style_tools(registry, selected_style_service)
     selected_settings_service = settings_service or create_default_settings_service(
         DEFAULT_SETTINGS_PATH
     )
@@ -145,11 +157,16 @@ def create_app(
     selected_channel_store = SQLiteChannelStore(
         channel_data_path / DEFAULT_CHANNEL_STORE_PATH.name
     )
+    selected_viewer_service = viewer_service or LanViewerService.from_env(
+        selected_spatial_service,
+        data_path=channel_data_path,
+    )
     selected_feishu_runtime = feishu_runtime or FeishuChannelRuntime(
         selected_feishu_settings_service,
         runner,
         selected_channel_store,
         spatial_service=selected_spatial_service,
+        viewer_link_factory=selected_viewer_service.create_link,
     )
     selected_channel_store = getattr(
         selected_feishu_runtime,
@@ -164,7 +181,9 @@ def create_app(
             yield
         finally:
             await selected_feishu_runtime.stop()
+            selected_viewer_service.close()
             runner.close()
+            selected_style_service.close()
             selected_spatial_service.close()
 
     app = FastAPI(
@@ -190,9 +209,11 @@ def create_app(
     app.state.runner = runner
     app.state.settings_service = selected_settings_service
     app.state.spatial_service = selected_spatial_service
+    app.state.style_service = selected_style_service
     app.state.feishu_settings_service = selected_feishu_settings_service
     app.state.feishu_runtime = selected_feishu_runtime
     app.state.channel_store = selected_channel_store
+    app.state.viewer_service = selected_viewer_service
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
@@ -211,6 +232,11 @@ def create_app(
     def list_tools(request: Request) -> list[ToolInfo]:
         current_registry: ToolRegistry = request.app.state.registry
         return current_registry.list_tools()
+
+    @app.get("/api/capabilities", response_model=list[CapabilityInfo])
+    def list_capability_manifests(request: Request) -> list[CapabilityInfo]:
+        current_registry: ToolRegistry = request.app.state.registry
+        return current_registry.list_capabilities()
 
     @app.get(
         "/api/conversations",
@@ -413,6 +439,61 @@ def create_app(
         finally:
             await file.close()
 
+    @app.post(
+        "/api/photo-style-transfers",
+        response_model=PhotoStyleCreateResponse,
+        status_code=202,
+    )
+    async def create_photo_style_transfer(
+        request: Request,
+        content_file: UploadFile = File(...),
+        style_files: list[UploadFile] = File(...),
+        title: str | None = Form(default=None),
+        prompt: str = Form(default=""),
+        mode: str = Form(default="preserve_layout"),
+        quality: str = Form(default="standard"),
+        style_strength: float = Form(default=0.7),
+        content_strength: float = Form(default=0.8),
+        detail_strength: float = Form(default=0.7),
+        seed: int | None = Form(default=None),
+    ) -> PhotoStyleCreateResponse:
+        service: PhotoStyleService = request.app.state.style_service
+        try:
+            content_bytes = await content_file.read(MAX_UPLOAD_BYTES + 1)
+            style_bytes = [
+                await style_file.read(MAX_UPLOAD_BYTES + 1)
+                for style_file in style_files
+            ]
+            return service.create_transfer(
+                content_bytes,
+                style_bytes,
+                original_name=content_file.filename or "图片风格化",
+                title=title,
+                parameters=StyleParameters(
+                    mode=mode,
+                    quality=quality,
+                    style_strength=style_strength,
+                    content_strength=content_strength,
+                    detail_strength=detail_strength,
+                    prompt=prompt,
+                    seed=seed,
+                ),
+            )
+        except AssetError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            await content_file.close()
+            for style_file in style_files:
+                await style_file.close()
+
+    @app.get(
+        "/api/photo-style-transfers/provider",
+        response_model=PhotoStyleProviderStatus,
+    )
+    def get_photo_style_provider(request: Request) -> PhotoStyleProviderStatus:
+        service: PhotoStyleService = request.app.state.style_service
+        return PhotoStyleProviderStatus.model_validate(service.provider_status())
+
     @app.get("/api/assets", response_model=AssetListResponse)
     def list_assets(
         request: Request,
@@ -428,6 +509,24 @@ def create_app(
             return service.get_asset(asset_id)
         except AssetError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/assets/{asset_id}/viewer-link",
+        response_model=ViewerLinkPublic,
+    )
+    def create_viewer_link(
+        asset_id: str,
+        request: Request,
+    ) -> ViewerLinkPublic:
+        viewer: LanViewerService = request.app.state.viewer_service
+        try:
+            return ViewerLinkPublic(
+                asset_id=asset_id,
+                url=viewer.create_link(asset_id),
+                expires_in_seconds=viewer.ttl_seconds,
+            )
+        except (AssetError, ViewerLinkError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/api/assets/{asset_id}", status_code=204)
     def delete_asset(asset_id: str, request: Request) -> Response:
@@ -589,9 +688,14 @@ def create_app(
                 if payload.source_image_id
                 else None
             )
+            style_contexts = [
+                spatial.get_source_image(source_id).model_dump()
+                for source_id in payload.style_image_ids
+            ]
             return current_runner.run(
                 payload.message,
                 source_image_context=source_context,
+                style_image_contexts=style_contexts,
                 owner_id=WEB_OWNER_ID,
                 thread_id=_web_thread_id(payload.session_id or "default"),
                 channel="web",

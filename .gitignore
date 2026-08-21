@@ -43,6 +43,7 @@ __pycache__/
 /backend/data/feishu_settings.json
 /backend/data/*.enc
 /backend/data/.secret_master_key
+/backend/data/viewer-secret.key
 /backend/data/channel.sqlite3*
 /backend/data/assets/
 /backend/data/source-images/
@@ -59,3 +60,4 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/backend/models/

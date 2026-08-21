@@ -5,10 +5,11 @@ import { AgentConsole, HealthInfo } from "./components/AgentConsole";
 import { AppIcon } from "./components/AppIcon";
 import { FeishuSettingsDialog } from "./components/FeishuSettingsDialog";
 import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
+import { PhotoStyleStudio } from "./components/PhotoStyleStudio";
 import { SpatialStudio } from "./components/SpatialStudio";
 import { ToolLibrary } from "./components/ToolLibrary";
 
-type View = "agent" | "tools" | "spatial";
+type View = "agent" | "tools" | "spatial" | "style";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8000";
@@ -20,6 +21,9 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [externalSettingsOpen, setExternalSettingsOpen] = useState(false);
   const [requestedSpatialAssetId, setRequestedSpatialAssetId] = useState<
+    string | null
+  >(null);
+  const [requestedStyleAssetId, setRequestedStyleAssetId] = useState<
     string | null
   >(null);
 
@@ -48,6 +52,11 @@ export default function Home() {
   function openSpatial(assetId?: string) {
     setRequestedSpatialAssetId(assetId ?? null);
     setActiveView("spatial");
+  }
+
+  function openStyle(assetId?: string) {
+    setRequestedStyleAssetId(assetId ?? null);
+    setActiveView("style");
   }
 
   return (
@@ -118,7 +127,11 @@ export default function Home() {
             <button
               type="button"
               className={
-                activeView === "tools" || activeView === "spatial" ? "active" : ""
+                activeView === "tools" ||
+                activeView === "spatial" ||
+                activeView === "style"
+                  ? "active"
+                  : ""
               }
               onClick={() => setActiveView("tools")}
             >
@@ -139,15 +152,17 @@ export default function Home() {
               health={health}
               onConnectionChange={setBackendReady}
               onSpatialSceneReady={(assetId) => openSpatial(assetId)}
+              onPhotoStyleReady={(assetId) => openStyle(assetId)}
             />
           ) : activeView === "tools" ? (
             <ToolLibrary
               health={health}
               onOpenSpatial={() => openSpatial()}
+              onOpenStyle={() => openStyle()}
               onOpenModelSettings={() => setSettingsOpen(true)}
               onOpenChannelSettings={() => setExternalSettingsOpen(true)}
             />
-          ) : (
+          ) : activeView === "spatial" ? (
             <div className="tool-detail-view">
               <button
                 className="back-to-library"
@@ -161,6 +176,22 @@ export default function Home() {
                 apiBase={API_BASE}
                 onConnectionChange={setBackendReady}
                 requestedAssetId={requestedSpatialAssetId}
+              />
+            </div>
+          ) : (
+            <div className="tool-detail-view">
+              <button
+                className="back-to-library"
+                type="button"
+                onClick={() => setActiveView("tools")}
+              >
+                <span aria-hidden="true">←</span>
+                返回工具库
+              </button>
+              <PhotoStyleStudio
+                apiBase={API_BASE}
+                onConnectionChange={setBackendReady}
+                requestedAssetId={requestedStyleAssetId}
               />
             </div>
           )}

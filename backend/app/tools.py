@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo
 
-from .models import ToolInfo
+from .models import CapabilityInfo, ToolInfo
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -46,6 +46,7 @@ class ToolSpec:
     ] = "read"
     requires_approval: bool = False
     idempotent: bool = True
+    capability: CapabilityInfo | None = None
 
 
 class ToolRegistry:
@@ -96,6 +97,13 @@ class ToolRegistry:
                 requires_approval=tool.requires_approval,
             )
             for tool in self._tools.values()
+        ]
+
+    def list_capabilities(self) -> list[CapabilityInfo]:
+        return [
+            tool.capability
+            for tool in self._tools.values()
+            if tool.capability is not None
         ]
 
     def openai_schemas(

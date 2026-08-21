@@ -30,6 +30,10 @@
 
 - [飞书机器人配置与使用指南](guides/feishu-setup.md)：企业自建应用、权限、长连接、
   Open ID、私聊、群聊、图片、卡片回调、Root 可见性与故障排查。
+- [macOS / Windows 本地部署](guides/deployment.md)：原生一键安装、启动、GPU 边界与
+  局域网签名 Viewer。
+- [新功能 / Capability 接入指南](guides/capability-integration.md)：服务、Provider、
+  Tool Manifest、渠道适配、测试和旧分支迁移约定。
 
 ### 平台与技术调研
 
@@ -41,6 +45,8 @@
   2.5D、LDI 与 3DGS 路线。
 - [空间照片端侧部署与资产格式](spatial-scene-device-deployment.md)：当前网络模型、
   图像处理、渲染流程、训练需求、性能和部署格式。
+- [图片风格化 Skill 集成说明](photo-style-transfer.md)：Provider 中立接口、Web/PC
+  工作台、Capability Manifest、存储权限和真实模型接入要求。
 
 ### 学习笔记
 

@@ -83,8 +83,25 @@ class DemoPlanner:
             r"source_image_id=([A-Za-z0-9-]{1,100})",
             message,
         )
+        style_matches = re.findall(
+            r"style_image_id=([A-Za-z0-9-]{1,100})",
+            message,
+        )
 
-        if source_match and any(
+        if source_match and style_matches and any(
+            keyword in lowered
+            for keyword in ("图片风格", "风格化", "风格迁移", "style transfer")
+        ):
+            calls = [
+                ToolCall(
+                    name="create_photo_style_transfer",
+                    arguments={
+                        "content_image_id": source_match.group(1),
+                        "style_image_ids": style_matches,
+                    },
+                )
+            ]
+        elif source_match and any(
             keyword in lowered
             for keyword in ("空间照片", "空间场景", "可动视角", "2d", "视角")
         ):
@@ -134,15 +151,16 @@ class DemoPlanner:
             else str(current)
         )
         attachments = planning_context.get("attachments", [])
-        if isinstance(attachments, list) and attachments:
-            trusted = attachments[0].get("trusted_system", {})
-            source_image_id = (
-                trusted.get("source_image_id")
-                if isinstance(trusted, dict)
-                else None
-            )
-            if isinstance(source_image_id, str) and source_image_id:
-                message = f"{message}\nsource_image_id={source_image_id}"
+        if isinstance(attachments, list):
+            for attachment in attachments:
+                trusted = attachment.get("trusted_system", {})
+                if not isinstance(trusted, dict):
+                    continue
+                source_image_id = trusted.get("source_image_id")
+                role = trusted.get("attachment_role")
+                if isinstance(source_image_id, str) and source_image_id:
+                    key = "style_image_id" if role == "style" else "source_image_id"
+                    message = f"{message}\n{key}={source_image_id}"
         return self.plan(message, tool_schemas)
 
     def compose_answer(
@@ -184,6 +202,11 @@ class DemoPlanner:
                 sections.append(
                     "空间照片任务已创建，正在本机进行深度估计和分层处理。"
                     "完成后会自动打开可交互视角。"
+                )
+            elif name == "create_photo_style_transfer":
+                sections.append(
+                    "图片个性化任务已创建，正在按参考图迁移视觉风格。"
+                    "完成后会写入本地个人资产库。"
                 )
             elif name == "list_capabilities":
                 examples = "\n".join(f"- {item}" for item in output["examples"])
@@ -260,6 +283,7 @@ class AgentRunner:
         message: str,
         *,
         source_image_context: dict[str, Any] | None = None,
+        style_image_contexts: list[dict[str, Any]] | None = None,
         owner_id: str = "local",
         thread_id: str = "local:default",
         channel: str = "web",
@@ -295,15 +319,23 @@ class AgentRunner:
         selected_tool_schemas = context_builder.select_tools(
             user_message=message,
             tool_schemas=all_tool_schemas,
-            attachment_present=source_image_context is not None,
+            attachment_present=bool(source_image_context or style_image_contexts),
         )
         built_context = context_builder.build(
             current_user_message=message,
             conversation_messages=conversation.messages,
             memories=conversation.memories,
-            attachments=(
-                [source_image_context] if source_image_context else []
-            ),
+            attachments=[
+                *(
+                    [{**source_image_context, "attachment_role": "content"}]
+                    if source_image_context
+                    else []
+                ),
+                *[
+                    {**item, "attachment_role": "style"}
+                    for item in (style_image_contexts or [])
+                ],
+            ],
             selected_tool_schemas=selected_tool_schemas,
         )
 
@@ -339,6 +371,16 @@ class AgentRunner:
                 "width": source_image_context["width"],
                 "height": source_image_context["height"],
             }
+        if style_image_contexts:
+            user_metadata["style_attachments"] = [
+                {
+                    "name": item["original_name"],
+                    "source_image_id": item["id"],
+                    "width": item["width"],
+                    "height": item["height"],
+                }
+                for item in style_image_contexts
+            ]
         self.memory_store.append_message(
             owner_id=owner_id,
             thread_id=thread_id,
@@ -511,6 +553,9 @@ class AgentRunner:
             asset_id = output.get("asset_id")
             if isinstance(asset_id, str):
                 assistant_metadata["asset_id"] = asset_id
+                asset_kind = output.get("kind")
+                if isinstance(asset_kind, str):
+                    assistant_metadata["asset_kind"] = asset_kind
                 break
         self.memory_store.upsert_assistant_run_message(
             owner_id=owner_id,

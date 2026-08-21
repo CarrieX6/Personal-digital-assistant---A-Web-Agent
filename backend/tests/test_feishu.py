@@ -108,6 +108,21 @@ class PermissionDeniedChannel(FakeChannel):
         )
 
 
+class ResourceDeniedChannel(FakeChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.download_calls: list[str | None] = []
+
+    async def download_resource(
+        self,
+        file_key: str,
+        resource_type: str = "image",
+        message_id: str | None = None,
+    ) -> bytes | None:
+        self.download_calls.append(message_id)
+        return None
+
+
 class FakeRuntime:
     def __init__(self) -> None:
         self.status = FeishuRuntimePublic(status="disabled")
@@ -399,6 +414,76 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
     assert len(image_replies) == 1
     assert Path(image_replies[0]["source"]).is_file()
     assert spatial.list_assets()[0].status == "ready"
+
+
+def test_runtime_image_permission_error_is_actionable(tmp_path: Path) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = ResourceDeniedChannel()
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+        spatial_service=build_test_spatial(tmp_path),
+    )
+    message = SimpleNamespace(
+        id="om_denied_image",
+        message_id="om_denied_image",
+        chat_id="oc_chat",
+        chat_type="p2p",
+        sender_id="ou_allowed",
+        sender_is_bot=False,
+        mentioned_bot=False,
+        raw_content_type="image",
+        body_text="",
+        safe_content_text="",
+        resources=[SimpleNamespace(type="image", file_key="img_denied")],
+        content=SimpleNamespace(image_key="img_denied"),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["message"](message)
+        await asyncio.sleep(0)
+        if runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    asyncio.run(scenario())
+
+    replies = [item[1].get("text", "") for item in channel.sent]
+    assert channel.download_calls == ["om_denied_image", None]
+    assert any("im:resource" in text for text in replies)
+    assert any("im:message:readonly" in text for text in replies)
+    assert any("发布新版本" in text for text in replies)
+
+
+def test_runtime_tracks_reconnect_state(tmp_path: Path) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(enabled=True, app_id="cli_test")
+    channel = FakeChannel()
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        channel.handlers["reconnecting"]()
+        assert runtime.public_status().status == "reconnecting"
+        channel.handlers["reconnected"]()
+
+    asyncio.run(scenario())
+    assert runtime.public_status().status == "connected"
 
 
 def test_runtime_handles_feature_card_action(tmp_path: Path) -> None:

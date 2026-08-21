@@ -17,7 +17,12 @@ export type HealthInfo = {
   llm_configured: boolean;
   model?: string | null;
   tool_count: number;
-  feishu_status?: "disabled" | "starting" | "connected" | "error";
+  feishu_status?:
+    | "disabled"
+    | "starting"
+    | "connected"
+    | "reconnecting"
+    | "error";
 };
 
 type TraceStep = {
@@ -65,6 +70,7 @@ type AgentJob = {
   message: string;
   asset_id: string;
   error: string | null;
+  kind?: "spatial_scene" | "photo_style_transfer";
 };
 
 type LocalMessage = {
@@ -78,6 +84,7 @@ type LocalMessage = {
   };
   run?: AgentRun;
   assetId?: string;
+  assetKind?: "spatial_scene" | "photo_style_transfer";
 };
 
 type LocalThread = {
@@ -107,6 +114,7 @@ type ConversationMessageResponse = {
   metadata?: {
     run?: AgentRun;
     asset_id?: string;
+    asset_kind?: "spatial_scene" | "photo_style_transfer";
     attachment?: {
       name?: string;
     };
@@ -129,6 +137,7 @@ type AgentConsoleProps = {
   health: HealthInfo | null;
   onConnectionChange: (ready: boolean) => void;
   onSpatialSceneReady: (assetId: string) => void;
+  onPhotoStyleReady: (assetId: string) => void;
 };
 
 const examples = [
@@ -147,8 +156,10 @@ export function AgentConsole({
   health,
   onConnectionChange,
   onSpatialSceneReady,
+  onPhotoStyleReady,
 }: AgentConsoleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const styleInputRef = useRef<HTMLInputElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const [localThreads, setLocalThreads] = useState<LocalThread[]>([]);
@@ -160,6 +171,8 @@ export function AgentConsole({
   const [message, setMessage] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState("");
+  const [styleAttachments, setStyleAttachments] = useState<File[]>([]);
+  const [styleAttachmentPreviews, setStyleAttachmentPreviews] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState("");
   const [job, setJob] = useState<AgentJob | null>(null);
@@ -226,6 +239,7 @@ export function AgentConsole({
                   : undefined,
                 run: item.metadata?.run,
                 assetId: item.metadata?.asset_id,
+                assetKind: item.metadata?.asset_kind,
               })),
           };
         }),
@@ -435,9 +449,46 @@ export function AgentConsole({
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function chooseStyleAttachments(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    setError("");
+    if (!files.length) return;
+    if (files.length > 3) {
+      setError("风格参考图最多选择 3 张。");
+      event.target.value = "";
+      return;
+    }
+    if (
+      files.some(
+        (file) =>
+          !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
+          file.size > 20 * 1024 * 1024,
+      )
+    ) {
+      setError("风格参考仅支持 20MB 以内的 JPG、PNG 或 WebP 图片。");
+      event.target.value = "";
+      return;
+    }
+    const previews = files.map((file) => URL.createObjectURL(file));
+    previews.forEach((preview) => previewUrlsRef.current.add(preview));
+    setStyleAttachments(files);
+    setStyleAttachmentPreviews(previews);
+    if (!message.trim()) setMessage("把内容图按参考图进行图片风格化");
+  }
+
+  function clearStyleAttachments() {
+    setStyleAttachments([]);
+    setStyleAttachmentPreviews([]);
+    if (styleInputRef.current) styleInputRef.current.value = "";
+  }
+
   async function runAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedLocal || !message.trim() || loading) return;
+    if (styleAttachments.length && !attachment) {
+      setError("图片风格化需要先选择一张内容图。");
+      return;
+    }
     const threadId = selectedLocal.id;
     const userText = message.trim();
     const sentAttachment = attachment
@@ -467,6 +518,7 @@ export function AgentConsole({
     setJob(null);
 
     let sourceImage: SourceImage | null = null;
+    const stagedStyleImages: SourceImage[] = [];
     try {
       if (attachment) {
         const uploadPayload = new FormData();
@@ -480,6 +532,18 @@ export function AgentConsole({
         }
         sourceImage = (await uploadResponse.json()) as SourceImage;
       }
+      for (const styleAttachment of styleAttachments) {
+        const uploadPayload = new FormData();
+        uploadPayload.append("file", styleAttachment);
+        const uploadResponse = await fetch(`${apiBase}/api/source-images`, {
+          method: "POST",
+          body: uploadPayload,
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(await responseError(uploadResponse));
+        }
+        stagedStyleImages.push((await uploadResponse.json()) as SourceImage);
+      }
 
       const response = await fetch(`${apiBase}/api/agent/run`, {
         method: "POST",
@@ -487,6 +551,7 @@ export function AgentConsole({
         body: JSON.stringify({
           message: userText,
           source_image_id: sourceImage?.id,
+          style_image_ids: stagedStyleImages.map((image) => image.id),
           session_id: threadId,
         }),
       });
@@ -509,6 +574,10 @@ export function AgentConsole({
           typeof sceneOutput?.asset_id === "string"
             ? sceneOutput.asset_id
             : undefined,
+        assetKind:
+          sceneOutput?.kind === "photo_style_transfer"
+            ? "photo_style_transfer"
+            : "spatial_scene",
       };
       updateThread(threadId, (thread) => ({
         ...thread,
@@ -528,13 +597,27 @@ export function AgentConsole({
               ? sceneOutput.message
               : "空间照片任务已创建。",
           error: null,
+          kind:
+            sceneOutput.kind === "photo_style_transfer"
+              ? "photo_style_transfer"
+              : "spatial_scene",
         });
-      } else if (sourceImage) {
-        await fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
-          method: "DELETE",
-        });
+      } else {
+        if (sourceImage) {
+          await fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
+            method: "DELETE",
+          });
+        }
+        await Promise.all(
+          stagedStyleImages.map((image) =>
+            fetch(`${apiBase}/api/source-images/${image.id}`, {
+              method: "DELETE",
+            }),
+          ),
+        );
       }
       clearAttachment();
+      clearStyleAttachments();
       await loadLocalConversations();
       onConnectionChange(true);
     } catch (requestError) {
@@ -544,6 +627,11 @@ export function AgentConsole({
           method: "DELETE",
         });
       }
+      stagedStyleImages.forEach((image) => {
+        void fetch(`${apiBase}/api/source-images/${image.id}`, {
+          method: "DELETE",
+        });
+      });
       const detail =
         requestError instanceof Error
           ? requestError.message
@@ -752,6 +840,7 @@ export function AgentConsole({
                   key={item.id}
                   item={item}
                   onOpenAsset={onSpatialSceneReady}
+                  onOpenStyle={onPhotoStyleReady}
                   onApprovalDecision={decideApproval}
                   approvalBusy={approvalBusy === item.run?.run_id}
                 />
@@ -787,8 +876,12 @@ export function AgentConsole({
                   <strong>{job.message}</strong>
                   <span>
                     {job.status === "completed"
-                      ? "空间照片已经可以查看"
-                      : "深度估计与分层正在本机执行"}
+                      ? job.kind === "photo_style_transfer"
+                        ? "风格化结果已经可以查看"
+                        : "空间照片已经可以查看"
+                      : job.kind === "photo_style_transfer"
+                        ? "图片风格化正在本机执行"
+                        : "深度估计与分层正在本机执行"}
                   </span>
                 </div>
                 <progress max="100" value={job.progress} />
@@ -797,9 +890,15 @@ export function AgentConsole({
                   {job.status === "completed" ? (
                     <button
                       type="button"
-                      onClick={() => onSpatialSceneReady(job.asset_id)}
+                      onClick={() =>
+                        job.kind === "photo_style_transfer"
+                          ? onPhotoStyleReady(job.asset_id)
+                          : onSpatialSceneReady(job.asset_id)
+                      }
                     >
-                      打开空间照片
+                      {job.kind === "photo_style_transfer"
+                        ? "打开风格化结果"
+                        : "打开空间照片"}
                     </button>
                   ) : null}
                 </div>
@@ -834,6 +933,24 @@ export function AgentConsole({
                 </button>
               </div>
             ) : null}
+            {styleAttachments.length ? (
+              <div className="composer-style-attachments">
+                <span>风格参考 · {styleAttachments.length}/3</span>
+                <div>
+                  {styleAttachments.map((file, index) => (
+                    <span className="composer-style-chip" key={`${file.name}-${index}`}>
+                      {/* Local object URL; it has not left this device. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={styleAttachmentPreviews[index]} alt="" />
+                      <small>{file.name}</small>
+                    </span>
+                  ))}
+                  <button type="button" onClick={clearStyleAttachments}>
+                    清空参考图
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <label className="sr-only" htmlFor="agent-chat-input">
               输入消息
             </label>
@@ -864,6 +981,14 @@ export function AgentConsole({
                   accept="image/jpeg,image/png,image/webp"
                   onChange={chooseAttachment}
                 />
+                <input
+                  ref={styleInputRef}
+                  className="sr-only"
+                  type="file"
+                  multiple
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={chooseStyleAttachments}
+                />
                 <button
                   className="composer-icon-button"
                   type="button"
@@ -871,6 +996,15 @@ export function AgentConsole({
                   aria-label="添加本地图片"
                 >
                   <AppIcon name="paperclip" width="19" height="19" />
+                </button>
+                <button
+                  className="composer-icon-button"
+                  type="button"
+                  onClick={() => styleInputRef.current?.click()}
+                  aria-label="添加风格参考图片"
+                  title="添加 1–3 张风格参考图"
+                >
+                  <AppIcon name="image" width="19" height="19" />
                 </button>
                 <span>{message.length} / 4000</span>
               </div>
@@ -918,11 +1052,13 @@ function ChatWelcome({ onExample }: { onExample: (text: string) => void }) {
 function LocalMessageBubble({
   item,
   onOpenAsset,
+  onOpenStyle,
   onApprovalDecision,
   approvalBusy,
 }: {
   item: LocalMessage;
   onOpenAsset: (assetId: string) => void;
+  onOpenStyle: (assetId: string) => void;
   onApprovalDecision: (runId: string, approved: boolean) => void;
   approvalBusy: boolean;
 }) {
@@ -948,10 +1084,20 @@ function LocalMessageBubble({
           <button
             className="asset-result-button"
             type="button"
-            onClick={() => onOpenAsset(item.assetId!)}
+            onClick={() =>
+              item.assetKind === "photo_style_transfer"
+                ? onOpenStyle(item.assetId!)
+                : onOpenAsset(item.assetId!)
+            }
           >
-            <AppIcon name="cube" width="18" height="18" />
-            查看生成的空间照片
+            <AppIcon
+              name={item.assetKind === "photo_style_transfer" ? "image" : "cube"}
+              width="18"
+              height="18"
+            />
+            {item.assetKind === "photo_style_transfer"
+              ? "查看图片风格化结果"
+              : "查看生成的空间照片"}
             <AppIcon name="chevron" width="15" height="15" />
           </button>
         ) : null}
