@@ -584,6 +584,19 @@ def create_app(
         except AssetError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post(
+        "/api/jobs/{job_id}/retry",
+        response_model=JobPublic,
+        status_code=202,
+    )
+    def retry_job(job_id: str, request: Request) -> JobPublic:
+        service: SpatialSceneService = request.app.state.spatial_service
+        try:
+            job, _ = service.retry_job(job_id)
+            return job
+        except AssetError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get(
         "/api/settings/providers",
         response_model=ProviderCatalogResponse,

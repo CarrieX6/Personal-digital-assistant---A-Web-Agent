@@ -364,7 +364,7 @@ class AssetRepository:
                     UPDATE jobs
                     SET status = 'failed',
                         stage = 'interrupted',
-                        message = '任务因本地服务重启而中断，请重新上传。',
+                        message = '任务因本地服务重启而中断，可以重新生成。',
                         error = '本地服务重启中断任务。',
                         updated_at = ?
                     WHERE status IN ('queued', 'running')
@@ -382,6 +382,17 @@ class AssetRepository:
                         for row in interrupted_jobs
                     ],
                 )
+            connection.execute(
+                """
+                UPDATE jobs
+                SET message = '任务因本地服务重启而中断，可以重新生成。',
+                    updated_at = ?
+                WHERE status = 'failed'
+                  AND stage = 'interrupted'
+                  AND message = '任务因本地服务重启而中断，请重新上传。'
+                """,
+                (interrupted_at,),
+            )
 
     def create_asset_and_job(
         self,
@@ -460,6 +471,44 @@ class AssetRepository:
                 f"UPDATE jobs SET {', '.join(assignments)} WHERE id = ?",
                 values,
             )
+
+    def claim_failed_job_retry(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> bool:
+        """Atomically move one failed job back to queued exactly once."""
+        owner_clause = ""
+        values: list[object] = [_now(), job_id]
+        if owner_id is not None:
+            owner_clause = (
+                " AND EXISTS (SELECT 1 FROM assets "
+                "WHERE assets.id = jobs.asset_id AND assets.owner_id = ?)"
+            )
+            values.append(owner_id)
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE jobs
+                SET status = 'queued', progress = 0, stage = 'queued',
+                    message = '任务已重新进入本地处理队列。',
+                    error = NULL, updated_at = ?
+                WHERE id = ? AND status = 'failed'{owner_clause}
+                """,
+                values,
+            )
+            if cursor.rowcount != 1:
+                return False
+            connection.execute(
+                """
+                UPDATE assets
+                SET status = 'processing', updated_at = ?
+                WHERE id = (SELECT asset_id FROM jobs WHERE id = ?)
+                """,
+                (_now(), job_id),
+            )
+            return True
 
     def complete_asset(
         self,
@@ -1037,6 +1086,47 @@ class SpatialSceneService:
         if row is None:
             raise AssetError("找不到这个任务。")
         return self._job_from_row(row)
+
+    def retry_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> tuple[JobPublic, bool]:
+        """Retry a failed spatial job using its persisted, sanitized source."""
+        job = self.get_job(job_id, owner_id=owner_id)
+        if job.kind != "spatial_scene":
+            raise AssetError("这个任务不支持空间照片重试。")
+        if job.status in {"queued", "running", "completed"}:
+            return job, False
+
+        asset_row = self.repository.get_asset_row(job.asset_id, owner_id)
+        if asset_row is None:
+            raise AssetError("找不到这个任务对应的空间照片资产。")
+        metadata = json.loads(asset_row["metadata_json"])
+        source_name = metadata.get("source_file")
+        if not isinstance(source_name, str):
+            raise AssetError("原始图片已经丢失，请重新上传。")
+        source_path = self.asset_dir / job.asset_id / source_name
+        if (
+            Path(source_name).name != source_name
+            or not source_path.is_file()
+        ):
+            raise AssetError("原始图片已经丢失，请重新上传。")
+
+        started = self.repository.claim_failed_job_retry(
+            job_id,
+            owner_id=owner_id,
+        )
+        refreshed = self.get_job(job_id, owner_id=owner_id)
+        if not started:
+            return refreshed, False
+
+        future = self.executor.submit(self._process, job.asset_id, job_id)
+        with self._future_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
+        return refreshed, True
 
     def list_assets(
         self,

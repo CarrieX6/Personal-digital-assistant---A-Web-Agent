@@ -494,6 +494,53 @@ def test_spatial_scene_pipeline_and_personal_asset_library(tmp_path: Path) -> No
     spatial.close()
 
 
+def test_failed_spatial_job_can_retry_without_creating_duplicate(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+        )
+    )
+    image = Image.new("RGB", (180, 120), "#8abda6")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    created = client.post(
+        "/api/spatial-scenes",
+        files={"file": ("retry.png", image_buffer.getvalue(), "image/png")},
+        data={"title": "可重试空间照片"},
+    ).json()
+    spatial.wait_for_idle()
+    job_id = created["job"]["id"]
+    asset_id = created["asset"]["id"]
+    spatial.repository.update_job(
+        job_id,
+        status="failed",
+        progress=100,
+        stage="interrupted",
+        message="任务因本地服务重启而中断，可以重新生成。",
+        error="本地服务重启中断任务。",
+    )
+    spatial.repository.fail_asset(asset_id)
+
+    first_retry = client.post(f"/api/jobs/{job_id}/retry")
+    second_retry = client.post(f"/api/jobs/{job_id}/retry")
+
+    assert first_retry.status_code == 202
+    assert second_retry.status_code == 202
+    assert first_retry.json()["id"] == job_id
+    assert second_retry.json()["id"] == job_id
+    assert len(client.get("/api/jobs").json()["jobs"]) == 1
+    spatial.wait_for_idle()
+    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "completed"
+    assert client.get(f"/api/assets/{asset_id}").json()["status"] == "ready"
+    spatial.close()
+
+
 def test_agent_creates_spatial_scene_from_local_attachment(tmp_path: Path) -> None:
     settings, _ = build_test_settings(tmp_path)
     spatial = build_test_spatial(tmp_path)

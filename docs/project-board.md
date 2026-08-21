@@ -113,7 +113,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | --- | --- | --- | --- | --- | --- | --- |
 | `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 已按 [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)实现单工具循环、Policy、硬预算、Interrupt 审批、持久化 Run、Web/飞书批准与拒绝、跨重启恢复和幂等执行账本；待强制超时、运行中恢复、审批过期、Outbox 和费用预算 |
 | `AGENT-002` | P1 | 单 Agent、多 Agent 和确定性工作流的使用边界 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 场景边界、通信成本、调试与评测方案 |
-| `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `⬜ 未开始` | `🧱 局部实现` | 待领取 | 状态机、持久化 Schema、重启恢复实验和接口定义 |
+| `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 空间照片已实现失败任务复用原始图片的一键重试、原子抢占防重复执行、Web 恢复入口和 API 测试；待抽象为通用 Job、取消、进程级恢复、退避和通知策略 |
 | `EVAL-001` | P1 | 如何评价规划正确率、工具调用成功率和任务完成率 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准任务集、指标、回归测试入口 |
 
 ## 5. 外部控制与结果回传
@@ -121,7 +121,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态、出站重试和任务回收；待真实断网/休眠/恢复实验与指标 |
-| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；`codex/fix-channel-conversation-ui` 已在本地补图片事件到空间资产预览 URL 的关联，并把图片风格化加入飞书菜单；待真实飞书新图片回归与多图角色收集，文件/视频仍未做 |
+| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；`codex/fix-channel-conversation-ui` 已在本地补图片预览关联、图片风格化菜单，以及空间任务失败后的飞书“重新生成”卡片；待真实飞书新图片与卡片点击回归、多图角色收集，文件/视频仍未做 |
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；`codex/fix-channel-conversation-ui` 已在本地增加飞书图片预览、卡片语义化展示和按 `chat_id` 删除只读镜像；待真机验收、群聊 sender 边界、隐私保留策略和统一 Message 迁移 |
 | `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并独立 `8766` 只读 Viewer、HMAC 短时链接、文件白名单、触控/陀螺仪视差与安全响应头；待 iOS/Android 真机、弱网和链接撤销测试，GLB/3DGS 未接入 |

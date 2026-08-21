@@ -1969,6 +1969,13 @@ textarea:focus {
   font-size: 12px;
 }
 
+.job-card small {
+  display: block;
+  margin-top: 5px;
+  color: #7b6964;
+  font-size: 10px;
+}
+
 .job-card.failed {
   border-color: #efc9c6;
 }
@@ -1994,6 +2001,40 @@ textarea:focus {
   color: var(--green);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
+}
+
+.job-progress-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.job-retry-button {
+  min-width: 92px;
+  min-height: 44px;
+  padding: 0 14px;
+  color: white;
+  background: var(--green);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.job-retry-button:hover:not(:disabled) {
+  background: #0d654e;
+}
+
+.job-retry-button:focus-visible {
+  outline: 3px solid rgba(19, 123, 91, 0.28);
+  outline-offset: 2px;
+}
+
+.job-retry-button:disabled,
+.job-message-footer button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .spatial-error {
@@ -2323,6 +2364,15 @@ textarea:focus {
 
   .job-progress {
     min-width: 0;
+  }
+
+  .job-progress-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .job-retry-button {
+    width: 100%;
   }
 
   .asset-grid {
@@ -3219,6 +3269,7 @@ textarea:focus {
   background: var(--green);
   border: 0;
   border-radius: 8px;
+  cursor: pointer;
   font-size: 9px;
   font-weight: 700;
 }
@@ -3615,6 +3666,52 @@ textarea:focus {
   color: #315e4d;
   background: #f0f6f3;
   border: 1px solid #d8e7df;
+  border-radius: 7px;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.channel-retry-card {
+  width: min(420px, 66vw);
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 11px;
+}
+
+.channel-retry-card .function-card-icon {
+  color: #9b423b;
+  background: #f9e9e6;
+}
+
+.channel-retry-card small,
+.channel-retry-card strong {
+  display: block;
+}
+
+.channel-retry-card small {
+  color: #8f6d66;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.channel-retry-card strong {
+  margin-top: 3px;
+  color: #593530;
+  font-size: 13px;
+}
+
+.channel-retry-card p {
+  margin: 6px 0 8px;
+  color: #7b625d;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.channel-retry-card div > span {
+  display: inline-block;
+  padding: 5px 8px;
+  color: #7d3b35;
+  background: #fff2ef;
   border-radius: 7px;
   font-size: 8px;
   font-weight: 700;
@@ -4186,6 +4283,10 @@ textarea:focus {
   }
 
   .channel-function-card {
+    width: min(420px, 72vw);
+  }
+
+  .channel-retry-card {
     width: min(420px, 72vw);
   }
 

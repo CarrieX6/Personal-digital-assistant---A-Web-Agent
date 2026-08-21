@@ -184,6 +184,7 @@ export function AgentConsole({
   const [loading, setLoading] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState("");
   const [job, setJob] = useState<AgentJob | null>(null);
+  const [retryingJob, setRetryingJob] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -372,6 +373,55 @@ export function AgentConsole({
     }, 900);
     return () => window.clearTimeout(timer);
   }, [apiBase, job, onConnectionChange]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(`${apiBase}/api/jobs?limit=50`, {
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        const body = (await response.json()) as { jobs: AgentJob[] };
+        const recoverableJob = body.jobs.find(
+          (item) =>
+            item.kind === "spatial_scene" &&
+            ["queued", "running", "failed"].includes(item.status),
+        );
+        if (recoverableJob) {
+          setJob((current) => current ?? recoverableJob);
+        }
+      } catch {
+        // The regular health checks own backend connectivity feedback.
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [apiBase]);
+
+  async function retryCurrentJob() {
+    if (!job || job.status !== "failed" || retryingJob) return;
+    setRetryingJob(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/jobs/${encodeURIComponent(job.id)}/retry`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      const nextJob = (await response.json()) as AgentJob;
+      setJob({ ...nextJob, kind: job.kind });
+      setNotice("已复用原始图片，任务重新进入本地处理队列。");
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "重新生成失败，请稍后再试。",
+      );
+    } finally {
+      setRetryingJob(false);
+    }
+  }
 
   const feishuThreads = useMemo(() => {
     const grouped = new Map<string, ChannelMessage[]>();
@@ -970,6 +1020,8 @@ export function AgentConsole({
                       ? job.kind === "photo_style_transfer"
                         ? "风格化结果已经可以查看"
                         : "空间照片已经可以查看"
+                      : job.status === "failed"
+                        ? "原始图片仍保存在本机，可以直接重试"
                       : job.kind === "photo_style_transfer"
                         ? "图片风格化正在本机执行"
                         : "深度估计与分层正在本机执行"}
@@ -990,6 +1042,15 @@ export function AgentConsole({
                       {job.kind === "photo_style_transfer"
                         ? "打开风格化结果"
                         : "打开空间照片"}
+                    </button>
+                  ) : job.status === "failed" &&
+                    job.kind !== "photo_style_transfer" ? (
+                    <button
+                      type="button"
+                      onClick={() => void retryCurrentJob()}
+                      disabled={retryingJob}
+                    >
+                      {retryingJob ? "重新排队中…" : "重新生成"}
                     </button>
                   ) : null}
                 </div>
@@ -1384,6 +1445,18 @@ function ChannelMessageBubble({
               </ul>
             </div>
           </div>
+        ) : card?.variant === "retry" ? (
+          <div className="channel-retry-card">
+            <span className="function-card-icon" aria-hidden="true">
+              <AppIcon name="cube" width="19" height="19" />
+            </span>
+            <div>
+              <small>空间照片任务</small>
+              <strong>生成失败，可以重新生成</strong>
+              <p>{card.text}</p>
+              <span>请在飞书中点击“重新生成”</span>
+            </div>
+          </div>
         ) : item.kind !== "image" ? (
           <>
             {card?.variant === "action" ? (
@@ -1406,7 +1479,19 @@ function ChannelMessageBubble({
 }
 
 function parseFunctionCard(item: ChannelMessage) {
-  const text = cleanMessageText(item.content).replace(
+  const cleaned = cleanMessageText(item.content);
+  if (item.direction === "outbound" && cleaned.startsWith("[重试卡片]")) {
+    return {
+      variant: "retry" as const,
+      items: [] as string[],
+      text:
+        cleaned
+          .replace(/^\[重试卡片\]\s*/, "")
+          .replace(/^空间照片生成失败、重新生成：\s*/, "") ||
+        "本地任务执行失败。",
+    };
+  }
+  const text = cleaned.replace(
     /^\[功能卡片\]\s*/,
     "",
   );

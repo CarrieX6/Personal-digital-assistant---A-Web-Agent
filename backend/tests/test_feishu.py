@@ -580,6 +580,94 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
     assert "图片风格化" in store.list_events()[-2].content
 
 
+def test_runtime_retry_card_reuses_failed_spatial_job(tmp_path: Path) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+    spatial = build_test_spatial(tmp_path)
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        job_poll_interval=0.01,
+        job_timeout_seconds=5,
+    )
+    image = Image.new("RGB", (160, 120), "#7fae98")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    owner_id = "feishu:cli_test:ou_allowed"
+    created = spatial.create_scene(
+        image_buffer.getvalue(),
+        original_name="retry.png",
+        owner_id=owner_id,
+    )
+    spatial.wait_for_idle()
+    spatial.repository.update_job(
+        created.job.id,
+        status="failed",
+        progress=100,
+        stage="interrupted",
+        message="任务因本地服务重启而中断，可以重新生成。",
+        error="本地服务重启中断任务。",
+    )
+    spatial.repository.fail_asset(created.asset.id)
+    event = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_retry",
+        operator=SimpleNamespace(open_id="ou_allowed"),
+        action=SimpleNamespace(
+            value={
+                "command": "retry_spatial_job",
+                "job_id": created.job.id,
+            }
+        ),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await runtime._send_spatial_retry_card(
+            "oc_chat",
+            "om_failed",
+            created.job.id,
+            "本地服务重启中断任务。",
+        )
+        await channel.handlers["cardAction"](event)
+        await asyncio.sleep(0)
+        if runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    asyncio.run(scenario())
+
+    card_payload = next(item[1]["card"] for item in channel.sent if "card" in item[1])
+    card_json = json.dumps(card_payload, ensure_ascii=False)
+    assert "重新生成" in card_json
+    assert "retry_spatial_job" in card_json
+    assert created.job.id in card_json
+    assert any(
+        "重新进入本地处理队列" in item[1].get("text", "")
+        for item in channel.sent
+    )
+    assert any(
+        "已生成完成" in item[1].get("text", "") for item in channel.sent
+    )
+    assert spatial.get_job(created.job.id, owner_id=owner_id).status == "completed"
+    assert any(
+        "重新生成空间照片" in event.content
+        for event in store.list_events()
+        if event.kind == "card"
+    )
+    spatial.close()
+
+
 def test_channel_message_history_api_returns_local_events(
     tmp_path: Path,
 ) -> None:
