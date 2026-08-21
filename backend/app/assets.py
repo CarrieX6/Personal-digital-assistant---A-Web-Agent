@@ -306,6 +306,7 @@ class AssetRepository:
                 """
                 CREATE TABLE IF NOT EXISTS assets (
                     id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL DEFAULT 'local',
                     kind TEXT NOT NULL,
                     name TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -315,6 +316,19 @@ class AssetRepository:
                 )
                 """
             )
+            asset_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(assets)"
+                ).fetchall()
+            }
+            if "owner_id" not in asset_columns:
+                connection.execute(
+                    """
+                    ALTER TABLE assets
+                    ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'
+                    """
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -376,17 +390,23 @@ class AssetRepository:
         job_id: str,
         name: str,
         metadata: dict,
+        owner_id: str = "local",
+        kind: str = "spatial_scene",
+        queued_message: str = "任务已进入本地处理队列。",
     ) -> None:
         timestamp = _now()
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO assets
-                (id, kind, name, status, metadata_json, created_at, updated_at)
-                VALUES (?, 'spatial_scene', ?, 'processing', ?, ?, ?)
+                (id, owner_id, kind, name, status, metadata_json,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'processing', ?, ?, ?)
                 """,
                 (
                     asset_id,
+                    owner_id,
+                    kind,
                     name,
                     json.dumps(metadata, ensure_ascii=False),
                     timestamp,
@@ -398,10 +418,16 @@ class AssetRepository:
                 INSERT INTO jobs
                 (id, kind, status, progress, stage, message, asset_id, error,
                  created_at, updated_at)
-                VALUES (?, 'spatial_scene', 'queued', 0, 'queued',
-                        '任务已进入本地处理队列。', ?, NULL, ?, ?)
+                VALUES (?, ?, 'queued', 0, 'queued', ?, ?, NULL, ?, ?)
                 """,
-                (job_id, asset_id, timestamp, timestamp),
+                (
+                    job_id,
+                    kind,
+                    queued_message,
+                    asset_id,
+                    timestamp,
+                    timestamp,
+                ),
             )
 
     def update_job(
@@ -457,40 +483,102 @@ class AssetRepository:
                 (_now(), asset_id),
             )
 
-    def get_asset_row(self, asset_id: str) -> sqlite3.Row | None:
+    def get_asset_row(
+        self,
+        asset_id: str,
+        owner_id: str | None = None,
+    ) -> sqlite3.Row | None:
         with self._connect() as connection:
+            if owner_id is not None:
+                return connection.execute(
+                    "SELECT * FROM assets WHERE id = ? AND owner_id = ?",
+                    (asset_id, owner_id),
+                ).fetchone()
             return connection.execute(
                 "SELECT * FROM assets WHERE id = ?",
                 (asset_id,),
             ).fetchone()
 
-    def get_job_row(self, job_id: str) -> sqlite3.Row | None:
+    def get_job_row(
+        self,
+        job_id: str,
+        owner_id: str | None = None,
+    ) -> sqlite3.Row | None:
         with self._connect() as connection:
+            if owner_id is not None:
+                return connection.execute(
+                    """
+                    SELECT jobs.* FROM jobs
+                    JOIN assets ON assets.id = jobs.asset_id
+                    WHERE jobs.id = ? AND assets.owner_id = ?
+                    """,
+                    (job_id, owner_id),
+                ).fetchone()
             return connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
 
-    def list_asset_rows(self, limit: int = 50) -> list[sqlite3.Row]:
+    def list_asset_rows(
+        self,
+        limit: int = 50,
+        owner_id: str | None = None,
+    ) -> list[sqlite3.Row]:
         with self._connect() as connection:
+            if owner_id is not None:
+                return connection.execute(
+                    """
+                    SELECT * FROM assets
+                    WHERE owner_id = ?
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (owner_id, limit),
+                ).fetchall()
             return connection.execute(
                 "SELECT * FROM assets ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
 
-    def list_job_rows(self, limit: int = 50) -> list[sqlite3.Row]:
+    def list_job_rows(
+        self,
+        limit: int = 50,
+        owner_id: str | None = None,
+    ) -> list[sqlite3.Row]:
         with self._connect() as connection:
+            if owner_id is not None:
+                return connection.execute(
+                    """
+                    SELECT jobs.* FROM jobs
+                    JOIN assets ON assets.id = jobs.asset_id
+                    WHERE assets.owner_id = ?
+                    ORDER BY jobs.created_at DESC LIMIT ?
+                    """,
+                    (owner_id, limit),
+                ).fetchall()
             return connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
 
-    def delete_asset(self, asset_id: str) -> bool:
+    def delete_asset(
+        self,
+        asset_id: str,
+        owner_id: str | None = None,
+    ) -> bool:
         with self._lock, self._connect() as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM assets WHERE id = ?",
-                (asset_id,),
-            ).fetchone()
+            if owner_id is None:
+                exists = connection.execute(
+                    "SELECT 1 FROM assets WHERE id = ?",
+                    (asset_id,),
+                ).fetchone()
+            else:
+                exists = connection.execute(
+                    """
+                    SELECT 1 FROM assets
+                    WHERE id = ? AND owner_id = ?
+                    """,
+                    (asset_id, owner_id),
+                ).fetchone()
             if not exists:
                 return False
             connection.execute("DELETE FROM jobs WHERE asset_id = ?", (asset_id,))
@@ -544,6 +632,7 @@ class SpatialSceneService:
         image_bytes: bytes,
         *,
         original_name: str,
+        owner_id: str = "local",
     ) -> SourceImagePublic:
         if not image_bytes:
             raise AssetError("请选择一张图片。")
@@ -565,6 +654,7 @@ class SpatialSceneService:
             "width": image.width,
             "height": image.height,
             "size_bytes": source_path.stat().st_size,
+            "owner_id": owner_id,
         }
         metadata_path = directory / "metadata.json"
         metadata_path.write_text(
@@ -574,7 +664,12 @@ class SpatialSceneService:
         os.chmod(metadata_path, 0o600)
         return SourceImagePublic(**metadata)
 
-    def get_source_image(self, source_image_id: str) -> SourceImagePublic:
+    def get_source_image(
+        self,
+        source_image_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> SourceImagePublic:
         if (
             not source_image_id
             or Path(source_image_id).name != source_image_id
@@ -587,12 +682,19 @@ class SpatialSceneService:
             raise AssetError("图片附件不存在或已经过期，请重新选择。")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if owner_id is not None and metadata.get("owner_id", "local") != owner_id:
+                raise AssetError("图片附件不属于当前用户。")
             return SourceImagePublic(**metadata)
         except (OSError, ValueError, TypeError) as exc:
             raise AssetError("图片附件信息无法读取，请重新选择。") from exc
 
-    def delete_source_image(self, source_image_id: str) -> None:
-        self.get_source_image(source_image_id)
+    def delete_source_image(
+        self,
+        source_image_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
+        self.get_source_image(source_image_id, owner_id=owner_id)
         shutil.rmtree(self.source_image_dir / source_image_id, ignore_errors=True)
 
     def create_scene_from_source(
@@ -600,18 +702,20 @@ class SpatialSceneService:
         source_image_id: str,
         *,
         title: str | None = None,
+        owner_id: str = "local",
     ) -> SpatialSceneCreateResponse:
-        source = self.get_source_image(source_image_id)
+        source = self.get_source_image(source_image_id, owner_id=owner_id)
         source_path = self.source_image_dir / source_image_id / "source.webp"
         try:
             created = self.create_scene(
                 source_path.read_bytes(),
                 original_name=source.original_name,
                 title=title,
+                owner_id=owner_id,
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
-        self.delete_source_image(source_image_id)
+        self.delete_source_image(source_image_id, owner_id=owner_id)
         return created
 
     def _write_layered_assets(
@@ -694,6 +798,7 @@ class SpatialSceneService:
         *,
         original_name: str,
         title: str | None = None,
+        owner_id: str = "local",
     ) -> SpatialSceneCreateResponse:
         if not image_bytes:
             raise AssetError("请选择一张图片。")
@@ -728,6 +833,7 @@ class SpatialSceneService:
             job_id=job_id,
             name=_safe_title(title, fallback_title),
             metadata=metadata,
+            owner_id=owner_id,
         )
         future = self.executor.submit(self._process, asset_id, job_id)
         with self._future_lock:
@@ -871,7 +977,7 @@ class SpatialSceneService:
 
         return AssetPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             name=row["name"],
             status=row["status"],
             width=metadata.get("width"),
@@ -882,7 +988,15 @@ class SpatialSceneService:
             background_url=url_for("background_file"),
             foreground_url=url_for("foreground_file"),
             manifest_url=url_for("manifest_file"),
+            result_url=url_for("result_file"),
+            style_reference_urls=[
+                f"{base}/{filename}"
+                for filename in metadata.get("style_files", [])
+                if isinstance(filename, str)
+            ],
             model_name=metadata.get("model_name"),
+            provider_name=metadata.get("provider_name"),
+            parameters=metadata.get("parameters", {}),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -891,7 +1005,7 @@ class SpatialSceneService:
     def _job_from_row(row: sqlite3.Row) -> JobPublic:
         return JobPublic(
             id=row["id"],
-            kind="spatial_scene",
+            kind=row["kind"],
             status=row["status"],
             progress=row["progress"],
             stage=row["stage"],
@@ -902,28 +1016,48 @@ class SpatialSceneService:
             updated_at=row["updated_at"],
         )
 
-    def get_asset(self, asset_id: str) -> AssetPublic:
-        row = self.repository.get_asset_row(asset_id)
+    def get_asset(
+        self,
+        asset_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> AssetPublic:
+        row = self.repository.get_asset_row(asset_id, owner_id)
         if row is None:
             raise AssetError("找不到这个个人资产。")
         return self._asset_from_row(row)
 
-    def get_job(self, job_id: str) -> JobPublic:
-        row = self.repository.get_job_row(job_id)
+    def get_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> JobPublic:
+        row = self.repository.get_job_row(job_id, owner_id)
         if row is None:
             raise AssetError("找不到这个任务。")
         return self._job_from_row(row)
 
-    def list_assets(self, limit: int = 50) -> list[AssetPublic]:
+    def list_assets(
+        self,
+        limit: int = 50,
+        *,
+        owner_id: str | None = None,
+    ) -> list[AssetPublic]:
         return [
             self._asset_from_row(row)
-            for row in self.repository.list_asset_rows(limit)
+            for row in self.repository.list_asset_rows(limit, owner_id)
         ]
 
-    def list_jobs(self, limit: int = 50) -> list[JobPublic]:
+    def list_jobs(
+        self,
+        limit: int = 50,
+        *,
+        owner_id: str | None = None,
+    ) -> list[JobPublic]:
         return [
             self._job_from_row(row)
-            for row in self.repository.list_job_rows(limit)
+            for row in self.repository.list_job_rows(limit, owner_id)
         ]
 
     def resolve_asset_file(self, asset_id: str, filename: str) -> Path:
@@ -936,6 +1070,13 @@ class SpatialSceneService:
             for key, value in metadata.items()
             if key.endswith("_file") and isinstance(value, str)
         }
+        allowed.update(
+            filename
+            for key, value in metadata.items()
+            if key.endswith("_files") and isinstance(value, list)
+            for filename in value
+            if isinstance(filename, str)
+        )
         if filename not in allowed or Path(filename).name != filename:
             raise AssetError("找不到这个资产文件。")
         path = self.asset_dir / asset_id / filename
@@ -943,10 +1084,15 @@ class SpatialSceneService:
             raise AssetError("资产文件尚未生成。")
         return path
 
-    def delete_asset(self, asset_id: str) -> None:
+    def delete_asset(
+        self,
+        asset_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
         if Path(asset_id).name != asset_id:
             raise AssetError("资产标识无效。")
-        if not self.repository.delete_asset(asset_id):
+        if not self.repository.delete_asset(asset_id, owner_id):
             raise AssetError("找不到这个个人资产。")
         shutil.rmtree(self.asset_dir / asset_id, ignore_errors=True)
 
@@ -965,7 +1111,12 @@ def register_asset_tools(
     service: SpatialSceneService,
 ) -> None:
     def list_personal_assets(_: dict) -> dict:
-        assets = service.list_assets(limit=20)
+        from .tools import current_tool_context
+
+        assets = service.list_assets(
+            limit=20,
+            owner_id=current_tool_context().owner_id,
+        )
         return {
             "assets": [
                 {
@@ -990,6 +1141,8 @@ def register_asset_tools(
         return job.model_dump(mode="json")
 
     def create_spatial_scene(arguments: dict) -> dict:
+        from .tools import current_tool_context
+
         source_image_id = arguments.get("source_image_id")
         if not isinstance(source_image_id, str) or not source_image_id.strip():
             raise ToolError("create_spatial_scene requires a source_image_id")
@@ -1000,6 +1153,7 @@ def register_asset_tools(
             created = service.create_scene_from_source(
                 source_image_id.strip(),
                 title=title.strip() if isinstance(title, str) else None,
+                owner_id=current_tool_context().owner_id,
             )
         except AssetError as exc:
             raise ToolError(str(exc)) from exc
@@ -1008,6 +1162,7 @@ def register_asset_tools(
             "job_id": created.job.id,
             "status": created.job.status,
             "progress": created.job.progress,
+            "kind": created.asset.kind,
             "message": "空间照片任务已在本机创建，正在进行深度估计。",
         }
 
@@ -1043,6 +1198,8 @@ def register_asset_tools(
                 "additionalProperties": False,
             },
             create_spatial_scene,
+            risk_level="local_write",
+            idempotent=False,
         )
     )
     registry.register(

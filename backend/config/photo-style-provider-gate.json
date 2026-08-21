@@ -1,0 +1,65 @@
+{
+  "schema_version": "native_provider_gate_v1",
+  "provider": "sdxl_ip_adapter_8gb_v1",
+  "status": "accepted_upstream",
+  "accepted_at": "2026-08-10T00:00:00+08:00",
+  "acceptance_source": "frogi-m/pic-style explicit user review",
+  "source_repository": "https://github.com/frogi-m/pic-style",
+  "source_commit": "c8e0b641f7f334faf73167211b5f0a8033e3b1dc",
+  "source_model_manifest_fingerprint": "4b42cfcbd6febc8c79a6970dcb3ff580b080d1a53aaaf4b908ab0a77c38a23d8",
+  "accepted_candidate": {
+    "scheduler": "DPMSolverMultistepScheduler",
+    "effective_steps": 16,
+    "style_scale": 0.85,
+    "denoise_strength": 0.42,
+    "guidance_scale": 6.0,
+    "seed": 1701
+  },
+  "engineering_gate": {
+    "cases_succeeded": 20,
+    "cases_total": 20,
+    "preview_p50_seconds": 5.8114,
+    "preview_p95_seconds": 6.3312,
+    "peak_reserved_vram_mib": 6572,
+    "ten_run_stability": true
+  },
+  "local_validation_required": true,
+  "local_validation": {
+    "status": "engineering_smoke_passed",
+    "production_quality": false,
+    "validated_at": "2026-08-13T19:03:59+08:00",
+    "experiment_id": "STYLE-EXP-003",
+    "device": "NVIDIA GeForce RTX 4060 Laptop GPU (8188 MiB)",
+    "runtime": {
+      "python": "3.13.0",
+      "torch": "2.11.0+cu128",
+      "torchvision": "0.26.0+cu128",
+      "diffusers": "0.35.2",
+      "transformers": "4.57.6",
+      "accelerate": "1.14.0",
+      "peft": "0.19.1",
+      "driver": "592.00"
+    },
+    "model_lock_sha256": "92a4b65f1421c281c4b006cdbb01645f298a727278180833cd0ae79cc99054b3",
+    "input_sha256": {
+      "content": "22c442fd44c82a702b615d14e2a5ec784d04a9a4a8dee8a1fd0bcb1c8da768c9",
+      "style": "2c358e6be1982d4c06b166e348212ba0dac29eb201e6a3da55f7b2090885d902"
+    },
+    "cases": [
+      {
+        "path": "base_preview_fallback_v1",
+        "actual_steps": 12,
+        "generation_seconds": 8.247,
+        "peak_reserved_vram_mib": 6278,
+        "output_sha256": "9791c90819baa0c7e21cdd6af7dbfe45591402d4e9e4a17234404535b7f5bd9f"
+      },
+      {
+        "path": "lcm_lora_sdxl_preview_v1",
+        "actual_steps": 6,
+        "generation_seconds": 8.048,
+        "peak_reserved_vram_mib": 6502,
+        "output_sha256": "823a1a9a47f54c55b7744cf7e851cd5b550cffd14aca7612303216eb11a916d4"
+      }
+    ]
+  }
+}

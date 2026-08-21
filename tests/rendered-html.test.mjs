@@ -21,7 +21,8 @@ test("server-renders the personal Agent Lab shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>Agent Lab · 个人数字助手<\/title>/i);
   assert.match(html, /Agent Lab/);
-  assert.match(html, /让一张平面照片拥有空间视角/);
-  assert.match(html, /虚拟试衣/);
+  assert.match(html, /本机私有会话/);
+  assert.match(html, /对话、图片、工具结果和执行轨迹/);
+  assert.match(html, /工具库/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });

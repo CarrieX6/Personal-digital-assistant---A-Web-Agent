@@ -1,7 +1,7 @@
 # 个人数字助手系统架构
 
 作者：**Zhuofan Xie**  
-更新日期：2026-07-27
+更新日期：2026-07-29
 
 ## 1. 产品目标
 
@@ -93,13 +93,15 @@ Channel Adapter 只负责：
 
 ### 3.3 Agent Orchestrator
 
-复用当前 `AgentRunner`，后续增加：
+当前 `AgentRunner` 已使用 LangGraph `StateGraph` 实现
+`plan → policy → execute_tool → observe → decide` 受控循环，并以 SQLite
+Checkpointer 按会话保存执行状态。当前已加入工具 Schema、步数、重规划、连续错误、
+总运行时间和递归上限。高风险 Tool 已可通过 LangGraph Interrupt 暂停，在 Web Root
+或飞书审批后从 Checkpoint 恢复；SQLite 执行账本负责重放幂等。下一阶段增加：
 
-- 多轮会话状态；
-- 工具循环与任务恢复；
-- 记忆检索和写入策略；
+- 正在执行节点的进程级失败恢复；
 - 异步任务提交后立即返回；
-- 高风险工具审批；
+- 审批过期、审计和费用预算；
 - 结果 Presenter 选择。
 
 ### 3.4 Memory Service
@@ -113,8 +115,10 @@ Channel Adapter 只负责：
 | 任务记忆 | 输入、工具轨迹、结果、错误 | 长期可审计 |
 | 资产记忆 | 图片、3D 资产和派生关系 | 由用户管理 |
 
-首版使用 SQLite 即可。敏感字段加密，支持按用户查看、导出和删除，不默认把所有
-对话永久保存。
+首版已经使用 SQLite 保存按 `owner_id` 隔离的显式长期记忆，以及按
+`owner_id + thread_id` 隔离的最近会话。飞书私聊和群聊中的同一用户分别拥有独立
+会话上下文；长期记忆仍归属于该用户。当前支持查看、全部删除和清空当前会话，后续
+补充单条删除、导出、敏感字段加密和自动保留期限。
 
 ### 3.5 Capability Registry
 
@@ -205,16 +209,19 @@ sequenceDiagram
 
 | 目标模块 | 当前代码 | 状态 |
 | --- | --- | --- |
-| Agent Orchestrator | `backend/app/agent.py` | 基础完成 |
-| Capability Registry | `backend/app/tools.py` | 基础完成 |
-| LLM Planner | `backend/app/llm.py` | 基础完成 |
-| Job Queue | `backend/app/assets.py` | 空间照片专用 |
-| Asset Store | `backend/app/assets.py` | 基础完成 |
-| Web Control UI | `app/components/AgentConsole.tsx` | 完成 |
-| Channel Gateway | 尚无 | 待开发 |
-| Memory Service | 尚无 | 待开发 |
+| Agent Orchestrator | `backend/app/agent.py`、`backend/app/orchestration.py` | LangGraph 受控循环 + SQLite Checkpointer；支持观察重规划、硬预算、Interrupt 审批、跨重启恢复和工具执行账本，待运行中恢复与费用预算 |
+| Capability Registry | `backend/app/tools.py` | 基础注册、Schema 导出和调用前基础校验；缺角色权限、超时、版本和副作用等级 |
+| LLM Planner | `backend/app/llm.py` | OpenAI-compatible MVP；供应商兼容性待评测 |
+| Job Queue | `backend/app/assets.py` | 空间照片专用；通用恢复和 Outbox 未实现 |
+| Asset Store | `backend/app/assets.py` | 空间照片资产已加入 owner 隔离；本地 HTTP 接口鉴权与签名访问未完成 |
+| Web Control UI | `app/components/AgentConsole.tsx` | Web 会话列表和消息已改为服务端 SQLite 唯一数据源；飞书仍为渠道日志只读镜像 |
+| Channel Gateway | `backend/app/feishu.py`、`channel_settings.py` | 飞书文本、单图下载、空间任务、封面回传和卡片 MVP；统一 Adapter、Outbox、文件/视频待实现 |
+| Memory Service | `backend/app/memory.py` | SQLite 会话、消息、长期记忆和持久化 Agent Run；已按用户/渠道/会话隔离，待飞书统一消息迁移、导出、加密和保留策略 |
 | Preview Export | 尚无 | 待开发 |
 | Capability Installer | 尚无 | 待开发 |
+
+从当前代码逐阶段走向目标架构的学习、实现和验收顺序见
+[从零到可运行个人数字助手](../learning/implementation-roadmap.md)。
 
 ## 6. 安全边界
 

@@ -40,11 +40,17 @@ __pycache__/
 *.egg-info/
 /backend/data/*.jsonl
 /backend/data/settings.json
+/backend/data/feishu_settings.json
 /backend/data/*.enc
 /backend/data/.secret_master_key
+/backend/data/viewer-secret.key
+/backend/data/viewer-public-url.json
+/backend/data/channel.sqlite3*
 /backend/data/assets/
 /backend/data/source-images/
 /backend/data/assets.sqlite3*
+/backend/data/agent_checkpoints.sqlite3*
+/backend/data/agent_memory.sqlite3*
 
 # vercel
 .vercel
@@ -55,3 +61,4 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/backend/models/

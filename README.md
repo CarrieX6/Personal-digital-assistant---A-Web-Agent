@@ -26,15 +26,15 @@ Demo。
 
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
-| Web Agent 控制台 | 已完成 | 展示规划、工具调用和最终回答 |
-| LLM 供应商配置 | 已完成 | DeepSeek、OpenAI、Qwen、GLM、自定义兼容接口 |
-| 本地工具注册表 | 已完成 | 文本工具、资产查询、任务查询、空间照片生成 |
-| 本地资产与异步任务 | 已完成 | SQLite 索引、文件资产、任务进度 |
+| Web Agent 对话工作台 | MVP | 主页为图文对话和 Root 审批队列；会话、Run 与 LangGraph 轨迹由 SQLite 持久化 |
+| LLM 供应商配置 | MVP | 预置 DeepSeek、OpenAI、Qwen、GLM 和自定义兼容接口；可用性待逐项实测 |
+| 本地工具注册表 | MVP | 文本、资产、任务、空间照片和图片个性化工具；支持 Schema、Capability Manifest、风险等级、审批与幂等声明 |
+| 本地资产与异步任务 | 局部实现 | SQLite 索引、文件资产、任务进度；目前仅空间照片专用且未验证重启恢复 |
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
-| 外部聊天入口 | 未实现 | 首期计划接入飞书长连接 |
-| 结果回传适配 | 未实现 | 图片、短视频、文件、交互预览链接 |
-| 长期记忆 | 未实现 | 用户、会话、任务和偏好记忆 |
-| 功能/模型库 | 未实现 | 清单、安装、版本、依赖与许可管理 |
+| 飞书聊天入口 | 文本闭环已实测，图片权限待用户发布应用版本 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载 |
+| 结果回传适配 | 局部实现 | 富文本、状态、功能卡片、封面和短时签名 Viewer；局域网已实现，公网 HTTPS 测试隧道需用户显式启用，固定域名待实现 |
+| 会话与长期记忆 | MVP | SQLite 按用户/渠道/会话隔离；Web 会话列表与消息 API 已完成，支持显式记住、查看、忘记与清空当前对话 |
+| 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
 ## 总体架构
@@ -60,13 +60,20 @@ flowchart LR
 
 ### 1. Web Agent
 
-Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示模式。当前工具包括：
+Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示模式。当前使用
+LangGraph 和 SQLite Checkpointer 执行受控循环：每次工具调用前进行 Policy 和
+Schema 校验，执行后观察结果，模型可以继续规划或完成；代码限制工具步数、重规划、
+连续错误、总运行时间和图递归次数。高风险 Tool 可通过 LangGraph Interrupt 暂停，
+在 Web Root 控制台或飞书批准/拒绝后从 SQLite Checkpoint 恢复；执行账本避免重放
+造成重复副作用。会话历史按渠道、用户和聊天隔离，显式长期记忆按用户隔离。当前
+工具包括：
 
 - 文本统计与关键词提取；
 - 当前时间和能力列表；
 - 查询本地个人资产；
 - 查询异步任务状态；
 - 接收本地图片资产 ID，创建空间照片任务。
+- 使用内容图与一至三张参考图创建图片个性化任务（默认连接独立 SDXL + IP-Adapter 服务）。
 
 图片原始字节不会发给 DeepSeek、Qwen 或 GLM。上传图片先暂存在本机，LLM 只看到
 随机资产 ID、文件名和尺寸；任务创建后临时附件会被删除。
@@ -85,17 +92,30 @@ Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示
 它是低成本的 2.5D MVP，不是完整 3D 重建。实现细节见
 [空间照片端侧部署与资产格式](docs/spatial-scene-device-deployment.md)。
 
-## 外部聊天控制的实现路线
+## 外部聊天控制
 
-### 第一阶段：飞书
+### 第一阶段：飞书文本闭环
 
-优先开发飞书企业自建应用，并使用官方 SDK 的长连接事件订阅：
+当前已经使用独立的 `lark-channel-sdk` 实现飞书企业自建应用长连接：
 
 - 家中电脑只需主动连接飞书，无需暴露公网 IP 或部署公开 Webhook；
-- 监听用户发给机器人的消息，转换为统一的 `InboundMessage`；
-- 快速返回“已接收”卡片，耗时任务进入本地任务队列；
-- 生成完成后更新卡片并发送图片、文件或安全预览链接；
-- 使用飞书用户 ID 映射本地用户与记忆空间。
+- App Secret 与 LLM Key 一样写入系统钥匙串，配置文件不保存明文；
+- 使用飞书消息 ID 和本地 SQLite 双层去重；
+- 仅允许白名单 Open ID 调用，群聊默认关闭；
+- 回调快速转入后台执行，并向原消息回复“已收到”和最终文本；
+- 真实飞书应用的长连接和文本消息已经接通；断线恢复与媒体权限仍在继续实测。
+
+单张图片消息已接入本地空间照片能力：机器人下载原消息中的图片资源，复用本地图片
+安全校验并创建空间照片任务；完成后回复任务状态、封面图和同局域网短时 Viewer
+链接。Agent 最终回答使用飞书
+富文本消息，首次对话或发送“菜单”会返回功能卡片，Web 控制台也会同步最近的渠道
+收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；若飞书内置浏览器
+阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
+用户身份认证与链接撤销仍需下一阶段完成。
+
+macOS 与 Windows 的一键安装/启动方式见
+[本地部署指南](docs/guides/deployment.md)，新能力接入约定见
+[Capability 接入指南](docs/guides/capability-integration.md)。
 
 ### 第二阶段：结果预览
 
@@ -128,6 +148,7 @@ Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示
 app/
   components/
     AgentConsole.tsx          Web Agent、图片附件、任务进度
+    FeishuSettingsDialog.tsx  飞书凭证、白名单与长连接设置
     ModelSettingsDialog.tsx   模型供应商和密钥配置
     SpatialStudio.tsx         空间照片生成与个人资产库
     SpatialViewer.tsx         低功耗 Three.js 视差 Viewer
@@ -137,6 +158,8 @@ backend/
     llm.py                    OpenAI 兼容 Tool Calling
     tools.py                  工具注册表
     assets.py                 深度模型、任务、资产与文件安全
+    channel_settings.py       飞书配置与 App Secret 安全存储
+    feishu.py                 长连接、鉴权、去重与 Agent 消息闭环
     settings.py               模型配置与密钥安全存储
     main.py                   FastAPI 路由
   tests/                      后端测试
@@ -155,9 +178,51 @@ tests/                        前端渲染测试
 
 - Node.js 22+
 - pnpm
-- Python 3.9+
+- Python 3.11 或 3.12
 - 推荐至少 8GB 内存
 - Apple Silicon 优先使用 MPS，NVIDIA 优先使用 CUDA，否则回退 CPU
+
+### macOS / Linux 一键启动
+
+```bash
+chmod +x scripts/setup.sh scripts/start.sh
+./scripts/setup.sh
+./scripts/start.sh
+```
+
+### Windows 10 / 11 一键启动
+
+前置安装 Python 3.11/3.12、Node.js 22.13+ 与 Git，然后在仓库根目录打开 PowerShell：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup.ps1
+.\scripts\start.ps1
+```
+
+脚本会建立 `.venv`、安装前后端依赖并同时启动 API 与控制台。Windows Defender
+Firewall 首次询问时，只允许 Python 访问“专用网络”。NVIDIA GPU 的 SDXL 安装和
+故障排查见[跨平台部署指南](docs/guides/deployment.md)。
+
+图片风格化默认依赖独立的
+[`frogi-m/pic-style`](https://github.com/frogi-m/pic-style) 服务。推荐在 NVIDIA
+Windows 机器上同时运行 Web Agent 与该服务，使主项目通过
+`PHOTO_STYLE_SERVICE_URL=http://127.0.0.1:18000` 调用单并发 SDXL + IP-Adapter
+Worker。模型许可、约 9.84 GiB 权重准备和 Docker API + Windows Host GPU Worker
+步骤以该仓库 README 与 `docs/docker.md` 为准；服务健康检查未通过时，本项目不会
+静默降级为 CPU 调色。
+
+### 手机临时公网 HTTPS 预览
+
+安装 `cloudflared` 后，确认允许带签名的私人空间照片经 Cloudflare 转发，再另开终端：
+
+```bash
+python scripts/start_public_viewer.py --acknowledge-public-media
+```
+
+保持该进程运行，新生成的飞书 Viewer 链接会自动改用临时 HTTPS 地址；停止后回退
+局域网地址。该模式仅供测试，随机域名不保证稳定，正式上线需使用固定域名与命名
+Tunnel。不要把签名链接转发给无关人员。
 
 ### 后端
 
@@ -186,7 +251,7 @@ pnpm run dev
 
 ## 模型配置
 
-在页面右上角“模型设置”中选择供应商、填写 API Key、测试连接并保存。支持：
+在页面右上角“模型设置”中选择供应商、填写 API Key、测试连接并保存。当前预置：
 
 | 供应商 | 默认 Base URL | 默认模型 |
 | --- | --- | --- |
@@ -195,7 +260,36 @@ pnpm run dev
 | Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.7-plus` |
 | GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.2` |
 
-供应商信息可能变化，所有字段均可在 UI 中修改。
+这些是代码中的可编辑预置值，不是供应商可用性保证。供应商信息可能变化，应以 UI
+连接测试和 `LLM-001` 同日期评测为准。
+
+## 飞书接入配置
+
+完整图文顺序、群聊、图片、`card.action.trigger` 和故障排查请打开
+[飞书机器人配置与使用指南](docs/guides/feishu-setup.md)。简要步骤如下：
+
+1. 在[飞书开放平台](https://open.feishu.cn/app)创建企业自建应用，并启用机器人能力；
+2. 在事件订阅中选择“使用长连接接收事件”，订阅接收消息事件
+   `im.message.receive_v1`；
+3. 在“权限管理”搜索中文名“获取单聊、群组消息”和“获取与上传图片或文件资源”；
+   如果搜索不到 scope，使用“批量导入/导出权限”导入指南中的 JSON，然后发布新版本；
+4. 启动本项目后，点击页面右上角“外部接入”，填写 App ID 与 App Secret；
+5. 先点“测试凭证”。测试成功只代表凭证有效，不代表长连接或事件权限已经可用；
+6. 第一次可以保持 Open ID 白名单为空并保存启用。私聊机器人后，机器人会回复你的
+   Open ID，但不会执行 Agent；
+7. 把该 Open ID 加入白名单，再次保存。状态显示“已连接”后即可发送文本指令。
+
+如使用国际版 Lark，在 UI 中把服务区域切换为 Lark。群聊默认不接收；启用后也只有
+白名单用户通过 `@机器人` 才能触发。当前 `CHANNEL-002` 支持一次发送一张图片并
+自动生成空间照片、返回封面；多图、普通文件、演示视频和交互 Viewer 链接尚未实现。
+
+Web 控制台是运行电脑上的 Root 管理员视图，可以查看本机记录的全部 Web 与飞书
+会话；普通飞书用户只应使用自己所在的聊天，不应获得 Web 控制台访问权。
+
+参考：[飞书事件订阅概述](https://open.feishu.cn/document/server-docs/event-subscription-guide/overview?from=from_parent_docs)、
+[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2?lang=zh-CN)、
+[上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create?lang=zh-CN)、
+[lark-channel-sdk 快速开始](https://github.com/larksuite/channel-sdk-python/blob/main/docs/quickstart.md)。
 
 ## 本地数据与隐私
 
@@ -206,6 +300,8 @@ pnpm run dev
 - `backend/data/assets.sqlite3`：任务和资产索引；
 - `backend/data/runs.jsonl`：Agent 执行轨迹；
 - `backend/data/settings.json`：本机模型配置；
+- `backend/data/feishu_settings.json`：飞书非敏感配置和 Open ID 白名单；
+- `backend/data/channel.sqlite3`：飞书事件去重、执行状态和最近 500 条已授权渠道消息镜像；
 - `backend/data/*.enc`、`.secret_master_key`：加密密钥材料；
 - `.env`、`.venv`、依赖和构建缓存。
 
@@ -252,10 +348,10 @@ Use $team-git-workflow in English to prepare this change for review
 
 ## 近期路线图
 
-1. 抽象 `ChannelAdapter` 和统一消息数据模型；
-2. 接入飞书长连接，完成文本指令和文本回复；
-3. 增加身份白名单、幂等、审计和高风险操作审批；
-4. 增加 SQLite 记忆层和会话摘要；
+1. 使用真实飞书应用验收长连接、断线重连、权限和文本闭环；
+2. 从当前飞书实现抽象可复用的 `ChannelAdapter` 和统一消息数据模型；
+3. 增加审计、速率限制、审批过期和费用预算；
+4. 将已完成的 Web SQLite 会话模型扩展到统一渠道消息，并增加会话摘要；
 5. 实现空间照片缩略图、演示视频和签名预览链接；
 6. 建立 Capability Manifest、安装器和模型依赖隔离；
 7. 接入企业微信或微信公众号；
@@ -265,6 +361,8 @@ Use $team-git-workflow in English to prepare this change for review
 
 - [调研与实现中心](docs/project-board.md)
 - [文档中心](docs/README.md)
+- [从零到可运行个人数字助手](docs/learning/implementation-roadmap.md)
+- [调研证据与文档维护方法](docs/learning/research-quality.md)
 - [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)
 - [系统架构](docs/architecture/system-architecture.md)
 - [外部聊天控制调研](docs/research/external-chat-control.md)

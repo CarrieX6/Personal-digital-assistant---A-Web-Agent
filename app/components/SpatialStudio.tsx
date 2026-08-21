@@ -26,7 +26,7 @@ const SpatialViewer = dynamic(
 
 type Asset = {
   id: string;
-  kind: "spatial_scene";
+  kind: "spatial_scene" | "photo_style_transfer";
   name: string;
   status: "processing" | "ready" | "failed";
   width: number | null;
@@ -103,12 +103,15 @@ export function SpatialStudio({
       const response = await fetch(`${apiBase}/api/assets`);
       if (!response.ok) throw new Error(await errorMessage(response));
       const data = (await response.json()) as { assets: Asset[] };
-      setAssets(data.assets);
+      const spatialAssets = data.assets.filter(
+        (asset) => asset.kind === "spatial_scene",
+      );
+      setAssets(spatialAssets);
       setSelectedAssetId((current) => {
-        if (current && data.assets.some((asset) => asset.id === current)) {
+        if (current && spatialAssets.some((asset) => asset.id === current)) {
           return current;
         }
-        return data.assets.find((asset) => asset.status === "ready")?.id ?? null;
+        return spatialAssets.find((asset) => asset.status === "ready")?.id ?? null;
       });
       onConnectionChange(true);
     } catch (requestError) {

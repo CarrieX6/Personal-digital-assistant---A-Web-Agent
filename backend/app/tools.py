@@ -2,15 +2,33 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo
 
-from .models import ToolInfo
+from .models import CapabilityInfo, ToolInfo
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    owner_id: str = "local"
+    thread_id: str = "local:default"
+    channel: str = "web"
+
+
+_CURRENT_TOOL_CONTEXT: ContextVar[ToolExecutionContext] = ContextVar(
+    "tool_execution_context",
+    default=ToolExecutionContext(),
+)
+
+
+def current_tool_context() -> ToolExecutionContext:
+    return _CURRENT_TOOL_CONTEXT.get()
 
 
 class ToolError(ValueError):
@@ -23,6 +41,12 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    risk_level: Literal[
+        "read", "local_write", "external_write", "destructive"
+    ] = "read"
+    requires_approval: bool = False
+    idempotent: bool = True
+    capability: CapabilityInfo | None = None
 
 
 class ToolRegistry:
@@ -34,20 +58,59 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
         try:
             tool = self._tools[name]
         except KeyError as exc:
             raise ToolError(f"Unknown tool: {name}") from exc
-        return tool.handler(arguments)
+        token = _CURRENT_TOOL_CONTEXT.set(context or ToolExecutionContext())
+        try:
+            return tool.handler(arguments)
+        finally:
+            _CURRENT_TOOL_CONTEXT.reset(token)
+
+    def validate_call(self, name: str, arguments: dict[str, Any]) -> None:
+        try:
+            tool = self._tools[name]
+        except KeyError as exc:
+            raise ToolError(f"Unknown tool: {name}") from exc
+        _validate_object(arguments, tool.parameters, path=name)
+
+    def get_spec(self, name: str) -> ToolSpec:
+        try:
+            return self._tools[name]
+        except KeyError as exc:
+            raise ToolError(f"Unknown tool: {name}") from exc
 
     def list_tools(self) -> list[ToolInfo]:
         return [
-            ToolInfo(name=tool.name, description=tool.description)
+            ToolInfo(
+                name=tool.name,
+                description=tool.description,
+                risk_level=tool.risk_level,
+                requires_approval=tool.requires_approval,
+            )
             for tool in self._tools.values()
         ]
 
-    def openai_schemas(self) -> list[dict[str, Any]]:
+    def list_capabilities(self) -> list[CapabilityInfo]:
+        return [
+            tool.capability
+            for tool in self._tools.values()
+            if tool.capability is not None
+        ]
+
+    def openai_schemas(
+        self,
+        names: list[str] | tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        selected_names = set(names) if names is not None else None
         return [
             {
                 "type": "function",
@@ -58,7 +121,83 @@ class ToolRegistry:
                 },
             }
             for tool in self._tools.values()
+            if selected_names is None or tool.name in selected_names
         ]
+
+
+def _validate_object(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    path: str,
+) -> None:
+    if not isinstance(value, dict):
+        raise ToolError(f"{path} arguments must be an object")
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    for key in required:
+        if key not in value:
+            raise ToolError(f"{path} requires argument '{key}'")
+
+    if schema.get("additionalProperties") is False:
+        unknown = sorted(set(value) - set(properties))
+        if unknown:
+            raise ToolError(
+                f"{path} received unknown argument '{unknown[0]}'"
+            )
+
+    for key, item in value.items():
+        item_schema = properties.get(key)
+        if isinstance(item_schema, dict):
+            _validate_schema_value(
+                item,
+                item_schema,
+                path=f"{path}.{key}",
+            )
+
+
+def _validate_schema_value(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    path: str,
+) -> None:
+    expected = schema.get("type")
+    valid = {
+        "string": isinstance(value, str),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+        ),
+        "boolean": isinstance(value, bool),
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+    }.get(expected, True)
+    if not valid:
+        raise ToolError(f"{path} must be {expected}")
+
+    if "enum" in schema and value not in schema["enum"]:
+        raise ToolError(f"{path} is not an allowed value")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ToolError(f"{path} is below the minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise ToolError(f"{path} exceeds the maximum")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            raise ToolError(f"{path} is too short")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ToolError(f"{path} is too long")
+    if expected == "object":
+        _validate_object(value, schema, path=path)
+    if expected == "array" and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            _validate_schema_value(
+                item,
+                schema["items"],
+                path=f"{path}[{index}]",
+            )
 
 
 def _require_text(arguments: dict[str, Any]) -> str:
@@ -110,11 +249,14 @@ def current_time(_: dict[str, Any]) -> dict[str, Any]:
 def list_capabilities(_: dict[str, Any]) -> dict[str, Any]:
     return {
         "examples": [
+            "发送一张图片，生成可拖动视角的空间照片",
             "分析这段文字：……",
             "提取关键词：……",
             "统计字数：……",
             "现在几点？",
             "查看我的个人资产",
+            "记住：我偏好在本机处理私人图片",
+            "查看我的记忆",
         ]
     }
 

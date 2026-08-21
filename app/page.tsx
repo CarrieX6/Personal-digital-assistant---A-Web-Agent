@@ -1,38 +1,29 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  AgentConsole,
-  HealthInfo,
-} from "./components/AgentConsole";
+import { AgentConsole, HealthInfo } from "./components/AgentConsole";
+import { AppIcon } from "./components/AppIcon";
+import { FeishuSettingsDialog } from "./components/FeishuSettingsDialog";
 import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
+import { PhotoStyleStudio } from "./components/PhotoStyleStudio";
 import { SpatialStudio } from "./components/SpatialStudio";
+import { ToolLibrary } from "./components/ToolLibrary";
 
-type ToolInfo = {
-  name: string;
-  description: string;
-};
-
-type View = "spatial" | "agent";
+type View = "agent" | "tools" | "spatial" | "style";
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://127.0.0.1:8000";
-
-const fallbackTools: ToolInfo[] = [
-  { name: "text_stats", description: "文本统计" },
-  { name: "extract_keywords", description: "关键词提取" },
-  { name: "current_time", description: "当前时间" },
-  { name: "list_personal_assets", description: "个人资产" },
-  { name: "create_spatial_scene", description: "生成空间照片" },
-];
+  process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8000";
 
 export default function Home() {
-  const [activeView, setActiveView] = useState<View>("spatial");
-  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [activeView, setActiveView] = useState<View>("agent");
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [backendReady, setBackendReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [externalSettingsOpen, setExternalSettingsOpen] = useState(false);
   const [requestedSpatialAssetId, setRequestedSpatialAssetId] = useState<
+    string | null
+  >(null);
+  const [requestedStyleAssetId, setRequestedStyleAssetId] = useState<
     string | null
   >(null);
 
@@ -46,7 +37,7 @@ export default function Home() {
         throw new Error("local service unavailable");
       }
       setHealth((await healthResponse.json()) as HealthInfo);
-      setTools((await toolResponse.json()) as ToolInfo[]);
+      await toolResponse.json();
       setBackendReady(true);
     } catch {
       setBackendReady(false);
@@ -58,130 +49,151 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [refreshStatus]);
 
-  const availableTools = tools.length ? tools : fallbackTools;
+  function openSpatial(assetId?: string) {
+    setRequestedSpatialAssetId(assetId ?? null);
+    setActiveView("spatial");
+  }
+
+  function openStyle(assetId?: string) {
+    setRequestedStyleAssetId(assetId ?? null);
+    setActiveView("style");
+  }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell assistant-shell">
       <a className="skip-link" href="#primary-content">
         跳到主要内容
       </a>
-      <header className="topbar">
+      <header className="topbar assistant-topbar">
         <div className="brand">
           <span className="brand-mark">A</span>
           <span>Agent Lab</span>
-          <span className="version">Personal · 0.4</span>
+          <span className="version">Personal · 0.5</span>
         </div>
         <div className="topbar-actions">
-          <div className={`connection ${backendReady ? "is-ready" : ""}`}>
+          <div
+            className={`connection ${backendReady ? "is-ready" : ""}`}
+            aria-label={backendReady ? "本地服务已连接" : "本地服务未连接"}
+          >
             <span className="connection-dot" aria-hidden="true" />
-            {backendReady
-              ? health?.llm_configured
-                ? `本地服务 · ${health.model}`
-                : "本地服务已连接"
-              : "等待本地服务"}
+            <span className="connection-copy">
+              {backendReady
+                ? health?.llm_configured
+                  ? health.model
+                  : "本地服务"
+                : "连接中"}
+            </span>
           </div>
           <button
-            className="settings-trigger"
+            className={`settings-trigger icon-settings ${
+              health?.feishu_status === "connected" ? "is-connected" : ""
+            }`}
             type="button"
+            aria-label={
+              health?.feishu_status === "connected"
+                ? "管理飞书连接"
+                : "配置外部接入"
+            }
+            onClick={() => setExternalSettingsOpen(true)}
+          >
+            <AppIcon name="link" width="17" height="17" />
+            <span>
+              {health?.feishu_status === "connected" ? "飞书已连接" : "外部接入"}
+            </span>
+          </button>
+          <button
+            className="settings-trigger icon-settings"
+            type="button"
+            aria-label="打开模型设置"
             onClick={() => setSettingsOpen(true)}
           >
-            模型设置
+            <AppIcon name="settings" width="17" height="17" />
+            <span>设置</span>
           </button>
         </div>
       </header>
 
-      <section className="workspace">
-        <aside className="sidebar product-sidebar">
-          <div>
-            <p className="eyebrow">Personal AI studio</p>
-            <h1>个人数字助手</h1>
-            <p className="sidebar-copy">
-              一套本地优先的生成框架，逐步承载空间照片、虚拟试衣与桌面宠物。
-            </p>
-          </div>
-
-          <nav className="product-nav" aria-label="产品功能">
-            <button
-              type="button"
-              className={activeView === "spatial" ? "active" : ""}
-              onClick={() => setActiveView("spatial")}
-            >
-              <span>01</span>
-              <div>
-                <strong>空间照片</strong>
-                <small>2D → 可动视角</small>
-              </div>
-            </button>
-            <button type="button" disabled>
-              <span>02</span>
-              <div>
-                <strong>虚拟试衣</strong>
-                <small>下一阶段 · 先 2D</small>
-              </div>
-            </button>
-            <button type="button" disabled>
-              <span>03</span>
-              <div>
-                <strong>桌面宠物</strong>
-                <small>规划中 · 3D 动作</small>
-              </div>
-            </button>
+      <section className="assistant-workspace">
+        <aside className="app-rail" aria-label="主要导航">
+          <div className="app-rail-nav">
             <button
               type="button"
               className={activeView === "agent" ? "active" : ""}
               onClick={() => setActiveView("agent")}
             >
-              <span>04</span>
-              <div>
-                <strong>Agent 控制台</strong>
-                <small>{availableTools.length} 个本地工具</small>
-              </div>
+              <AppIcon name="chat" width="21" height="21" />
+              <span>对话</span>
             </button>
-          </nav>
-
-          <div className="privacy-card">
-            <span className="privacy-mark" aria-hidden="true" />
-            <div>
-              <strong>本地优先</strong>
-              <p>图片与生成物保存在 backend/data，不上传第三方服务。</p>
-            </div>
+            <button
+              type="button"
+              className={
+                activeView === "tools" ||
+                activeView === "spatial" ||
+                activeView === "style"
+                  ? "active"
+                  : ""
+              }
+              onClick={() => setActiveView("tools")}
+            >
+              <AppIcon name="tools" width="21" height="21" />
+              <span>工具库</span>
+            </button>
+          </div>
+          <div className="rail-privacy" title="图片、记忆和生成资产默认保存在本机">
+            <span />
+            <small>本地优先</small>
           </div>
         </aside>
 
-        <div className="main-panel personal-panel" id="primary-content">
-          <nav className="mobile-tabs" aria-label="移动端功能切换">
-            <button
-              type="button"
-              className={activeView === "spatial" ? "active" : ""}
-              onClick={() => setActiveView("spatial")}
-            >
-              空间照片
-            </button>
-            <button
-              type="button"
-              className={activeView === "agent" ? "active" : ""}
-              onClick={() => setActiveView("agent")}
-            >
-              Agent
-            </button>
-          </nav>
-
-          {activeView === "spatial" ? (
-            <SpatialStudio
-              apiBase={API_BASE}
-              onConnectionChange={setBackendReady}
-              requestedAssetId={requestedSpatialAssetId}
-            />
-          ) : (
+        <div className="assistant-main" id="primary-content">
+          {activeView === "agent" ? (
             <AgentConsole
               apiBase={API_BASE}
               health={health}
               onConnectionChange={setBackendReady}
-              onSpatialSceneReady={(assetId) => {
-                setRequestedSpatialAssetId(assetId);
-                setActiveView("spatial");
-              }}
+              onSpatialSceneReady={(assetId) => openSpatial(assetId)}
+              onPhotoStyleReady={(assetId) => openStyle(assetId)}
             />
+          ) : activeView === "tools" ? (
+            <ToolLibrary
+              health={health}
+              onOpenSpatial={() => openSpatial()}
+              onOpenStyle={() => openStyle()}
+              onOpenModelSettings={() => setSettingsOpen(true)}
+              onOpenChannelSettings={() => setExternalSettingsOpen(true)}
+            />
+          ) : activeView === "spatial" ? (
+            <div className="tool-detail-view">
+              <button
+                className="back-to-library"
+                type="button"
+                onClick={() => setActiveView("tools")}
+              >
+                <span aria-hidden="true">←</span>
+                返回工具库
+              </button>
+              <SpatialStudio
+                apiBase={API_BASE}
+                onConnectionChange={setBackendReady}
+                requestedAssetId={requestedSpatialAssetId}
+              />
+            </div>
+          ) : (
+            <div className="tool-detail-view">
+              <button
+                className="back-to-library"
+                type="button"
+                onClick={() => setActiveView("tools")}
+              >
+                <span aria-hidden="true">←</span>
+                返回工具库
+              </button>
+              <PhotoStyleStudio
+                apiBase={API_BASE}
+                onConnectionChange={setBackendReady}
+                requestedAssetId={requestedStyleAssetId}
+              />
+            </div>
           )}
         </div>
       </section>
@@ -190,6 +202,12 @@ export default function Home() {
         open={settingsOpen}
         apiBase={API_BASE}
         onClose={() => setSettingsOpen(false)}
+        onSettingsChanged={() => void refreshStatus()}
+      />
+      <FeishuSettingsDialog
+        open={externalSettingsOpen}
+        apiBase={API_BASE}
+        onClose={() => setExternalSettingsOpen(false)}
         onSettingsChanged={() => void refreshStatus()}
       />
     </main>
