@@ -44,6 +44,7 @@ __pycache__/
 /backend/data/*.enc
 /backend/data/.secret_master_key
 /backend/data/viewer-secret.key
+/backend/data/viewer-public-url.json
 /backend/data/channel.sqlite3*
 /backend/data/assets/
 /backend/data/source-images/

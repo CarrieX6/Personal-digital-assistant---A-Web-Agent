@@ -242,7 +242,7 @@ class PicStyleHttpProvider:
                     **parameters.public_dict(),
                     "num_outputs": 1,
                 },
-                headers=self._headers(),
+                headers={**self._headers(), "Idempotency-Key": str(uuid4())},
             )
             response.raise_for_status()
             job_id = str(response.json()["job_id"])
@@ -298,22 +298,46 @@ class PicStyleHttpProvider:
             self.client.close()
 
     def status(self) -> dict[str, Any]:
-        return {
-            "ready": None,
-            "loaded": False,
-            "remote": True,
-            "configured": bool(self.base_url),
-            "gate": "managed_by_remote_service",
-        }
+        try:
+            response = self.client.get(
+                f"{self.base_url}/health/ready",
+                headers=self._headers(),
+                timeout=3,
+            )
+            ready = response.status_code == 200
+            upstream_status: Any = None
+            try:
+                upstream_status = response.json()
+            except ValueError:
+                upstream_status = None
+            return {
+                "ready": ready,
+                "loaded": ready,
+                "remote": True,
+                "configured": True,
+                "gate": "managed_by_remote_service",
+                "upstream_status": upstream_status,
+                "error": None if ready else "service_not_ready",
+            }
+        except httpx.HTTPError:
+            return {
+                "ready": False,
+                "loaded": False,
+                "remote": True,
+                "configured": True,
+                "gate": "managed_by_remote_service",
+                "upstream_status": None,
+                "error": "service_unreachable",
+            }
 
 
 def build_style_provider_from_env() -> StyleTransferProvider:
-    selected = os.getenv("PHOTO_STYLE_PROVIDER", "local-preview").strip().lower()
+    selected = os.getenv("PHOTO_STYLE_PROVIDER", "pic-style-http").strip().lower()
     if selected in {"local-preview", "preview", "fake"}:
         return LocalColorStyleProvider()
     if selected in {"pic-style-http", "http"}:
         return PicStyleHttpProvider(
-            os.getenv("PHOTO_STYLE_SERVICE_URL", ""),
+            os.getenv("PHOTO_STYLE_SERVICE_URL", "http://127.0.0.1:18000"),
             api_key=os.getenv("PHOTO_STYLE_SERVICE_API_KEY") or None,
             tenant_id=os.getenv("PHOTO_STYLE_TENANT_ID", "personal-agent"),
             timeout_seconds=float(os.getenv("PHOTO_STYLE_TIMEOUT_SECONDS", "900")),
@@ -401,6 +425,11 @@ class PhotoStyleService:
         parameters: StyleParameters | None = None,
         owner_id: str = "local",
     ) -> PhotoStyleCreateResponse:
+        provider_status = self.provider_status()
+        if provider_status["ready"] is False:
+            raise AssetError(
+                "独立 SDXL + IP-Adapter 服务尚未就绪，请先启动 GPU 服务并通过健康检查。"
+            )
         if not 1 <= len(style_bytes) <= 3:
             raise AssetError("请选择一至三张风格参考图。")
         if not content_bytes or any(not item for item in style_bytes):
@@ -724,8 +753,8 @@ def register_style_tools(
                 input_schema=input_schema,
                 requirements=CapabilityRequirements(
                     local_model=(
-                        "默认 CPU 预览 Provider 无模型；真实路径可直接使用本机 "
-                        "SDXL + IP-Adapter 或独立 pic-style 服务（至少约 8GB 显存）"
+                        "产品默认连接独立 pic-style SDXL + IP-Adapter 服务；"
+                        "GPU Worker 至少约 8GB 显存，CPU Provider 仅用于显式开发测试"
                     ),
                     storage="本机 SQLite 与 backend/data/assets 私有文件目录",
                     permissions=[

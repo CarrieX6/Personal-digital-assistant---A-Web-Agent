@@ -56,6 +56,33 @@
 | 接收图片事件 | `im:resource`（获取与上传图片或文件资源） |
 | 下载用户消息中的原图 | `im:message:readonly` 或 `im:message`；资源接口还需要 `im:resource` |
 
+控制台通常显示中文权限名，而不是 scope。请搜索：
+
+- **获取单聊、群组消息**：`im:message:readonly`；
+- **获取与上传图片或文件资源**：`im:resource`。
+
+“读取用户发给机器人的单聊消息”（`im:message.p2p_msg:readonly`）只允许接收私聊事件，
+不能代替资源下载所需的 `im:message:readonly`。如果逐项搜索仍找不到，打开
+“权限管理 → 批量导入/导出权限 → 导入”，以**应用身份（tenant）**导入：
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "im:message.p2p_msg:readonly",
+      "im:message.group_at_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ],
+    "user": []
+  }
+}
+```
+
+导入后必须创建并发布新版本；若租户要求审批，还需管理员批准新增权限。机器人已经
+收到但下载失败的旧消息不会自动重放，请发布后发送一张新图片验证。
+
 飞书会根据所订阅事件提示需要的具体权限。权限变更后通常还需要创建并发布新版本，
 否则线上应用不一定生效。参见[权限管理说明](https://open.feishu.cn/document/server-docs/application-scope/introduction?lang=zh-CN)、
 [回复消息接口](https://open.feishu.cn/document/server-docs/im-v1/message/reply?lang=zh-CN)和
@@ -150,10 +177,10 @@ Open ID 是应用维度身份标识，应复制机器人实际返回的值，不
 收到的图片依赖消息资源接口，参见
 [获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2?lang=zh-CN)。
 
-飞书聊天气泡不能直接运行 Three.js，但手机浏览器可以打开机器人返回的
-`http://192.168.x.x:8766/v/<签名>` 链接。手机和电脑必须在同一局域网；链接默认
-12 小时过期，只能读取当前空间照片的白名单分层文件。公网域名、HTTPS 与用户登录
-仍属于下一阶段，详见[本地部署指南](deployment.md)。
+飞书聊天气泡不能直接运行 Three.js，但手机浏览器可以打开机器人返回的签名 Viewer
+链接。局域网模式使用 `http://192.168.x.x:8766/v/<签名>`；部分飞书内置浏览器会
+限制明文 HTTP，此时可按[跨平台部署指南](deployment.md)显式启动临时 HTTPS Tunnel。
+链接默认 12 小时过期，只能读取当前空间照片的白名单分层文件。
 
 ## 10. 常见故障
 

@@ -37,6 +37,7 @@ class LanViewerService:
         port: int = 8766,
         ttl_seconds: int = 12 * 60 * 60,
         public_base_url: str | None = None,
+        runtime_public_base_path: Path | None = None,
     ) -> None:
         self.assets = assets
         self.secret_path = secret_path
@@ -44,6 +45,7 @@ class LanViewerService:
         self.port = port
         self.ttl_seconds = max(300, min(ttl_seconds, 7 * 24 * 60 * 60))
         self.public_base_url = (public_base_url or "").rstrip("/") or None
+        self.runtime_public_base_path = runtime_public_base_path
         self._secret = self._load_or_create_secret()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -68,6 +70,7 @@ class LanViewerService:
                 7 * 24 * 60 * 60,
             ),
             public_base_url=os.getenv("LAN_VIEWER_PUBLIC_BASE_URL"),
+            runtime_public_base_path=data_path / "viewer-public-url.json",
         )
 
     def create_link(self, asset_id: str) -> str:
@@ -78,8 +81,36 @@ class LanViewerService:
             raise ViewerLinkError("空间照片缺少可动视角分层文件。")
         self.start()
         token = self._issue_token(asset_id)
-        base = self.public_base_url or f"http://{self.lan_ip()}:{self.port}"
+        base = (
+            self.public_base_url
+            or self._runtime_public_base_url()
+            or f"http://{self.lan_ip()}:{self.port}"
+        )
         return f"{base}/v/{quote(token, safe='')}"
+
+    def _runtime_public_base_url(self) -> str | None:
+        path = self.runtime_public_base_path
+        if path is None or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            url = str(payload["url"]).rstrip("/")
+            created_at = float(payload["created_at"])
+            parsed = urlsplit(url)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if time.time() - created_at > 24 * 60 * 60:
+            return None
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            return None
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            return None
+        return url
 
     def start(self) -> None:
         with self._lock:

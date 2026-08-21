@@ -32,7 +32,7 @@ Demo。
 | 本地资产与异步任务 | 局部实现 | SQLite 索引、文件资产、任务进度；目前仅空间照片专用且未验证重启恢复 |
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
 | 飞书聊天入口 | 文本闭环已实测，图片权限待用户发布应用版本 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载 |
-| 结果回传适配 | 局部实现 | 富文本、状态、功能卡片、封面和短时签名局域网 Viewer；短视频、文件、公网 HTTPS 待实现 |
+| 结果回传适配 | 局部实现 | 富文本、状态、功能卡片、封面和短时签名 Viewer；局域网已实现，公网 HTTPS 测试隧道需用户显式启用，固定域名待实现 |
 | 会话与长期记忆 | MVP | SQLite 按用户/渠道/会话隔离；Web 会话列表与消息 API 已完成，支持显式记住、查看、忘记与清空当前对话 |
 | 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
@@ -73,7 +73,7 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 - 查询本地个人资产；
 - 查询异步任务状态；
 - 接收本地图片资产 ID，创建空间照片任务。
-- 使用内容图与一至三张参考图创建图片个性化任务（默认 CPU 预览，可选 SDXL）。
+- 使用内容图与一至三张参考图创建图片个性化任务（默认连接独立 SDXL + IP-Adapter 服务）。
 
 图片原始字节不会发给 DeepSeek、Qwen 或 GLM。上传图片先暂存在本机，LLM 只看到
 随机资产 ID、文件名和尺寸；任务创建后临时附件会被删除。
@@ -109,8 +109,9 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 安全校验并创建空间照片任务；完成后回复任务状态、封面图和同局域网短时 Viewer
 链接。Agent 最终回答使用飞书
 富文本消息，首次对话或发送“菜单”会返回功能卡片，Web 控制台也会同步最近的渠道
-收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；公网域名、HTTPS、
-身份认证与链接撤销仍需下一阶段完成。
+收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；若飞书内置浏览器
+阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
+用户身份认证与链接撤销仍需下一阶段完成。
 
 macOS 与 Windows 的一键安装/启动方式见
 [本地部署指南](docs/guides/deployment.md)，新能力接入约定见
@@ -177,9 +178,51 @@ tests/                        前端渲染测试
 
 - Node.js 22+
 - pnpm
-- Python 3.9+
+- Python 3.11 或 3.12
 - 推荐至少 8GB 内存
 - Apple Silicon 优先使用 MPS，NVIDIA 优先使用 CUDA，否则回退 CPU
+
+### macOS / Linux 一键启动
+
+```bash
+chmod +x scripts/setup.sh scripts/start.sh
+./scripts/setup.sh
+./scripts/start.sh
+```
+
+### Windows 10 / 11 一键启动
+
+前置安装 Python 3.11/3.12、Node.js 22.13+ 与 Git，然后在仓库根目录打开 PowerShell：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup.ps1
+.\scripts\start.ps1
+```
+
+脚本会建立 `.venv`、安装前后端依赖并同时启动 API 与控制台。Windows Defender
+Firewall 首次询问时，只允许 Python 访问“专用网络”。NVIDIA GPU 的 SDXL 安装和
+故障排查见[跨平台部署指南](docs/guides/deployment.md)。
+
+图片风格化默认依赖独立的
+[`frogi-m/pic-style`](https://github.com/frogi-m/pic-style) 服务。推荐在 NVIDIA
+Windows 机器上同时运行 Web Agent 与该服务，使主项目通过
+`PHOTO_STYLE_SERVICE_URL=http://127.0.0.1:18000` 调用单并发 SDXL + IP-Adapter
+Worker。模型许可、约 9.84 GiB 权重准备和 Docker API + Windows Host GPU Worker
+步骤以该仓库 README 与 `docs/docker.md` 为准；服务健康检查未通过时，本项目不会
+静默降级为 CPU 调色。
+
+### 手机临时公网 HTTPS 预览
+
+安装 `cloudflared` 后，确认允许带签名的私人空间照片经 Cloudflare 转发，再另开终端：
+
+```bash
+python scripts/start_public_viewer.py --acknowledge-public-media
+```
+
+保持该进程运行，新生成的飞书 Viewer 链接会自动改用临时 HTTPS 地址；停止后回退
+局域网地址。该模式仅供测试，随机域名不保证稳定，正式上线需使用固定域名与命名
+Tunnel。不要把签名链接转发给无关人员。
 
 ### 后端
 
@@ -228,8 +271,8 @@ pnpm run dev
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建企业自建应用，并启用机器人能力；
 2. 在事件订阅中选择“使用长连接接收事件”，订阅接收消息事件
    `im.message.receive_v1`；
-3. 按飞书控制台提示申请接收消息、以机器人身份发送消息和“获取与上传图片或文件
-   资源（`im:resource`）”权限，发布一个可用版本，并让测试用户处于应用可用范围；
+3. 在“权限管理”搜索中文名“获取单聊、群组消息”和“获取与上传图片或文件资源”；
+   如果搜索不到 scope，使用“批量导入/导出权限”导入指南中的 JSON，然后发布新版本；
 4. 启动本项目后，点击页面右上角“外部接入”，填写 App ID 与 App Secret；
 5. 先点“测试凭证”。测试成功只代表凭证有效，不代表长连接或事件权限已经可用；
 6. 第一次可以保持 Open ID 白名单为空并保存启用。私聊机器人后，机器人会回复你的

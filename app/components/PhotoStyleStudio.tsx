@@ -149,25 +149,24 @@ export function PhotoStyleStudio({
   }, [loadAssets]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
+    let active = true;
+    async function loadProviderStatus() {
       try {
         const response = await fetch(
           `${apiBase}/api/photo-style-transfers/provider`,
-          { signal: controller.signal },
         );
-        if (response.ok) {
+        if (response.ok && active) {
           setProviderStatus((await response.json()) as ProviderStatus);
         }
-      } catch (requestError) {
-        if (!(requestError instanceof DOMException && requestError.name === "AbortError")) {
-          setProviderStatus(null);
-        }
+      } catch {
+        if (active) setProviderStatus(null);
       }
-    }, 0);
+    }
+    void loadProviderStatus();
+    const timer = window.setInterval(() => void loadProviderStatus(), 5000);
     return () => {
-      controller.abort();
-      window.clearTimeout(timer);
+      active = false;
+      window.clearInterval(timer);
     };
   }, [apiBase]);
 
@@ -316,14 +315,17 @@ export function PhotoStyleStudio({
   }
 
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
-  const providerLabel =
-    providerStatus?.name === "sdxl_ip_adapter_8gb_v1"
+  const providerLabel = providerStatus === null
+    ? "正在检测 SDXL 服务"
+    : providerStatus.name === "sdxl_ip_adapter_8gb_v1"
       ? providerStatus.ready
         ? "本机 SDXL 就绪"
         : "本机 SDXL 待准备"
-      : providerStatus?.name === "pic-style-http"
-        ? "SDXL 服务"
-        : "CPU 本地预览";
+      : providerStatus.name === "pic-style-http"
+        ? providerStatus.ready
+          ? "SDXL 服务已连接"
+          : "SDXL 服务未连接"
+        : "开发预览 · 非生成模型";
 
   return (
     <div className="style-studio">
@@ -333,7 +335,8 @@ export function PhotoStyleStudio({
           <h1>把参考图的气质迁移到你的照片</h1>
           <p>
             选择一张内容图和一至三张参考图，控制风格、结构与细节保持程度。
-            默认在本机生成快速预览，也可连接独立的 SDXL + IP-Adapter 服务。
+            图片任务由独立的 SDXL + IP-Adapter GPU 服务生成；Agent 只负责安全上传、
+            异步调度和结果回收。
           </p>
         </div>
         <div className="hero-metric style-metric" aria-label="图片风格化能力">
@@ -470,7 +473,12 @@ export function PhotoStyleStudio({
             <button
               className="create-button"
               type="submit"
-              disabled={!contentFile || !styleFiles.length || uploading}
+              disabled={
+                !contentFile ||
+                !styleFiles.length ||
+                uploading ||
+                providerStatus?.ready !== true
+              }
             >
               {uploading ? "正在提交…" : "开始图片风格化"}
             </button>
@@ -489,11 +497,17 @@ export function PhotoStyleStudio({
             提交后会保留当前图片、名称和描述，便于调整参数后继续生成。
           </p>
           <p className="first-run-note">
-            {providerStatus?.name === "sdxl_ip_adapter_8gb_v1"
+            {providerStatus === null
+              ? "正在检查独立 SDXL + IP-Adapter 服务。"
+              : providerStatus.name === "sdxl_ip_adapter_8gb_v1"
               ? providerStatus.ready
                 ? "真实模型只读取本机固定版本权重，运行时不会联网下载。"
                 : "已选择真实模型；请先安装 GPU 依赖并完成模型许可与完整性准备。"
-              : "默认预览 Provider 不下载模型；真实 Provider 需单独配置并接受模型许可证。"}
+              : providerStatus.name === "pic-style-http"
+                ? providerStatus.ready
+                  ? "独立 SDXL + IP-Adapter 服务健康检查已通过。"
+                  : "独立 GPU 服务未就绪；请启动 frogi-m/pic-style API 与单并发 Worker。"
+                : "当前是显式开发预览模式，不代表真实生成式风格迁移效果。"}
           </p>
         </form>
 

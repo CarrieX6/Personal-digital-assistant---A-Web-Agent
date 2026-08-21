@@ -121,7 +121,8 @@ python backend/scripts/smoke_photo_style_sdxl.py `
 
 - 结论：真实 SDXL + IP-Adapter 与可选 LCM-LoRA 已在项目正式环境通过本机工程冒烟，离线模型、许可、哈希、8 GB 调度和诊断链路可用；`local_validation` 提升为 `engineering_smoke_passed`。
 - 置信度：单样本工程可运行性中高；生产图像质量、长时间稳定性和跨设备性能低到中。
-- 推荐方案：保留 `local-preview` 为默认安全路径；获授权的本机安装可显式启用 `sdxl-local`，并默认在单次隔离子进程运行；LCM 继续默认关闭，仅作为可选预览加速。
+- 当时建议：保留 `local-preview` 为默认安全路径；获授权的本机安装可显式启用 `sdxl-local`，并默认在单次隔离子进程运行；LCM 继续默认关闭，仅作为可选预览加速。
+- 2026-08-21 产品决策更新：真实 UI 试用证明 `local-preview` 的调色结果不足以代表图片风格化，因此产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；本条旧建议只保留为实验历史，CPU 路径仅用于开发测试。
 - 是否需要补充实验：需要。使用获授权的非个人固定图集完成质量盲评、至少十次稳定性、P50/P95、系统内存与连续功耗/温度采样后，才可把 `production_quality` 改为 `true`。
 - 需要更新的调研、ADR 和实现任务：`STYLE-001` 保持“开发中”；当前仍沿用 Provider 中立与现有任务架构，无需新增 ADR。若改为常驻 GPU Worker 或默认生产 Provider，再单独立项决策。
 

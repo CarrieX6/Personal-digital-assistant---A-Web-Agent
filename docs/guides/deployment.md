@@ -23,6 +23,14 @@ Viewer 的 Python 进程访问“专用网络”，不要开放公用网络。NV
 应先按 PyTorch 官方 CUDA 安装器替换 `torch/torchvision`，再安装
 `backend/requirements-gpu.txt`；CPU 预览 Provider 不要求 CUDA。
 
+图片风格化的产品路径不是在 Agent 进程内加载模型，而是单独部署
+[`frogi-m/pic-style`](https://github.com/frogi-m/pic-style)：Windows 推荐使用其
+Docker API/Redis/PostgreSQL/MinIO，加宿主机单并发 NVIDIA Worker 的混合方式。本项目
+配置 `PHOTO_STYLE_PROVIDER=pic-style-http` 与
+`PHOTO_STYLE_SERVICE_URL=http://127.0.0.1:18000`。如果 Agent 和 GPU 服务不在同一台
+电脑，应使用受保护的专用网络或 SSH Tunnel，不要把未加鉴权的 `18000` 端口直接暴露
+到公网。
+
 ## macOS / Linux
 
 ```bash
@@ -49,6 +57,30 @@ LAN_VIEWER_PUBLIC_BASE_URL=
 若电脑同时连接 VPN，程序会优先选择非隧道局域网网卡；自动选择仍不正确时，可把
 `LAN_VIEWER_PUBLIC_BASE_URL` 显式设为 `http://<电脑局域网IP>:8766`。
 
+## 临时公网 HTTPS Viewer（仅测试）
+
+部分聊天软件内置浏览器会限制 `http://192.168.x.x`。项目提供显式 opt-in 的
+TryCloudflare 测试入口，只转发 `127.0.0.1:8766` 的签名 Viewer，不公开 Root 控制台
+`3000` 或 Agent API `8000`。
+
+先安装 `cloudflared`：macOS 可运行 `brew install cloudflared`；Windows 从
+[Cloudflare 官方下载页](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/)
+下载 64 位 MSI 或可执行文件并加入 PATH。确认空间图片将经 Cloudflare 公网转发后，
+另开终端运行：
+
+```bash
+python scripts/start_public_viewer.py --acknowledge-public-media
+```
+
+进程输出 `https://<随机>.trycloudflare.com` 后保持运行。后端无需重启，新生成的飞书
+Viewer 链接会自动使用该 HTTPS 地址；停止进程后自动回退局域网地址。签名链接的持有者
+在有效期内可以查看对应私人图片，因此不要转发到无关群聊。
+
+Quick Tunnel 仅用于开发测试：随机域名会随进程重启变化，没有可用性保证。根据
+[Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)，
+正式上线应使用账号、固定域名和命名 Tunnel，并增加用户登录、资产授权、撤销、限流
+与审计。
+
 ## 为什么当前不把 Docker 作为默认方案
 
 Docker 适合复现 CPU API 环境，但 macOS 容器不能直接使用 Apple MPS；Windows GPU
@@ -56,7 +88,7 @@ Docker 适合复现 CPU API 环境，但 macOS 容器不能直接使用 Apple MP
 因容器自动消失。因此当前以原生一键脚本为默认，后续补充 CPU-only Docker Compose
 作为 CI/演示方案，并为 Windows CUDA 单独提供经过实机验证的镜像。
 
-## 公网阶段计划
+## 固定域名公网阶段计划
 
 公网版本不能直接映射 `8000/8766`。需增加域名、HTTPS 反向代理、用户身份、资产级
 授权、速率限制、审计、撤销、对象存储/CDN 或中继，并完成 Viewer URL 泄露与重放

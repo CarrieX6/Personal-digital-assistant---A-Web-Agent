@@ -11,11 +11,12 @@
 和清单写入现有本地个人资产库；Agent 通过 Capability Registry 中的
 `create_photo_style_transfer` 工具调用同一服务。
 
-接口保持 Provider 中立。默认 `local-preview` 使用 Pillow/NumPy 在 CPU 上完成确定性的
-色彩分布与纹理预览，不下载模型，适合开发、合同测试和离线演示。需要真实生成质量时，
-可显式选择 `sdxl-local` 在本机隔离进程加载固定版本 SDXL + IP-Adapter，或选择
-`pic-style-http` 调用 [`frogi-m/pic-style`](https://github.com/frogi-m/pic-style)
-独立服务。集成参考版本为提交 `c8e0b641f7f334faf73167211b5f0a8033e3b1dc`。
+接口保持 Provider 中立。产品默认使用 `pic-style-http` 调用
+[`frogi-m/pic-style`](https://github.com/frogi-m/pic-style) 独立 SDXL + IP-Adapter
+服务，主 Agent 不加载生成模型。`local-preview` 只保留给开发、合同测试和无 GPU 的
+离线链路验证，并在 UI 明确标注“非生成模型”；不能再作为默认产品效果。也可显式选择
+`sdxl-local`，但不建议让主 Agent 与约 10GB 的生成模型共享进程生命周期。集成参考
+版本为提交 `c8e0b641f7f334faf73167211b5f0a8033e3b1dc`。
 
 ## 用户链路
 
@@ -47,7 +48,23 @@ Agent 控制台为内容图和风格参考图提供独立上传入口：内容�
 
 ## Provider 与配置
 
-### 本地预览（默认）
+### 独立 SDXL + IP-Adapter 服务（产品默认）
+
+先按参考仓库文档在 GPU 机器启动 API 与单并发 Worker，再配置：
+
+```env
+PHOTO_STYLE_PROVIDER=pic-style-http
+PHOTO_STYLE_SERVICE_URL=http://127.0.0.1:18000
+PHOTO_STYLE_SERVICE_API_KEY=
+PHOTO_STYLE_TENANT_ID=personal-agent
+PHOTO_STYLE_TIMEOUT_SECONDS=900
+```
+
+主项目会轮询 `/health/ready`；服务未就绪时 Web 按钮不可提交，API 也会拒绝创建任务，
+不会悄悄降级成 CPU 调色。该路径把模型生命周期、队列和 GPU 隔离在独立服务。API Key
+只从环境读取；服务端仍需完成固定模型、许可证与质量门禁。
+
+### 本地开发预览（显式降级）
 
 ```env
 PHOTO_STYLE_PROVIDER=local-preview
@@ -125,22 +142,6 @@ python backend/scripts/smoke_photo_style_sdxl.py \
 总计 10,561,842,988 字节（9.84 GiB），另需至少 2 GiB 磁盘余量。模型准备脚本会打印
 每个许可证链接；缺少 `--accept-model-licenses` 时在网络请求前退出。本仓库忽略整个
 `backend/models/`，不会提交权重、Hugging Face 缓存或机器生成的 model lock。
-
-### pic-style HTTP 真实 Provider
-
-先按参考仓库文档在本机或受信任局域网启动服务，再配置：
-
-```env
-PHOTO_STYLE_PROVIDER=pic-style-http
-PHOTO_STYLE_SERVICE_URL=http://127.0.0.1:18000
-PHOTO_STYLE_SERVICE_API_KEY=
-PHOTO_STYLE_TENANT_ID=personal-agent
-PHOTO_STYLE_TIMEOUT_SECONDS=900
-```
-
-该路径把模型生命周期、队列和 GPU 隔离在独立服务。API Key 只从环境读取；服务端仍需
-按其仓库说明完成固定模型、许可证与质量门禁。本仓库不分发模型、权重、许可接受记录
-或私有评测图片。
 
 ## 存储与权限
 

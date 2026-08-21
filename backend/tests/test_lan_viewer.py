@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from pathlib import Path
+import time
 import pytest
 from PIL import Image
 
@@ -54,3 +56,34 @@ def test_lan_candidate_prefers_physical_private_network_over_vpn() -> None:
     selected = min(candidates, key=_lan_candidate_rank)
 
     assert selected == ("en10", "192.168.0.100")
+
+
+def test_runtime_public_url_overrides_lan_address(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    created = spatial.create_scene(_png(), original_name="scene.png")
+    spatial.wait_for_idle()
+    public_path = tmp_path / "viewer-public-url.json"
+    public_path.write_text(
+        json.dumps(
+            {
+                "url": "https://example.trycloudflare.com",
+                "created_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = LanViewerService(
+        spatial,
+        secret_path=tmp_path / "viewer-secret.key",
+        bind_host="127.0.0.1",
+        port=0,
+        ttl_seconds=600,
+        runtime_public_base_path=public_path,
+    )
+    try:
+        service.start = lambda: None  # type: ignore[method-assign]
+        link = service.create_link(created.asset.id)
+        assert link.startswith("https://example.trycloudflare.com/v/")
+    finally:
+        service.close()
+        spatial.close()

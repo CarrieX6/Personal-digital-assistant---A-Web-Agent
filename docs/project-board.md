@@ -125,7 +125,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；Web 明确定义为本机 Root 管理员视图，飞书消息按 `chat_id` 分组并以只读镜像展示；待图片原图索引、群聊 sender 边界、隐私清理策略和统一 Message 迁移 |
 | `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已实现独立 `8766` 只读 Viewer、HMAC 短时链接、文件白名单、触控/陀螺仪视差与安全响应头；待 iOS/Android 真机、防火墙、弱网和链接撤销测试，GLB/3DGS 未接入 |
-| `REMOTE-001` | P1 | 局域网、隧道、中继和远程唤醒如何选择 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 局域网仅按需暴露签名 Viewer，不暴露 Root API；公网阶段需域名、HTTPS、认证、撤销、限流、审计与中继，尚未实施 |
+| `REMOTE-001` | P1 | 局域网、隧道、中继和远程唤醒如何选择 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已提供显式 opt-in 的 TryCloudflare HTTPS 测试隧道，仅转发签名 Viewer 并动态回传公网地址；待用户确认私人媒体外发后真机验证，固定域名仍需认证、撤销、限流、审计与中继 |
 | `OUTBOX-001` | P1 | 渠道回复如何持久化、重试、去重和进入失败队列 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | Outbox Schema、退避策略、死信与断网恢复实验 |
 
 ## 6. 记忆、能力库与数据
@@ -155,7 +155,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 质量评分、失败检测与 2D 回退机制 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | 已将旧 `feature/pic-style` 的 Service、Provider、模型门禁、测试和工作台迁入新版工具库与 Agent；默认 CPU 仅用于预览，真实 SDXL 仍需目标 Windows GPU 复验和合并评审 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | 已将旧 `feature/pic-style` 迁入新版工具库；根据真实 UI 质量反馈，产品默认改为独立 `pic-style-http` SDXL + IP-Adapter，未通过 `/health/ready` 时禁止提交且不静默降级，CPU 仅保留显式开发模式；待目标 Windows GPU 服务联调 |
 
 ## 9. 虚拟试衣与数字人
 
