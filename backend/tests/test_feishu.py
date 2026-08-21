@@ -365,10 +365,11 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
     image.save(image_buffer, "PNG")
     channel.download_bytes = image_buffer.getvalue()
     spatial = build_test_spatial(tmp_path)
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
     runtime = FeishuChannelRuntime(
         service,
         FakeRunner(),  # type: ignore[arg-type]
-        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        store,
         channel_factory=lambda **_: channel,
         spatial_service=spatial,
         job_poll_interval=0.01,
@@ -414,6 +415,14 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
     assert len(image_replies) == 1
     assert Path(image_replies[0]["source"]).is_file()
     assert spatial.list_assets()[0].status == "ready"
+    image_events = [event for event in store.list_events() if event.kind == "image"]
+    assert len(image_events) == 2
+    assert all(event.media_url for event in image_events)
+    assert all(
+        event.media_url.startswith("/api/assets/")
+        for event in image_events
+        if event.media_url
+    )
 
 
 def test_runtime_image_permission_error_is_actionable(tmp_path: Path) -> None:
@@ -534,8 +543,13 @@ def test_channel_message_history_api_returns_local_events(
         chat_id="oc_chat",
         sender_id="ou_user",
         direction="inbound",
-        kind="text",
-        content="来自手机的消息",
+        kind="image",
+        content="[图片]",
+        message_id="om_image",
+    )
+    assert store.attach_event_media(
+        "om_image",
+        "/api/assets/asset-1/files/source.webp",
     )
     runtime = FakeRuntime()
     runtime.store = store  # type: ignore[attr-defined]
@@ -552,7 +566,14 @@ def test_channel_message_history_api_returns_local_events(
     response = client.get("/api/channels/messages?limit=10")
 
     assert response.status_code == 200
-    assert response.json()["messages"][0]["content"] == "来自手机的消息"
+    message = response.json()["messages"][0]
+    assert message["content"] == "[图片]"
+    assert message["media_url"] == "/api/assets/asset-1/files/source.webp"
+
+    deleted = client.delete("/api/channels/conversations/oc_chat")
+    assert deleted.status_code == 204
+    assert client.get("/api/channels/messages?limit=10").json()["messages"] == []
+    assert client.delete("/api/channels/conversations/oc_chat").status_code == 404
 
 
 def test_runtime_error_status_redacts_app_secret(tmp_path: Path) -> None:

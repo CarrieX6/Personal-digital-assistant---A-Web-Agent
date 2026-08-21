@@ -216,6 +216,7 @@ class ChannelMessagePublic(BaseModel):
     direction: Literal["inbound", "outbound", "system"]
     kind: Literal["text", "markdown", "image", "card", "status"]
     content: str
+    media_url: str | None = None
     created_at: datetime
 
 

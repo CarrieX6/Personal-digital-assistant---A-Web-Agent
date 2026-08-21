@@ -386,6 +386,16 @@ def create_app(
         store: SQLiteChannelStore = request.app.state.channel_store
         return ChannelMessageListResponse(messages=store.list_events(limit))
 
+    @app.delete(
+        "/api/channels/conversations/{chat_id}",
+        status_code=204,
+    )
+    def delete_channel_conversation(chat_id: str, request: Request) -> Response:
+        store: SQLiteChannelStore = request.app.state.channel_store
+        if not store.delete_chat_events(chat_id):
+            raise HTTPException(status_code=404, detail="找不到这个飞书会话镜像。")
+        return Response(status_code=204)
+
     @app.post(
         "/api/source-images",
         response_model=SourceImagePublic,

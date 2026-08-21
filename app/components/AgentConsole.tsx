@@ -129,7 +129,14 @@ type ChannelMessage = {
   direction: "inbound" | "outbound" | "system";
   kind: "text" | "markdown" | "image" | "card" | "status";
   content: string;
+  media_url?: string | null;
   created_at: string;
+};
+
+type DeleteTarget = {
+  kind: "local" | "feishu";
+  id: string;
+  title: string;
 };
 
 type AgentConsoleProps = {
@@ -161,6 +168,7 @@ export function AgentConsole({
   const inputRef = useRef<HTMLInputElement>(null);
   const styleInputRef = useRef<HTMLInputElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const [localThreads, setLocalThreads] = useState<LocalThread[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -177,6 +185,9 @@ export function AgentConsole({
   const [approvalBusy, setApprovalBusy] = useState("");
   const [job, setJob] = useState<AgentJob | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadLocalConversations = useCallback(async () => {
     try {
@@ -330,6 +341,16 @@ export function AgentConsole({
   }, [localThreads, selectedId, channelMessages, loading, job]);
 
   useEffect(() => {
+    if (!deleteTarget) return;
+    deleteCancelRef.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !deleting) setDeleteTarget(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [deleteTarget, deleting]);
+
+  useEffect(() => {
     if (!job || !["queued", "running"].includes(job.status)) return;
     const timer = window.setTimeout(async () => {
       try {
@@ -378,6 +399,7 @@ export function AgentConsole({
 
   async function addThread() {
     setError("");
+    setNotice("");
     try {
       const response = await fetch(`${apiBase}/api/conversations`, {
         method: "POST",
@@ -408,6 +430,61 @@ export function AgentConsole({
           : "无法创建新会话。",
       );
       onConnectionChange(false);
+    }
+  }
+
+  function requestConversationDelete() {
+    if (selectedLocal) {
+      setDeleteTarget({
+        kind: "local",
+        id: selectedLocal.id,
+        title: selectedLocal.title,
+      });
+    } else if (selectedFeishu) {
+      setDeleteTarget({
+        kind: "feishu",
+        id: selectedFeishu.id,
+        title: selectedFeishu.title,
+      });
+    }
+  }
+
+  async function confirmConversationDelete() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setError("");
+    setNotice("");
+    try {
+      const endpoint =
+        deleteTarget.kind === "local"
+          ? `${apiBase}/api/conversations/${encodeURIComponent(deleteTarget.id)}`
+          : `${apiBase}/api/channels/conversations/${encodeURIComponent(deleteTarget.id)}`;
+      const response = await fetch(endpoint, { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseError(response));
+
+      if (deleteTarget.kind === "local") {
+        setSelectedId("");
+        await loadLocalConversations();
+        setNotice("本机会话已删除；个人资产和长期记忆未受影响。");
+      } else {
+        setChannelMessages((current) =>
+          current.filter((item) => item.chat_id !== deleteTarget.id),
+        );
+        setSelectedId(
+          localThreads[0] ? `local:${localThreads[0].id}` : "",
+        );
+        setNotice("飞书会话的本机镜像已删除；飞书原消息未被修改。");
+      }
+      setDeleteTarget(null);
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "无法删除这个会话。",
+      );
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -692,7 +769,8 @@ export function AgentConsole({
     : "演示规划器";
 
   return (
-    <div className="conversation-workspace">
+    <>
+      <div className="conversation-workspace">
       <aside className="conversation-sidebar" aria-label="对话列表">
         <div className="conversation-sidebar-header">
           <div>
@@ -784,13 +862,26 @@ export function AgentConsole({
                 : `${modeLabel} · 当前上下文只属于这个 session_id`}
             </p>
           </div>
-          <span
-            className="chat-security"
-            title="本机 Root 管理员可以查看所有已记录的 Web 与飞书会话"
-          >
-            <span aria-hidden="true" />
-            Root 管理员视图
-          </span>
+          <div className="chat-header-actions">
+            <span
+              className="chat-security"
+              title="本机 Root 管理员可以查看所有已记录的 Web 与飞书会话"
+            >
+              <span aria-hidden="true" />
+              Root 管理员视图
+            </span>
+            {selectedLocal || selectedFeishu ? (
+              <button
+                className="conversation-delete-button"
+                type="button"
+                onClick={requestConversationDelete}
+                aria-label={`删除${selectedLocal ? "本机" : "飞书镜像"}会话`}
+              >
+                <AppIcon name="trash" width="17" height="17" />
+                <span>删除会话</span>
+              </button>
+            ) : null}
+          </div>
         </header>
 
         {pendingApprovals.length ? (
@@ -850,7 +941,7 @@ export function AgentConsole({
             )
           ) : selectedFeishu ? (
             selectedFeishu.messages.map((item) => (
-              <ChannelMessageBubble key={item.id} item={item} />
+              <ChannelMessageBubble key={item.id} item={item} apiBase={apiBase} />
             ))
           ) : (
             <ChatWelcome onExample={setMessage} />
@@ -910,6 +1001,12 @@ export function AgentConsole({
         {error ? (
           <div className="chat-error" role="alert">
             {error}
+          </div>
+        ) : null}
+
+        {notice ? (
+          <div className="chat-notice" aria-live="polite">
+            {notice}
           </div>
         ) : null}
 
@@ -1025,7 +1122,52 @@ export function AgentConsole({
           </footer>
         )}
       </section>
-    </div>
+      </div>
+
+      {deleteTarget ? (
+        <div className="conversation-delete-scrim" role="presentation">
+          <section
+            className="conversation-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-conversation-title"
+            aria-describedby="delete-conversation-description"
+          >
+            <span className="delete-dialog-icon" aria-hidden="true">
+              <AppIcon name="trash" width="22" height="22" />
+            </span>
+            <h2 id="delete-conversation-title">删除“{deleteTarget.title}”？</h2>
+            <p id="delete-conversation-description">
+              {deleteTarget.kind === "local"
+                ? "将删除这段本机会话及其消息记录，但不会删除已生成资产或显式保存的长期记忆。"
+                : "只会删除电脑端的只读镜像，不会删除飞书里的原消息；收到新消息后该会话会重新出现。"}
+            </p>
+            <div>
+              <button
+                ref={deleteCancelRef}
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+              >
+                取消
+              </button>
+              <button
+                className="danger"
+                type="button"
+                disabled={deleting}
+                onClick={() => void confirmConversationDelete()}
+              >
+                {deleting
+                  ? "正在删除…"
+                  : deleteTarget.kind === "local"
+                    ? "删除本机会话"
+                    : "删除本机镜像"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -1164,7 +1306,14 @@ function LocalMessageBubble({
   );
 }
 
-function ChannelMessageBubble({ item }: { item: ChannelMessage }) {
+function ChannelMessageBubble({
+  item,
+  apiBase,
+}: {
+  item: ChannelMessage;
+  apiBase: string;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
   const role =
     item.direction === "inbound"
       ? "user"
@@ -1179,20 +1328,70 @@ function ChannelMessageBubble({ item }: { item: ChannelMessage }) {
       </div>
     );
   }
+  const mediaSrc =
+    item.media_url?.startsWith("/api/assets/")
+      ? `${apiBase}${item.media_url}`
+      : "";
+  const card = item.kind === "card" ? parseFunctionCard(item) : null;
   return (
     <div className={`message-row ${role}`}>
       {role === "assistant" ? <div className="assistant-avatar">A</div> : null}
-      <div className={`message-bubble ${role}`}>
+      <div className={`message-bubble ${role} channel-${item.kind}`}>
         {item.kind === "image" ? (
-          <div className="channel-image-placeholder">
-            <AppIcon name="image" width="24" height="24" />
-            <span>飞书图片消息</span>
+          mediaSrc && !imageFailed ? (
+            <a
+              className="channel-image-preview"
+              href={mediaSrc}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="打开飞书图片原尺寸预览"
+            >
+              {/* The backend URL is an owner-controlled local asset route. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={mediaSrc}
+                alt="飞书会话中的图片"
+                loading="lazy"
+                onError={() => setImageFailed(true)}
+              />
+              <span>点击查看原图</span>
+            </a>
+          ) : (
+            <div className="channel-image-placeholder">
+              <AppIcon name="image" width="24" height="24" />
+              <strong>图片预览不可用</strong>
+              <span>
+                {item.media_url
+                  ? "本地资产可能已被删除"
+                  : "旧消息未保存图片索引，请从飞书重新发送"}
+              </span>
+            </div>
+          )
+        ) : null}
+        {card?.variant === "menu" ? (
+          <div className="channel-function-card">
+            <span className="function-card-icon" aria-hidden="true">
+              <AppIcon name="tools" width="19" height="19" />
+            </span>
+            <div>
+              <small>个人数字助手</small>
+              <strong>选择常用功能</strong>
+              <p>在飞书中点击卡片按钮即可调用本机能力。</p>
+              <ul>
+                {card.items.map((label) => (
+                  <li key={label}>{label}</li>
+                ))}
+              </ul>
+            </div>
           </div>
+        ) : item.kind !== "image" ? (
+          <>
+            {card?.variant === "action" ? (
+              <span className="message-kind-label">已选择功能</span>
+            ) : null}
+            <p>{card?.text ?? cleanMessageText(item.content)}</p>
+          </>
         ) : null}
-        {item.kind === "card" ? (
-          <span className="message-kind-label">功能卡片</span>
-        ) : null}
-        <p>{cleanMessageText(item.content)}</p>
         <div className="channel-message-foot">
           <span>
             {role === "user"
@@ -1204,6 +1403,29 @@ function ChannelMessageBubble({ item }: { item: ChannelMessage }) {
       </div>
     </div>
   );
+}
+
+function parseFunctionCard(item: ChannelMessage) {
+  const text = cleanMessageText(item.content).replace(
+    /^\[功能卡片\]\s*/,
+    "",
+  );
+  if (item.direction === "outbound") {
+    const items = text
+      .split(/[、，,]/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return {
+      variant: "menu" as const,
+      items: items.length ? items : ["功能菜单"],
+      text,
+    };
+  }
+  return {
+    variant: "action" as const,
+    items: [] as string[],
+    text: `已选择：${text || "功能卡片"}`,
+  };
 }
 
 function shortId(value: string) {

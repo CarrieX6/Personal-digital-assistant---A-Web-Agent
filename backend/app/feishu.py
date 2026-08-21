@@ -137,15 +137,22 @@ class SQLiteChannelStore:
         direction: str,
         kind: str,
         content: str,
+        message_id: str | None = None,
+        media_url: str | None = None,
     ) -> None:
         safe_content = content.strip()[:4000] or "[空消息]"
+        safe_media_url = (
+            media_url[:1000]
+            if media_url and media_url.startswith("/api/assets/")
+            else None
+        )
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO channel_events (
                     platform, chat_id, sender_id, direction,
-                    kind, content, created_at
-                ) VALUES ('feishu', ?, ?, ?, ?, ?, ?)
+                    kind, content, message_id, media_url, created_at
+                ) VALUES ('feishu', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -153,6 +160,8 @@ class SQLiteChannelStore:
                     direction,
                     kind,
                     safe_content,
+                    message_id,
+                    safe_media_url,
                     time.time(),
                 ),
             )
@@ -172,7 +181,7 @@ class SQLiteChannelStore:
             rows = connection.execute(
                 """
                 SELECT id, platform, chat_id, sender_id, direction,
-                       kind, content, created_at
+                       kind, content, media_url, created_at
                 FROM channel_events
                 ORDER BY id DESC
                 LIMIT ?
@@ -188,8 +197,9 @@ class SQLiteChannelStore:
                 direction=row[4],
                 kind=row[5],
                 content=row[6],
+                media_url=row[7],
                 created_at=datetime.fromtimestamp(
-                    float(row[7]),
+                    float(row[8]),
                     tz=timezone.utc,
                 ),
             )
@@ -199,6 +209,33 @@ class SQLiteChannelStore:
     def clear_events(self) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM channel_events")
+
+    def attach_event_media(self, message_id: str, media_url: str) -> bool:
+        if not media_url.startswith("/api/assets/"):
+            return False
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE channel_events
+                SET media_url = ?
+                WHERE id = (
+                    SELECT id FROM channel_events
+                    WHERE message_id = ? AND kind = 'image'
+                    ORDER BY id DESC LIMIT 1
+                )
+                """,
+                (media_url[:1000], message_id),
+            )
+            return cursor.rowcount == 1
+
+    def delete_chat_events(self, chat_id: str) -> bool:
+        """Delete only the local read-only mirror, never Feishu messages."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM channel_events WHERE chat_id = ?",
+                (chat_id,),
+            )
+            return cursor.rowcount > 0
 
     def claim_feature_menu(self, chat_id: str) -> bool:
         with self._lock, self._connect() as connection:
@@ -265,6 +302,8 @@ class SQLiteChannelStore:
                     direction TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    message_id TEXT,
+                    media_url TEXT,
                     created_at REAL NOT NULL
                 );
 
@@ -274,6 +313,20 @@ class SQLiteChannelStore:
                 );
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_events)"
+                ).fetchall()
+            }
+            if "message_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE channel_events ADD COLUMN message_id TEXT"
+                )
+            if "media_url" not in columns:
+                connection.execute(
+                    "ALTER TABLE channel_events ADD COLUMN media_url TEXT"
+                )
         os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
@@ -504,6 +557,7 @@ class FeishuChannelRuntime:
             direction="inbound",
             kind=kind,
             content=content,
+            message_id=message_id,
         )
 
         self._spawn(self._process_message(message))
@@ -879,6 +933,10 @@ class FeishuChannelRuntime:
                 title="飞书空间照片",
                 owner_id=self._owner_id(sender_id),
             )
+            self.store.attach_event_media(
+                message_id,
+                created.asset.source_url,
+            )
             await self._reply_safely(
                 chat_id,
                 message_id,
@@ -938,6 +996,7 @@ class FeishuChannelRuntime:
                         message_id,
                         preview_path,
                         self._uuid(message_id, "image-preview"),
+                        media_url=asset.preview_url,
                     )
                 except Exception as exc:
                     self._status = "error"
@@ -1138,6 +1197,8 @@ class FeishuChannelRuntime:
         message_id: str,
         path: Path,
         uuid: str,
+        *,
+        media_url: str | None = None,
     ) -> None:
         channel = self._channel
         if channel is None:
@@ -1154,6 +1215,8 @@ class FeishuChannelRuntime:
             direction="outbound",
             kind="image",
             content=f"[图片] {path.name}",
+            message_id=message_id,
+            media_url=media_url,
         )
 
     def _ensure_send_success(self, result: Any) -> None:
