@@ -23,6 +23,13 @@
 
 - [系统架构](architecture/system-architecture.md)：最终目标、模块边界、消息链路、
   数据模型、安全边界和分阶段路线图。
+- [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)：已实现的循环
+  节点与代码硬边界，以及待完成的人工确认、异步恢复和幂等控制。
+
+### 配置指南
+
+- [飞书机器人配置与使用指南](guides/feishu-setup.md)：企业自建应用、权限、长连接、
+  Open ID、私聊、群聊、图片、卡片回调、Root 可见性与故障排查。
 
 ### 平台与技术调研
 
@@ -37,7 +44,24 @@
 
 ### 学习笔记
 
-- [学习笔记索引](learning/README.md)：团队知识记录规范、建议学习顺序与选题清单。
+- [个人数字助手知识库](learning/README.md)：从工程基础、Web Agent、外部控制到
+  产品化工程的分层知识体系、正文和学习路线。
+- [从零到可运行个人数字助手](learning/implementation-roadmap.md)：按当前代码基线
+  分阶段学习、实现、测试和验收的主路线。
+- [调研证据与文档维护方法](learning/research-quality.md)：证据等级、当前覆盖审查、
+  已知缺口、时效性核验和更新触发器。
+- [项目工程基础](learning/foundations/00-project-engineering.md)：环境、依赖、配置、
+  Secret、测试、调试和 Git 协作前置。
+- [Web Agent 知识地图](learning/web-agent/README.md)：Tool Calling、Agent 架构、
+  Single/Multi-Agent、调度、LangChain、LangGraph、Memory、安全与评测。
+- [外部控制知识地图](learning/external-control/README.md)：飞书、微信、Channel
+  Gateway、远程网络、iOS、HarmonyOS、Android 和结果预览。
+- [身份、认证、授权与设备绑定](learning/external-control/04-identity-auth.md)：事件
+  真实性、OAuth/OIDC/PKCE、账号绑定、设备凭证和资源授权。
+- [产品化工程知识地图](learning/product-engineering/README.md)：Capability、资产、
+  供应链、数据治理、安全、性能、能耗、测试、运维和 Human-Agent UX。
+- [AI 功能与模型知识地图](learning/ai-capabilities/README.md)：空间照片、虚拟试衣、
+  虚拟宠物、图像视频生成、3D 和端侧模型选型。
 
 ### 团队协作
 

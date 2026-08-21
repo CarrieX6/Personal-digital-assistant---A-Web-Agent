@@ -6,12 +6,14 @@ from io import BytesIO
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.app.assets import SpatialSceneService
+from backend.app.assets import AssetError, SpatialSceneService
 from backend.app.llm import OpenAICompatiblePlanner
 from backend.app.main import create_app
+from backend.app.memory import MemoryIsolationError
 from backend.app.settings import (
     EncryptedFileSecretStore,
     SettingsRepository,
@@ -116,8 +118,13 @@ def test_analysis_runs_multiple_tools_and_writes_trace(tmp_path: Path) -> None:
     assert body["status"] == "completed"
     assert [step["stage"] for step in body["steps"]] == [
         "planning",
+        "policy",
         "tool",
+        "decision",
+        "policy",
         "tool",
+        "decision",
+        "decision",
         "final",
     ]
     assert "文本统计" in body["answer"]
@@ -139,6 +146,7 @@ def test_unknown_task_returns_guidance(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "当前是无模型演示模式" in response.json()["answer"]
+    assert "生成可拖动视角的空间照片" in response.json()["answer"]
 
 
 def test_real_llm_tool_calling_round_trip(tmp_path: Path) -> None:
@@ -213,7 +221,10 @@ def test_real_llm_tool_calling_round_trip(tmp_path: Path) -> None:
     assert body["answer"] == "这段文本包含 6 个中文字符。"
     assert [step["stage"] for step in body["steps"]] == [
         "planning",
+        "policy",
         "tool",
+        "decision",
+        "decision",
         "final",
     ]
     assert len(request_bodies) == 2
@@ -221,6 +232,40 @@ def test_real_llm_tool_calling_round_trip(tmp_path: Path) -> None:
     assert request_bodies[0]["tools"][0]["function"]["parameters"]["type"] == "object"
     assert request_bodies[1]["messages"][-1]["role"] == "tool"
     assert request_bodies[1]["messages"][-1]["tool_call_id"] == "call_test_1"
+
+
+def test_agent_run_query_and_duplicate_decision_are_idempotent(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+    created = client.post(
+        "/api/agent/run",
+        json={"message": "现在几点？", "session_id": "run-query"},
+    )
+    assert created.status_code == 200
+    run = created.json()
+
+    fetched = client.get(f"/api/agent/runs/{run['run_id']}")
+    listed = client.get("/api/agent/runs", params={"status": "completed"})
+    duplicate = client.post(
+        f"/api/agent/runs/{run['run_id']}/decision",
+        json={"approved": True},
+    )
+
+    assert fetched.status_code == 200
+    assert fetched.json() == run
+    assert run["run_id"] in {
+        item["run_id"] for item in listed.json()["runs"]
+    }
+    assert duplicate.status_code == 200
+    assert duplicate.json() == run
 
 
 def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
@@ -543,4 +588,153 @@ def test_spatial_scene_rejects_invalid_upload(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert "图片" in response.json()["detail"]
+    spatial.close()
+
+
+def test_memory_and_threads_are_isolated_by_owner(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    app = create_app(
+        tmp_path / "runs.jsonl",
+        settings_service=settings,
+        spatial_service=spatial,
+    )
+    runner = app.state.runner
+
+    remembered = runner.run(
+        "记住：我偏好绿色界面",
+        owner_id="user-a",
+        thread_id="thread-a",
+        channel="test",
+    )
+    user_a = runner.run(
+        "查看我的记忆",
+        owner_id="user-a",
+        thread_id="thread-a",
+        channel="test",
+    )
+    user_b = runner.run(
+        "查看我的记忆",
+        owner_id="user-b",
+        thread_id="thread-b",
+        channel="test",
+    )
+
+    assert "已为你保存" in remembered.answer
+    assert "绿色界面" in user_a.answer
+    assert "没有为你保存" in user_b.answer
+    with pytest.raises(MemoryIsolationError):
+        runner.run(
+            "你好",
+            owner_id="user-b",
+            thread_id="thread-a",
+            channel="test",
+        )
+    spatial.close()
+
+
+def test_web_conversations_are_server_persisted_with_run_metadata(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    app = create_app(
+        tmp_path / "runs.jsonl",
+        settings_service=settings,
+        spatial_service=spatial,
+    )
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/conversations",
+        json={"session_id": "research-1", "title": "新对话"},
+    )
+    assert created.status_code == 201
+    assert created.json()["id"] == "research-1"
+    assert created.json()["message_count"] == 0
+
+    run = client.post(
+        "/api/agent/run",
+        json={
+            "session_id": "research-1",
+            "message": "分析这段文字：医学人工智能需要可靠评测。",
+        },
+    )
+    assert run.status_code == 200
+
+    conversations = client.get(
+        "/api/conversations",
+        params={"channel": "web"},
+    )
+    assert conversations.status_code == 200
+    thread = conversations.json()["conversations"][0]
+    assert thread["id"] == "research-1"
+    assert thread["title"].startswith("分析这段文字")
+    assert thread["message_count"] == 2
+
+    messages = client.get("/api/conversations/research-1/messages")
+    assert messages.status_code == 200
+    history = messages.json()["messages"]
+    assert [item["role"] for item in history] == ["user", "assistant"]
+    assert history[1]["run_id"] == run.json()["run_id"]
+    assert history[1]["metadata"]["run"]["steps"]
+
+    renamed = client.put(
+        "/api/conversations/research-1",
+        json={"title": "医学 AI 调研"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "医学 AI 调研"
+
+    deleted = client.delete("/api/conversations/research-1")
+    assert deleted.status_code == 204
+    missing = client.get("/api/conversations/research-1/messages")
+    assert missing.status_code == 404
+    spatial.close()
+
+
+def test_web_conversation_rejects_unsafe_session_id(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+        )
+    )
+
+    response = client.post(
+        "/api/agent/run",
+        json={"session_id": "../other", "message": "你好"},
+    )
+
+    assert response.status_code == 422
+    assert "会话 ID" in response.json()["detail"]
+    spatial.close()
+
+
+def test_spatial_assets_are_isolated_by_owner(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    image = Image.new("RGB", (120, 80), "#5c8b77")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+
+    created = spatial.create_scene(
+        image_buffer.getvalue(),
+        original_name="private.png",
+        owner_id="user-a",
+    )
+    spatial.wait_for_idle()
+
+    assert [asset.id for asset in spatial.list_assets(owner_id="user-a")] == [
+        created.asset.id
+    ]
+    assert spatial.list_assets(owner_id="user-b") == []
+    assert spatial.get_asset(
+        created.asset.id,
+        owner_id="user-a",
+    ).id == created.asset.id
+    with pytest.raises(AssetError, match="找不到"):
+        spatial.get_asset(created.asset.id, owner_id="user-b")
     spatial.close()

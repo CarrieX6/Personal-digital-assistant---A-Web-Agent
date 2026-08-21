@@ -127,11 +127,11 @@ class SecretStore(Protocol):
 
 
 class KeyringSecretStore:
-    def __init__(self, settings_path: Path) -> None:
+    def __init__(self, settings_path: Path, account: str = "llm-api-key") -> None:
         workspace = str(settings_path.resolve().parents[2])
         workspace_id = hashlib.sha256(workspace.encode()).hexdigest()[:12]
         self.service = f"agent-lab-{workspace_id}"
-        self.account = "llm-api-key"
+        self.account = account
 
     def get(self) -> str | None:
         return keyring.get_password(self.service, self.account)

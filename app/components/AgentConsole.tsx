@@ -3,10 +3,13 @@
 import {
   ChangeEvent,
   FormEvent,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
+import { AppIcon } from "./AppIcon";
 
 export type HealthInfo = {
   status: "ok";
@@ -14,11 +17,18 @@ export type HealthInfo = {
   llm_configured: boolean;
   model?: string | null;
   tool_count: number;
+  feishu_status?: "disabled" | "starting" | "connected" | "error";
 };
 
 type TraceStep = {
   index: number;
-  stage: "planning" | "tool" | "final";
+  stage:
+    | "planning"
+    | "policy"
+    | "approval"
+    | "tool"
+    | "decision"
+    | "final";
   label: string;
   detail: string;
   duration_ms: number;
@@ -27,26 +37,18 @@ type TraceStep = {
 
 type AgentRun = {
   run_id: string;
-  status: "completed" | "failed";
+  status: "waiting_approval" | "completed" | "failed";
   mode: string;
   answer: string;
   steps: TraceStep[];
   total_duration_ms: number;
+  approval?: {
+    tool?: string;
+    description?: string;
+    risk_level?: string;
+    arguments?: Record<string, unknown>;
+  } | null;
 };
-
-type AgentConsoleProps = {
-  apiBase: string;
-  health: HealthInfo | null;
-  onConnectionChange: (ready: boolean) => void;
-  onSpatialSceneReady: (assetId: string) => void;
-};
-
-const examples = [
-  "把这张图片生成可拖动视角的空间照片",
-  "分析这段文字：医学人工智能正在改变影像诊断流程，模型评估与数据质量同样重要。",
-  "查看我的个人资产",
-  "现在几点？",
-];
 
 type SourceImage = {
   id: string;
@@ -65,11 +67,80 @@ type AgentJob = {
   error: string | null;
 };
 
-const stageName: Record<TraceStep["stage"], string> = {
-  planning: "规划",
-  tool: "工具",
-  final: "回答",
+type LocalMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  attachment?: {
+    name: string;
+    preview?: string;
+  };
+  run?: AgentRun;
+  assetId?: string;
 };
+
+type LocalThread = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  messages: LocalMessage[];
+};
+
+type ConversationResponse = {
+  id: string;
+  channel: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
+type ConversationMessageResponse = {
+  id: number;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  created_at: string;
+  run_id?: string | null;
+  metadata?: {
+    run?: AgentRun;
+    asset_id?: string;
+    attachment?: {
+      name?: string;
+    };
+  };
+};
+
+type ChannelMessage = {
+  id: number;
+  platform: "feishu";
+  chat_id: string;
+  sender_id?: string | null;
+  direction: "inbound" | "outbound" | "system";
+  kind: "text" | "markdown" | "image" | "card" | "status";
+  content: string;
+  created_at: string;
+};
+
+type AgentConsoleProps = {
+  apiBase: string;
+  health: HealthInfo | null;
+  onConnectionChange: (ready: boolean) => void;
+  onSpatialSceneReady: (assetId: string) => void;
+};
+
+const examples = [
+  "分析这段文字：医学人工智能需要可靠评测与隐私保护。",
+  "记住：我偏好所有私人图片在本机处理",
+  "查看我的个人资产",
+  "现在几点？",
+];
+
+function makeId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
 
 export function AgentConsole({
   apiBase,
@@ -78,20 +149,171 @@ export function AgentConsole({
   onSpatialSceneReady,
 }: AgentConsoleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const previewUrlRef = useRef("");
-  const [message, setMessage] = useState(examples[1]);
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const previewUrlsRef = useRef(new Set<string>());
+  const [localThreads, setLocalThreads] = useState<LocalThread[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [localLoading, setLocalLoading] = useState(true);
+  const [channelMessages, setChannelMessages] = useState<ChannelMessage[]>([]);
+  const [channelLoading, setChannelLoading] = useState(true);
+  const [pendingApprovals, setPendingApprovals] = useState<AgentRun[]>([]);
+  const [message, setMessage] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState("");
-  const [result, setResult] = useState<AgentRun | null>(null);
-  const [job, setJob] = useState<AgentJob | null>(null);
   const [loading, setLoading] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState("");
+  const [job, setJob] = useState<AgentJob | null>(null);
   const [error, setError] = useState("");
 
+  const loadLocalConversations = useCallback(async () => {
+    try {
+      let response = await fetch(
+        `${apiBase}/api/conversations?channel=web&limit=50`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      let body = (await response.json()) as {
+        conversations: ConversationResponse[];
+      };
+      if (body.conversations.length === 0) {
+        const createResponse = await fetch(`${apiBase}/api/conversations`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: "default", title: "新对话" }),
+        });
+        if (!createResponse.ok && createResponse.status !== 409) {
+          throw new Error(await responseError(createResponse));
+        }
+        response = await fetch(
+          `${apiBase}/api/conversations?channel=web&limit=50`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) throw new Error(await responseError(response));
+        body = (await response.json()) as {
+          conversations: ConversationResponse[];
+        };
+      }
+
+      const threads = await Promise.all(
+        body.conversations.map(async (conversation): Promise<LocalThread> => {
+          const messagesResponse = await fetch(
+            `${apiBase}/api/conversations/${encodeURIComponent(conversation.id)}/messages?limit=200`,
+            { cache: "no-store" },
+          );
+          if (!messagesResponse.ok) {
+            throw new Error(await responseError(messagesResponse));
+          }
+          const messagesBody = (await messagesResponse.json()) as {
+            messages: ConversationMessageResponse[];
+          };
+          return {
+            id: conversation.id,
+            title: conversation.title,
+            createdAt: conversation.created_at,
+            updatedAt: conversation.updated_at,
+            messageCount: conversation.message_count,
+            messages: messagesBody.messages
+              .filter(
+                (item) => item.role === "user" || item.role === "assistant",
+              )
+              .map((item) => ({
+                id: String(item.id),
+                role: item.role as "user" | "assistant",
+                content: item.content,
+                createdAt: item.created_at,
+                attachment: item.metadata?.attachment?.name
+                  ? { name: item.metadata.attachment.name }
+                  : undefined,
+                run: item.metadata?.run,
+                assetId: item.metadata?.asset_id,
+              })),
+          };
+        }),
+      );
+      setLocalThreads(threads);
+      setSelectedId((current) => {
+        if (
+          current.startsWith("feishu:") ||
+          threads.some((thread) => current === `local:${thread.id}`)
+        ) {
+          return current;
+        }
+        return threads[0] ? `local:${threads[0].id}` : "";
+      });
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "无法读取本机会话。",
+      );
+      onConnectionChange(false);
+    } finally {
+      setLocalLoading(false);
+    }
+  }, [apiBase, onConnectionChange]);
+
   useEffect(() => {
+    const timer = window.setTimeout(() => void loadLocalConversations(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadLocalConversations]);
+
+  useEffect(() => {
+    const urls = previewUrlsRef.current;
     return () => {
-      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      urls.forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
+
+  const loadChannelMessages = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiBase}/api/channels/messages?limit=200`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const body = (await response.json()) as { messages: ChannelMessage[] };
+      setChannelMessages(body.messages);
+      onConnectionChange(true);
+    } catch {
+      // Keep local chat usable if the external-channel log is unavailable.
+    } finally {
+      setChannelLoading(false);
+    }
+  }, [apiBase, onConnectionChange]);
+
+  const loadPendingApprovals = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `${apiBase}/api/agent/runs?status=waiting_approval&limit=20`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      const body = (await response.json()) as { runs: AgentRun[] };
+      setPendingApprovals(body.runs);
+    } catch {
+      // Approval polling must not make the main chat unavailable.
+    }
+  }, [apiBase]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void loadChannelMessages();
+      void loadPendingApprovals();
+    };
+    const initial = window.setTimeout(refresh, 0);
+    const interval = window.setInterval(refresh, 3000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [loadChannelMessages, loadPendingApprovals]);
+
+  useEffect(() => {
+    messageListRef.current?.scrollTo({
+      top: messageListRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [localThreads, selectedId, channelMessages, loading, job]);
 
   useEffect(() => {
     if (!job || !["queued", "running"].includes(job.status)) return;
@@ -102,9 +324,7 @@ export function AgentConsole({
         const nextJob = (await response.json()) as AgentJob;
         setJob(nextJob);
         onConnectionChange(true);
-        if (nextJob.status === "completed") {
-          onSpatialSceneReady(nextJob.asset_id);
-        } else if (nextJob.status === "failed") {
+        if (nextJob.status === "failed") {
           setError(nextJob.error || nextJob.message);
         }
       } catch (requestError) {
@@ -114,9 +334,77 @@ export function AgentConsole({
             : "无法读取空间照片任务状态。",
         );
       }
-    }, 800);
+    }, 900);
     return () => window.clearTimeout(timer);
-  }, [apiBase, job, onConnectionChange, onSpatialSceneReady]);
+  }, [apiBase, job, onConnectionChange]);
+
+  const feishuThreads = useMemo(() => {
+    const grouped = new Map<string, ChannelMessage[]>();
+    channelMessages.forEach((item) => {
+      const current = grouped.get(item.chat_id) ?? [];
+      current.push(item);
+      grouped.set(item.chat_id, current);
+    });
+    return [...grouped.entries()]
+      .map(([chatId, messages]) => ({
+        id: chatId,
+        messages,
+        updatedAt: messages.at(-1)?.created_at ?? "",
+        title: `飞书对话 · ${shortId(chatId)}`,
+      }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }, [channelMessages]);
+
+  const selectedLocal = selectedId.startsWith("local:")
+    ? localThreads.find((item) => `local:${item.id}` === selectedId)
+    : undefined;
+  const selectedFeishu = selectedId.startsWith("feishu:")
+    ? feishuThreads.find((item) => `feishu:${item.id}` === selectedId)
+    : undefined;
+
+  async function addThread() {
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/api/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "新对话" }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const created = (await response.json()) as ConversationResponse;
+      setLocalThreads((current) => [
+        {
+          id: created.id,
+          title: created.title,
+          createdAt: created.created_at,
+          updatedAt: created.updated_at,
+          messageCount: 0,
+          messages: [],
+        },
+        ...current,
+      ]);
+      setSelectedId(`local:${created.id}`);
+      setMessage("");
+      setJob(null);
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "无法创建新会话。",
+      );
+      onConnectionChange(false);
+    }
+  }
+
+  function updateThread(
+    threadId: string,
+    updater: (thread: LocalThread) => LocalThread,
+  ) {
+    setLocalThreads((current) =>
+      current.map((thread) => (thread.id === threadId ? updater(thread) : thread)),
+    );
+  }
 
   function chooseAttachment(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -132,16 +420,16 @@ export function AgentConsole({
       event.target.value = "";
       return;
     }
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = URL.createObjectURL(file);
-    setAttachmentPreview(previewUrlRef.current);
+    const preview = URL.createObjectURL(file);
+    previewUrlsRef.current.add(preview);
+    setAttachmentPreview(preview);
     setAttachment(file);
-    setMessage(examples[0]);
+    if (!message.trim()) {
+      setMessage("把这张图片生成可拖动视角的空间照片");
+    }
   }
 
   function clearAttachment() {
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = "";
     setAttachmentPreview("");
     setAttachment(null);
     if (inputRef.current) inputRef.current.value = "";
@@ -149,14 +437,36 @@ export function AgentConsole({
 
   async function runAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!message.trim() || loading) return;
-
+    if (!selectedLocal || !message.trim() || loading) return;
+    const threadId = selectedLocal.id;
+    const userText = message.trim();
+    const sentAttachment = attachment
+      ? { name: attachment.name, preview: attachmentPreview }
+      : undefined;
+    const userMessage: LocalMessage = {
+      id: makeId(),
+      role: "user",
+      content: userText,
+      createdAt: new Date().toISOString(),
+      attachment: sentAttachment,
+    };
+    const nextTitle =
+      selectedLocal.messages.length === 0
+        ? userText.replace(/\s+/g, " ").slice(0, 24)
+        : selectedLocal.title;
+    updateThread(threadId, (thread) => ({
+      ...thread,
+      title: nextTitle,
+      updatedAt: userMessage.createdAt,
+      messageCount: thread.messageCount + 1,
+      messages: [...thread.messages, userMessage],
+    }));
+    setMessage("");
     setLoading(true);
     setError("");
-    setResult(null);
     setJob(null);
-    let sourceImage: SourceImage | null = null;
 
+    let sourceImage: SourceImage | null = null;
     try {
       if (attachment) {
         const uploadPayload = new FormData();
@@ -170,48 +480,62 @@ export function AgentConsole({
         }
         sourceImage = (await uploadResponse.json()) as SourceImage;
       }
+
       const response = await fetch(`${apiBase}/api/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: message.trim(),
+          message: userText,
           source_image_id: sourceImage?.id,
+          session_id: threadId,
         }),
       });
-      if (!response.ok) {
-        throw new Error(await responseError(response));
-      }
-      const nextResult = (await response.json()) as AgentRun;
-      setResult(nextResult);
-      const sceneOutput = nextResult.steps
+      if (!response.ok) throw new Error(await responseError(response));
+      const result = (await response.json()) as AgentRun;
+      const sceneOutput = result.steps
         .map((step) => step.output)
         .find(
           (output) =>
             typeof output?.job_id === "string" &&
             typeof output?.asset_id === "string",
         );
+      const assistantMessage: LocalMessage = {
+        id: makeId(),
+        role: "assistant",
+        content: result.answer,
+        createdAt: new Date().toISOString(),
+        run: result,
+        assetId:
+          typeof sceneOutput?.asset_id === "string"
+            ? sceneOutput.asset_id
+            : undefined,
+      };
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        updatedAt: assistantMessage.createdAt,
+        messageCount: thread.messageCount + 1,
+        messages: [...thread.messages, assistantMessage],
+      }));
       if (sceneOutput) {
         setJob({
           id: sceneOutput.job_id as string,
           asset_id: sceneOutput.asset_id as string,
-          status:
-            sceneOutput.status === "running" ? "running" : "queued",
+          status: sceneOutput.status === "running" ? "running" : "queued",
           progress:
-            typeof sceneOutput.progress === "number"
-              ? sceneOutput.progress
-              : 0,
+            typeof sceneOutput.progress === "number" ? sceneOutput.progress : 0,
           message:
             typeof sceneOutput.message === "string"
               ? sceneOutput.message
               : "空间照片任务已创建。",
           error: null,
         });
-        clearAttachment();
       } else if (sourceImage) {
         await fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
           method: "DELETE",
         });
       }
+      clearAttachment();
+      await loadLocalConversations();
       onConnectionChange(true);
     } catch (requestError) {
       onConnectionChange(false);
@@ -220,64 +544,287 @@ export function AgentConsole({
           method: "DELETE",
         });
       }
-      setError(
+      const detail =
         requestError instanceof Error
           ? requestError.message
-          : "无法连接本地后端。",
-      );
+          : "无法连接本地后端。";
+      setError(detail);
+      updateThread(threadId, (thread) => ({
+        ...thread,
+        updatedAt: new Date().toISOString(),
+        messages: [
+          ...thread.messages,
+          {
+            id: makeId(),
+            role: "assistant",
+            content: `任务执行失败：${detail}`,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      }));
     } finally {
       setLoading(false);
     }
   }
 
+  async function decideApproval(runId: string, approved: boolean) {
+    if (approvalBusy) return;
+    setApprovalBusy(runId);
+    setError("");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/agent/runs/${encodeURIComponent(runId)}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approved }),
+        },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      setPendingApprovals((current) =>
+        current.filter((run) => run.run_id !== runId),
+      );
+      await loadLocalConversations();
+      await loadChannelMessages();
+      await loadPendingApprovals();
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "无法提交审批决定。",
+      );
+    } finally {
+      setApprovalBusy("");
+    }
+  }
+
   const modeLabel = health?.llm_configured
-    ? `LLM · ${health.model}`
-    : "Demo planner";
+    ? health.model ?? "已配置模型"
+    : "演示规划器";
 
   return (
-    <div className="agent-console">
-      <section className="composer-card">
-        <div className="section-heading">
+    <div className="conversation-workspace">
+      <aside className="conversation-sidebar" aria-label="对话列表">
+        <div className="conversation-sidebar-header">
           <div>
-            <p className="eyebrow">Agent console</p>
-            <h2>运行个人助手任务</h2>
+            <p className="eyebrow">Conversations</p>
+            <h1>对话</h1>
           </div>
-          <span className={`mode-pill ${health?.llm_configured ? "llm" : ""}`}>
-            {modeLabel}
-          </span>
+          <button type="button" onClick={addThread} aria-label="新建本地对话">
+            <AppIcon name="plus" width="18" height="18" />
+          </button>
         </div>
 
-        <form onSubmit={runAgent}>
-          <label className="sr-only" htmlFor="agent-task">
-            输入 Agent 任务
-          </label>
-          <textarea
-            id="agent-task"
-            value={message}
-            maxLength={4000}
-            onChange={(event) => setMessage(event.target.value)}
-            placeholder="例如：查看我的个人资产"
-            rows={5}
-          />
-          <div className="agent-attachment-row">
-            <input
-              ref={inputRef}
-              className="sr-only"
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={chooseAttachment}
-            />
-            {attachment ? (
-              <div className="attachment-chip">
-                {/* Local object URL; the image has not left this device. */}
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={attachmentPreview} alt="待处理附件预览" />
+        <div className="conversation-group">
+          <span className="conversation-group-label">本机</span>
+          {localLoading ? (
+            <div className="conversation-list-note">正在读取本机会话…</div>
+          ) : (
+            localThreads.map((thread) => (
+              <button
+                type="button"
+                key={thread.id}
+                className={selectedId === `local:${thread.id}` ? "active" : ""}
+                onClick={() => setSelectedId(`local:${thread.id}`)}
+              >
+                <span className="conversation-source local">
+                  <AppIcon name="chat" width="16" height="16" />
+                </span>
+                <span>
+                  <strong>{thread.title}</strong>
+                  <small>
+                    {thread.messageCount
+                      ? `${thread.messageCount} 条消息 · ${formatRelative(thread.updatedAt)}`
+                      : "尚无消息"}
+                  </small>
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="conversation-group">
+          <span className="conversation-group-label">
+            飞书
+            <i className={health?.feishu_status === "connected" ? "online" : ""}>
+              {health?.feishu_status === "connected" ? "已连接" : "未连接"}
+            </i>
+          </span>
+          {channelLoading ? (
+            <div className="conversation-list-note">正在同步消息…</div>
+          ) : feishuThreads.length ? (
+            feishuThreads.map((thread) => (
+              <button
+                type="button"
+                key={thread.id}
+                className={selectedId === `feishu:${thread.id}` ? "active" : ""}
+                onClick={() => setSelectedId(`feishu:${thread.id}`)}
+              >
+                <span className="conversation-source feishu">
+                  <AppIcon name="link" width="16" height="16" />
+                </span>
+                <span>
+                  <strong>{thread.title}</strong>
+                  <small>
+                    {thread.messages.length} 条消息 ·{" "}
+                    {formatRelative(thread.updatedAt)}
+                  </small>
+                </span>
+              </button>
+            ))
+          ) : (
+            <div className="conversation-list-note">
+              手机向机器人发消息后，会按会话单独显示。
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <section className="chat-surface" aria-label="当前对话">
+        <header className="chat-header">
+          <div>
+            <div className="chat-title-row">
+              <h2>{selectedLocal?.title ?? selectedFeishu?.title ?? "对话"}</h2>
+              <span className={`channel-badge ${selectedFeishu ? "feishu" : ""}`}>
+                {selectedFeishu ? "飞书 · 只读镜像" : "本机私有会话"}
+              </span>
+            </div>
+            <p>
+              {selectedFeishu
+                ? `chat_id ${shortId(selectedFeishu.id)} · 与其他会话完全分开`
+                : `${modeLabel} · 当前上下文只属于这个 session_id`}
+            </p>
+          </div>
+          <span
+            className="chat-security"
+            title="本机 Root 管理员可以查看所有已记录的 Web 与飞书会话"
+          >
+            <span aria-hidden="true" />
+            Root 管理员视图
+          </span>
+        </header>
+
+        {pendingApprovals.length ? (
+          <section className="root-approval-queue" aria-label="待审批 Agent Run">
+            <div>
+              <strong>待审批任务</strong>
+              <span>
+                {pendingApprovals.length} 个高风险工具正在等待 Root 决定
+              </span>
+            </div>
+            {pendingApprovals.slice(0, 3).map((run) => (
+              <div className="root-approval-item" key={run.run_id}>
+                <span>
+                  <strong>{run.approval?.tool ?? "未知工具"}</strong>
+                  <small>
+                    {run.approval?.risk_level ?? "未标注"} ·{" "}
+                    {shortId(run.run_id)}
+                  </small>
+                </span>
                 <div>
-                  <strong>{attachment.name}</strong>
+                  <button
+                    type="button"
+                    disabled={Boolean(approvalBusy)}
+                    onClick={() => decideApproval(run.run_id, false)}
+                  >
+                    拒绝
+                  </button>
+                  <button
+                    className="approve"
+                    type="button"
+                    disabled={Boolean(approvalBusy)}
+                    onClick={() => decideApproval(run.run_id, true)}
+                  >
+                    {approvalBusy === run.run_id ? "处理中…" : "批准"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </section>
+        ) : null}
+
+        <div className="chat-message-scroll" ref={messageListRef} aria-live="polite">
+          {selectedLocal ? (
+            selectedLocal.messages.length ? (
+              selectedLocal.messages.map((item) => (
+                <LocalMessageBubble
+                  key={item.id}
+                  item={item}
+                  onOpenAsset={onSpatialSceneReady}
+                  onApprovalDecision={decideApproval}
+                  approvalBusy={approvalBusy === item.run?.run_id}
+                />
+              ))
+            ) : (
+              <ChatWelcome onExample={setMessage} />
+            )
+          ) : selectedFeishu ? (
+            selectedFeishu.messages.map((item) => (
+              <ChannelMessageBubble key={item.id} item={item} />
+            ))
+          ) : (
+            <ChatWelcome onExample={setMessage} />
+          )}
+
+          {loading ? (
+            <div className="message-row assistant">
+              <div className="assistant-avatar">A</div>
+              <div className="message-bubble assistant typing-bubble">
+                <span />
+                <span />
+                <span />
+                <strong>正在规划和调用工具</strong>
+              </div>
+            </div>
+          ) : null}
+
+          {job ? (
+            <div className="message-row assistant">
+              <div className="assistant-avatar">A</div>
+              <div className="message-bubble assistant job-message">
+                <div>
+                  <strong>{job.message}</strong>
                   <span>
-                    {(attachment.size / 1024 / 1024).toFixed(1)} MB · 仅本机
+                    {job.status === "completed"
+                      ? "空间照片已经可以查看"
+                      : "深度估计与分层正在本机执行"}
                   </span>
                 </div>
+                <progress max="100" value={job.progress} />
+                <div className="job-message-footer">
+                  <span>{job.progress}%</span>
+                  {job.status === "completed" ? (
+                    <button
+                      type="button"
+                      onClick={() => onSpatialSceneReady(job.asset_id)}
+                    >
+                      打开空间照片
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {error ? (
+          <div className="chat-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+
+        {selectedLocal ? (
+          <form className="chat-composer" onSubmit={runAgent}>
+            {attachment ? (
+              <div className="composer-attachment">
+                {/* This URL refers to a local file selected in this browser. */}
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={attachmentPreview} alt="待发送图片预览" />
+                <span>
+                  <strong>{attachment.name}</strong>
+                  <small>仅上传到本机 Agent</small>
+                </span>
                 <button
                   type="button"
                   onClick={clearAttachment}
@@ -286,140 +833,272 @@ export function AgentConsole({
                   移除
                 </button>
               </div>
-            ) : (
-              <button
-                className="attach-button"
-                type="button"
-                onClick={() => inputRef.current?.click()}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="16"
-                  height="16"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M8.5 12.5 14.8 6.2a3 3 0 0 1 4.2 4.2l-8.1 8.1a5 5 0 0 1-7.1-7.1l8.1-8.1"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeWidth="1.8"
-                  />
-                </svg>
-                添加本地图片
-              </button>
-            )}
-            <span>图片不会发送给大模型，Agent 只获得临时资产 ID</span>
-          </div>
-          <div className="composer-footer">
-            <span>{message.length} / 4000</span>
-            <button type="submit" disabled={loading || !message.trim()}>
-              {loading ? "执行中…" : "运行任务"}
-            </button>
-          </div>
-        </form>
-
-        <div className="examples">
-          <span>示例</span>
-          {examples.map((example, index) => (
-            <button key={example} type="button" onClick={() => setMessage(example)}>
-              {index === 0
-                ? "生成空间照片"
-                : index === 1
-                  ? "组合分析"
-                  : index === 2
-                    ? "个人资产"
-                    : "时间"}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      {error ? (
-        <div className="error-banner" role="alert">
-          {error}
-        </div>
-      ) : null}
-
-      {job ? (
-        <section
-          className={`agent-job-card ${job.status}`}
-          aria-live="polite"
-          aria-label="Agent 空间照片任务进度"
-        >
-          <div>
-            <p className="eyebrow">Agent → Spatial photo</p>
-            <strong>{job.message}</strong>
-            <span>
-              {job.status === "completed"
-                ? "生成完成，正在打开空间照片"
-                : "深度估计与分层均在本机执行"}
-            </span>
-          </div>
-          <div className="job-progress">
-            <progress max="100" value={job.progress} />
-            <span>{job.progress}%</span>
-          </div>
-        </section>
-      ) : null}
-
-      <section className="result-grid" aria-live="polite">
-        <div className="trace-card">
-          <div className="section-heading compact">
-            <div>
-              <p className="eyebrow">Execution trace</p>
-              <h2>执行轨迹</h2>
-            </div>
-            {result ? (
-              <span className="duration">{result.total_duration_ms} ms</span>
             ) : null}
-          </div>
+            <label className="sr-only" htmlFor="agent-chat-input">
+              输入消息
+            </label>
+            <textarea
+              id="agent-chat-input"
+              value={message}
+              maxLength={4000}
+              rows={2}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key === "Enter" &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+              placeholder="向个人助手发送消息；Shift + Enter 换行"
+            />
+            <div className="chat-composer-actions">
+              <div>
+                <input
+                  ref={inputRef}
+                  className="sr-only"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={chooseAttachment}
+                />
+                <button
+                  className="composer-icon-button"
+                  type="button"
+                  onClick={() => inputRef.current?.click()}
+                  aria-label="添加本地图片"
+                >
+                  <AppIcon name="paperclip" width="19" height="19" />
+                </button>
+                <span>{message.length} / 4000</span>
+              </div>
+              <button
+                className="send-button"
+                type="submit"
+                disabled={loading || !message.trim()}
+              >
+                发送
+                <AppIcon name="send" width="17" height="17" />
+              </button>
+            </div>
+          </form>
+        ) : (
+          <footer className="readonly-composer">
+            <AppIcon name="link" width="18" height="18" />
+            这是飞书会话的本地只读镜像。请在原飞书聊天中继续回复。
+          </footer>
+        )}
+      </section>
+    </div>
+  );
+}
 
-          {result ? (
-            <ol className="trace-list">
-              {result.steps.map((step) => (
+function ChatWelcome({ onExample }: { onExample: (text: string) => void }) {
+  return (
+    <div className="chat-welcome">
+      <span className="welcome-mark">
+        <AppIcon name="sparkles" width="26" height="26" />
+      </span>
+      <h3>今天想让 Agent 做什么？</h3>
+      <p>对话、图片、工具结果和执行轨迹会按当前会话集中展示。</p>
+      <div className="welcome-examples">
+        {examples.map((example, index) => (
+          <button type="button" key={example} onClick={() => onExample(example)}>
+            <span>{["组合分析", "保存记忆", "个人资产", "当前时间"][index]}</span>
+            <AppIcon name="chevron" width="14" height="14" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LocalMessageBubble({
+  item,
+  onOpenAsset,
+  onApprovalDecision,
+  approvalBusy,
+}: {
+  item: LocalMessage;
+  onOpenAsset: (assetId: string) => void;
+  onApprovalDecision: (runId: string, approved: boolean) => void;
+  approvalBusy: boolean;
+}) {
+  return (
+    <div className={`message-row ${item.role}`}>
+      {item.role === "assistant" ? <div className="assistant-avatar">A</div> : null}
+      <div className={`message-bubble ${item.role}`}>
+        {item.attachment ? (
+          <div className="message-image">
+            {item.attachment.preview ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={item.attachment.preview} alt={item.attachment.name} />
+            ) : (
+              <span>
+                <AppIcon name="image" width="24" height="24" />
+              </span>
+            )}
+            <small>{item.attachment.name}</small>
+          </div>
+        ) : null}
+        <p>{cleanMessageText(item.content)}</p>
+        {item.assetId ? (
+          <button
+            className="asset-result-button"
+            type="button"
+            onClick={() => onOpenAsset(item.assetId!)}
+          >
+            <AppIcon name="cube" width="18" height="18" />
+            查看生成的空间照片
+            <AppIcon name="chevron" width="15" height="15" />
+          </button>
+        ) : null}
+        {item.run?.status === "waiting_approval" ? (
+          <div className="run-approval-card">
+            <div>
+              <strong>需要 Root 管理员批准</strong>
+              <span>
+                {item.run.approval?.description ??
+                  `工具 ${item.run.approval?.tool ?? "未知工具"} 请求执行`}
+              </span>
+              <small>
+                风险等级：{item.run.approval?.risk_level ?? "未标注"}
+              </small>
+            </div>
+            <div>
+              <button
+                type="button"
+                disabled={approvalBusy}
+                onClick={() =>
+                  onApprovalDecision(item.run!.run_id, false)
+                }
+              >
+                拒绝
+              </button>
+              <button
+                className="approve"
+                type="button"
+                disabled={approvalBusy}
+                onClick={() =>
+                  onApprovalDecision(item.run!.run_id, true)
+                }
+              >
+                {approvalBusy ? "处理中…" : "批准执行"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {item.run ? (
+          <details className="run-details">
+            <summary>
+              <span>查看 LangGraph 执行轨迹</span>
+              <small>{item.run.total_duration_ms} ms</small>
+            </summary>
+            <ol>
+              {item.run.steps.map((step) => (
                 <li key={`${step.index}-${step.label}`}>
-                  <span className={`trace-index ${step.stage}`}>{step.index}</span>
+                  <span>{step.index}</span>
                   <div>
-                    <div className="trace-title">
-                      <strong>{step.label}</strong>
-                      <span>
-                        {stageName[step.stage]} · {step.duration_ms} ms
-                      </span>
-                    </div>
+                    <strong>{step.label}</strong>
+                    <small>
+                      {step.stage} · {step.duration_ms} ms
+                    </small>
                     <p>{step.detail}</p>
                   </div>
                 </li>
               ))}
             </ol>
-          ) : (
-            <div className="empty-state">
-              <span>1 → 2 → 3</span>
-              <p>运行任务后，这里会展示 Agent 如何规划并调用工具。</p>
-            </div>
-          )}
-        </div>
-
-        <div className="answer-card">
-          <div className="section-heading compact">
-            <div>
-              <p className="eyebrow">Final answer</p>
-              <h2>最终回答</h2>
-            </div>
-            {result ? <span className="success-pill">完成</span> : null}
-          </div>
-          {result ? (
-            <p className="answer-text">{result.answer}</p>
-          ) : (
-            <div className="empty-state small">
-              <p>Agent 整合工具结果后，会在这里生成回答。</p>
-            </div>
-          )}
-          {result ? <code className="run-id">run_id: {result.run_id}</code> : null}
-        </div>
-      </section>
+          </details>
+        ) : null}
+        <time>{formatTime(item.createdAt)}</time>
+      </div>
     </div>
   );
+}
+
+function ChannelMessageBubble({ item }: { item: ChannelMessage }) {
+  const role =
+    item.direction === "inbound"
+      ? "user"
+      : item.direction === "outbound"
+        ? "assistant"
+        : "system";
+  if (role === "system" || item.kind === "status") {
+    return (
+      <div className="channel-system-message">
+        <span>{item.content}</span>
+        <time>{formatTime(item.created_at)}</time>
+      </div>
+    );
+  }
+  return (
+    <div className={`message-row ${role}`}>
+      {role === "assistant" ? <div className="assistant-avatar">A</div> : null}
+      <div className={`message-bubble ${role}`}>
+        {item.kind === "image" ? (
+          <div className="channel-image-placeholder">
+            <AppIcon name="image" width="24" height="24" />
+            <span>飞书图片消息</span>
+          </div>
+        ) : null}
+        {item.kind === "card" ? (
+          <span className="message-kind-label">功能卡片</span>
+        ) : null}
+        <p>{cleanMessageText(item.content)}</p>
+        <div className="channel-message-foot">
+          <span>
+            {role === "user"
+              ? `发送者 ${shortId(item.sender_id ?? "unknown")}`
+              : "个人助手"}
+          </span>
+          <time>{formatTime(item.created_at)}</time>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function shortId(value: string) {
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 6)}…${value.slice(-4)}`;
+}
+
+function cleanMessageText(value: string) {
+  return value
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/^---+$/gm, "")
+    .split("\n")
+    .filter((line) => !/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*$/.test(line))
+    .map((line) =>
+      line.includes("|")
+        ? line.replace(/^\s*\||\|\s*$/g, "").replace(/\s*\|\s*/g, " · ")
+        : line,
+    )
+    .join("\n")
+    .trim();
+}
+
+function formatTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function formatRelative(value: string) {
+  const elapsed = Date.now() - new Date(value).getTime();
+  if (elapsed < 60_000) return "刚刚";
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(value));
 }
 
 async function responseError(response: Response) {
