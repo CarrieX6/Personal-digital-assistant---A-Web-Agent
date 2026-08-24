@@ -613,14 +613,34 @@ export function PhotoStyleStudio({
                   type="button"
                   className="asset-select"
                   disabled={asset.status !== "ready"}
-                  onClick={() => setSelectedAssetId(asset.id)}
+                  aria-label={`预览风格化资产：${asset.name}`}
+                  onClick={() => {
+                    setSelectedAssetId(asset.id);
+                    const previewUrl = asset.result_url ?? asset.preview_url;
+                    if (previewUrl) {
+                      setImagePreview({
+                        url: resolveUrl(apiBase, previewUrl),
+                        label: `${asset.name} · 风格化结果`,
+                      });
+                    }
+                  }}
                 >
                   <span className="asset-thumb">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={resolveUrl(apiBase, asset.preview_url)} alt="" loading="lazy" />
+                    <img
+                      src={resolveUrl(
+                        apiBase,
+                        asset.preview_url ?? asset.result_url,
+                      )}
+                      alt=""
+                      loading="lazy"
+                    />
+                    {asset.status === "ready" ? (
+                      <span className="asset-preview-hint">点击预览</span>
+                    ) : null}
                     <span className={`asset-status ${asset.status}`}>
                       {asset.status === "ready"
-                        ? "可查看"
+                        ? "已完成"
                         : asset.status === "processing"
                           ? "生成中"
                           : "失败"}

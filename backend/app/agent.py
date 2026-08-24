@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .context import ContextBuilder
 from .models import AgentRunResponse, ToolCall, TraceStep
-from .memory import SQLiteMemoryStore
+from .memory import MemoryPolicyError, SQLiteMemoryStore
 from .tools import ToolExecutionContext, ToolRegistry
 
 
@@ -27,6 +27,96 @@ def _task_payload(message: str) -> str:
             if payload:
                 return payload
     return message.strip()
+
+
+_STYLE_TASK_TERMS = (
+    "图片风格",
+    "图片个性化",
+    "风格化",
+    "风格迁移",
+    "参考图",
+    "style transfer",
+)
+_SPATIAL_TASK_TERMS = (
+    "空间照片",
+    "空间场景",
+    "可动视角",
+    "可拖动视角",
+    "2.5d",
+    "视差",
+)
+_ORDINAL_INDEX = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "1": 0,
+    "2": 1,
+    "3": 2,
+    "4": 3,
+}
+
+
+def _requested_attachment_index(message: str, count: int) -> int | None:
+    match = re.search(r"第\s*([一二三四1-4])\s*张", message)
+    if match is None:
+        return None
+    index = _ORDINAL_INDEX[match.group(1)]
+    return index if index < count else None
+
+
+def _route_image_attachments(
+    message: str,
+    attachments: list[dict[str, Any]],
+) -> tuple[
+    dict[str, Any] | None,
+    list[dict[str, Any]],
+    str | None,
+]:
+    """Assign generic ordered images only after the user states an intent."""
+
+    lowered = message.casefold()
+    style_requested = any(term in lowered for term in _STYLE_TASK_TERMS)
+    spatial_requested = any(term in lowered for term in _SPATIAL_TASK_TERMS)
+    count = len(attachments)
+
+    if style_requested:
+        if count < 2:
+            return (
+                None,
+                [],
+                "已收到 1 张图片。图片风格化还需要至少 1 张参考图；"
+                "请继续添加附件，或改为说明要生成空间照片。",
+            )
+        content_index = _requested_attachment_index(message, count) or 0
+        content = attachments[content_index]
+        styles = [
+            item
+            for index, item in enumerate(attachments)
+            if index != content_index
+        ][:3]
+        return content, styles, None
+
+    if spatial_requested:
+        if count == 1:
+            return attachments[0], [], None
+        requested_index = _requested_attachment_index(message, count)
+        if requested_index is not None:
+            return attachments[requested_index], [], None
+        return (
+            None,
+            [],
+            f"已收到 {count} 张图片。空间照片一次使用一张内容图，"
+            "请说明使用第几张图片，例如“用第一张生成空间照片”。",
+        )
+
+    return (
+        None,
+        [],
+        f"已收到 {count} 张图片。请说明希望如何处理："
+        "可以生成空间照片，或在至少两张图片时进行风格化；"
+        "风格化默认使用第一张作为内容图，其余图片作为参考图。",
+    )
 
 
 @dataclass
@@ -173,6 +263,11 @@ class DemoPlanner:
         for observation in observations:
             name = observation.call.name
             output = observation.output
+            if output.get("error"):
+                sections.append(
+                    f"工具 {name} 执行失败：{output['error']}"
+                )
+                continue
             if name == "text_stats":
                 sections.append(
                     "文本统计："
@@ -282,6 +377,7 @@ class AgentRunner:
         self,
         message: str,
         *,
+        attachment_contexts: list[dict[str, Any]] | None = None,
         source_image_context: dict[str, Any] | None = None,
         style_image_contexts: list[dict[str, Any]] | None = None,
         owner_id: str = "local",
@@ -298,6 +394,7 @@ class AgentRunner:
             owner_id=owner_id,
             thread_id=thread_id,
             channel=channel,
+            query=message,
         )
         memory_answer = self._handle_memory_command(
             message,
@@ -310,6 +407,66 @@ class AgentRunner:
                 context=execution_context,
                 started_at=run_started,
             )
+
+        generic_attachments = list(attachment_contexts or [])
+        attachment_routing: dict[str, Any] | None = None
+        if generic_attachments:
+            (
+                source_image_context,
+                style_image_contexts,
+                clarification,
+            ) = _route_image_attachments(message, generic_attachments)
+            attachment_ids = [
+                str(item.get("id", ""))
+                for item in generic_attachments
+                if item.get("id")
+            ]
+            if clarification is not None:
+                return self._direct_response(
+                    message=message,
+                    answer=clarification,
+                    context=execution_context,
+                    started_at=run_started,
+                    mode="deterministic-attachment-router",
+                    label="确认附件用途",
+                    detail="Agent 尚未执行图片工具，附件角色需要用户补充说明。",
+                    step_output={
+                        "attachment_action": "clarification_required",
+                        "release_image_ids": attachment_ids,
+                    },
+                    user_metadata={
+                        "attachments": [
+                            {
+                                "name": item.get("original_name"),
+                                "width": item.get("width"),
+                                "height": item.get("height"),
+                            }
+                            for item in generic_attachments
+                        ]
+                    },
+                )
+            used_ids = {
+                str(item.get("id", ""))
+                for item in [
+                    source_image_context,
+                    *(style_image_contexts or []),
+                ]
+                if item and item.get("id")
+            }
+            attachment_routing = {
+                "attachment_action": "assigned",
+                "content_image_id": (
+                    source_image_context.get("id")
+                    if source_image_context
+                    else None
+                ),
+                "style_image_ids": [
+                    item.get("id") for item in (style_image_contexts or [])
+                ],
+                "release_image_ids": [
+                    item for item in attachment_ids if item not in used_ids
+                ],
+            }
 
         context_builder = ContextBuilder(
             self.context_builder.config,
@@ -324,7 +481,12 @@ class AgentRunner:
         built_context = context_builder.build(
             current_user_message=message,
             conversation_messages=conversation.messages,
-            memories=conversation.memories,
+            memories=[
+                item.to_context_dict() for item in conversation.memory_items
+            ],
+            session_summary=conversation.session_summary,
+            open_loops=conversation.open_loops,
+            decisions=conversation.decisions,
             attachments=[
                 *(
                     [{**source_image_context, "attachment_role": "content"}]
@@ -350,6 +512,16 @@ class AgentRunner:
             )
         except ValueError as exc:
             raise AgentRunError(str(exc)) from exc
+        selected_memory_ids = set(built_context.retrieved_memory_ids)
+        self.memory_store.record_memory_usage(
+            owner_id=owner_id,
+            run_id=run_id,
+            memories=[
+                item
+                for item in conversation.memory_items
+                if item.id in selected_memory_ids
+            ],
+        )
 
         self.orchestrator.planner = self.planner
         graph_state = self.orchestrator.invoke(
@@ -363,23 +535,106 @@ class AgentRunner:
             graph_state,
             started_at=run_started,
         )
+        if attachment_routing is not None and response.steps:
+            target_step = response.steps[-1]
+            target_step.output = {
+                **(target_step.output or {}),
+                **attachment_routing,
+            }
+        durable_asset_id: str | None = None
+        durable_asset_kind: str | None = None
+        for step in response.steps:
+            output = step.output or {}
+            if isinstance(output.get("asset_id"), str):
+                durable_asset_id = str(output["asset_id"])
+                durable_asset_kind = (
+                    str(output["kind"])
+                    if isinstance(output.get("kind"), str)
+                    else None
+                )
+                break
+
         user_metadata: dict[str, Any] = {}
-        if source_image_context:
+        if generic_attachments:
+            style_positions = {
+                str(item.get("id", "")): index
+                for index, item in enumerate(
+                    style_image_contexts or [],
+                    start=1,
+                )
+            }
+            content_id = (
+                str(source_image_context.get("id", ""))
+                if source_image_context
+                else ""
+            )
+            user_metadata["attachments"] = [
+                {
+                    "name": item.get("original_name"),
+                    "source_image_id": item.get("id"),
+                    "width": item.get("width"),
+                    "height": item.get("height"),
+                    **(
+                        {
+                            "preview_url": (
+                                f"/api/assets/{durable_asset_id}/files/source.webp"
+                            )
+                        }
+                        if durable_asset_id
+                        and str(item.get("id", "")) == content_id
+                        else {}
+                    ),
+                    **(
+                        {
+                            "preview_url": (
+                                f"/api/assets/{durable_asset_id}/files/"
+                                f"style-{style_positions[str(item.get('id', ''))]}.webp"
+                            )
+                        }
+                        if durable_asset_id
+                        and durable_asset_kind == "photo_style_transfer"
+                        and str(item.get("id", "")) in style_positions
+                        else {}
+                    ),
+                }
+                for item in generic_attachments
+            ]
+        elif source_image_context:
             user_metadata["attachment"] = {
                 "name": source_image_context["original_name"],
                 "source_image_id": source_image_context["id"],
                 "width": source_image_context["width"],
                 "height": source_image_context["height"],
+                **(
+                    {
+                        "preview_url": (
+                            f"/api/assets/{durable_asset_id}/files/source.webp"
+                        )
+                    }
+                    if durable_asset_id
+                    else {}
+                ),
             }
-        if style_image_contexts:
+        if style_image_contexts and not generic_attachments:
             user_metadata["style_attachments"] = [
                 {
                     "name": item["original_name"],
                     "source_image_id": item["id"],
                     "width": item["width"],
                     "height": item["height"],
+                    **(
+                        {
+                            "preview_url": (
+                                f"/api/assets/{durable_asset_id}/files/"
+                                f"style-{index}.webp"
+                            )
+                        }
+                        if durable_asset_id
+                        and durable_asset_kind == "photo_style_transfer"
+                        else {}
+                    ),
                 }
-                for item in style_image_contexts
+                for index, item in enumerate(style_image_contexts, start=1)
             ]
         self.memory_store.append_message(
             owner_id=owner_id,
@@ -546,6 +801,11 @@ class AgentRunner:
             approval=response.approval,
             response=response_data,
         )
+        if response.status in {"completed", "failed"}:
+            self.memory_store.complete_memory_usage(
+                run_id=response.run_id,
+                outcome=response.status,
+            )
         self.trace_store.append(response)
         assistant_metadata: dict[str, Any] = {"run": response_data}
         for step in response.steps:
@@ -564,6 +824,21 @@ class AgentRunner:
             content=response.answer,
             metadata=assistant_metadata,
         )
+        record = self.memory_store.get_run(response.run_id)
+        if record is not None and response.status in {"completed", "failed"}:
+            self.memory_store.record_episode(
+                owner_id=owner_id,
+                thread_id=thread_id,
+                run_id=response.run_id,
+                task=record.message,
+                answer=response.answer,
+                status=response.status,
+                tool_names=[
+                    step.label.removeprefix("调用 ")
+                    for step in response.steps
+                    if step.stage == "tool"
+                ],
+            )
 
     def _handle_memory_command(
         self,
@@ -578,11 +853,15 @@ class AgentRunner:
         )
         if remember_match:
             content = remember_match.group(1).strip()
-            self.memory_store.remember(
-                owner_id=context.owner_id,
-                content=content,
-                source=f"{context.channel}:{context.thread_id}",
-            )
+            try:
+                self.memory_store.remember(
+                    owner_id=context.owner_id,
+                    content=content,
+                    source=f"{context.channel}:{context.thread_id}",
+                    scope="user",
+                )
+            except MemoryPolicyError as exc:
+                return str(exc)
             return f"已为你保存这条记忆：{content}"
         if stripped in {"我的记忆", "你记得什么", "查看我的记忆"}:
             memories = self.memory_store.list_memories(context.owner_id)
@@ -609,19 +888,25 @@ class AgentRunner:
         answer: str,
         context: ToolExecutionContext,
         started_at: float,
+        mode: str = "deterministic-memory",
+        label: str = "执行记忆操作",
+        detail: str = "记忆操作由本地确定性规则执行，未发送给模型。",
+        step_output: dict[str, Any] | None = None,
+        user_metadata: dict[str, Any] | None = None,
     ) -> AgentRunResponse:
         response = AgentRunResponse(
             run_id=str(uuid4()),
             status="completed",
-            mode="deterministic-memory",
+            mode=mode,
             answer=answer,
             steps=[
                 TraceStep(
                     index=1,
                     stage="final",
-                    label="执行记忆操作",
-                    detail="记忆操作由本地确定性规则执行，未发送给模型。",
+                    label=label,
+                    detail=detail,
                     duration_ms=_elapsed_ms(started_at),
+                    output=step_output,
                 )
             ],
             total_duration_ms=_elapsed_ms(started_at),
@@ -632,6 +917,7 @@ class AgentRunner:
             thread_id=context.thread_id,
             role="user",
             content=message,
+            metadata=user_metadata,
         )
         self.memory_store.append_message(
             owner_id=context.owner_id,

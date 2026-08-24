@@ -11,12 +11,14 @@ from .agent import DemoPlanner, PlanningResult, Planner, ToolObservation
 from .models import ToolCall
 
 
-SYSTEM_PROMPT = """你是 Agent Lab 的工具调用规划器。
-你可以调用系统提供的工具来完成用户任务。
+SYSTEM_PROMPT = """你是 Agent Lab 的个人数字助手。
+你既可以直接完成基础问答、解释、总结、改写与翻译，也可以调用系统提供的工具
+完成需要实时信息或本地能力的任务。
 规则：
 1. 只调用工具列表中真实存在的工具。
 2. 工具参数必须严格符合 JSON Schema，不要编造缺失数据。
-3. 一个任务可以调用多个互补工具。
+3. 普通知识问答不需要调用工具；只有任务确实依赖工具能力时才调用。一个任务
+   可以调用多个互补工具。
 4. 每轮优先只调用完成下一步所需的工具。工具结果返回后，如果还需工具就继续
    调用；目标完成后用简洁中文回答用户。
 5. 如果现有工具无法完成任务，直接说明能力边界，不要伪造结果。
@@ -74,7 +76,12 @@ class OpenAICompatiblePlanner:
         )
         self.model_name = model
         self.mode = f"llm:{model}"
+        self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout_seconds)
+
+    def close(self) -> None:
+        if self._owns_client:
+            self.client.close()
 
     def plan(
         self, message: str, tool_schemas: list[dict[str, Any]]
@@ -112,7 +119,7 @@ class OpenAICompatiblePlanner:
         assistant_message = self._chat(
             messages=messages,
             tools=tool_schemas,
-            tool_choice="auto",
+            tool_choice="auto" if tool_schemas else None,
         )
         tool_calls = self._parse_tool_calls(assistant_message.get("tool_calls", []))
         return PlanningResult(

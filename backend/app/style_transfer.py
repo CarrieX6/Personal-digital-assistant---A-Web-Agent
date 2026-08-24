@@ -528,9 +528,15 @@ class PhotoStyleService:
             style_image_ids
         ):
             raise AssetError("内容图和风格参考图必须使用不同的附件。")
-        content = self.asset_library.get_source_image(content_image_id)
+        content = self.asset_library.get_source_image(
+            content_image_id,
+            owner_id=owner_id,
+        )
         styles = [
-            self.asset_library.get_source_image(source_id)
+            self.asset_library.get_source_image(
+                source_id,
+                owner_id=owner_id,
+            )
             for source_id in style_image_ids
         ]
         content_path = self.source_image_dir / content_image_id / "source.webp"
@@ -548,9 +554,15 @@ class PhotoStyleService:
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
-        self.asset_library.delete_source_image(content_image_id)
+        self.asset_library.delete_source_image(
+            content_image_id,
+            owner_id=owner_id,
+        )
         for source_id in style_image_ids:
-            self.asset_library.delete_source_image(source_id)
+            self.asset_library.delete_source_image(
+                source_id,
+                owner_id=owner_id,
+            )
         return created
 
     def _forget_future(self, future: Future[None]) -> None:

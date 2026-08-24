@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -9,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MethodType
 from typing import Any, Callable, Protocol
 
 from lark_channel import (
@@ -27,6 +29,7 @@ from .agent import AgentRunError, AgentRunner
 from .assets import AssetError, SpatialSceneService
 from .channel_settings import FeishuSettingsService, StoredFeishuSettings
 from .models import ChannelMessagePublic, FeishuRuntimePublic
+from .style_transfer import PhotoStyleService
 
 
 class FeishuChannelLike(Protocol):
@@ -53,6 +56,140 @@ class FeishuChannelLike(Protocol):
         resource_type: str = "image",
         message_id: str | None = None,
     ) -> bytes | None: ...
+
+
+def _install_isolated_lark_ws_loop() -> asyncio.AbstractEventLoop:
+    """Keep the SDK's module-level WS loop away from the ASGI event loop."""
+
+    from lark_channel.ws import client as ws_client_module
+
+    _install_lark_clean_close_handler()
+    # Creating a ProactorEventLoop on the Windows main thread replaces the
+    # process-wide signal wakeup fd. Closing that secondary loop later leaves
+    # Uvicorn's SIGINT handler writing to a closed socket (WinError 10038).
+    # The selector loop supports this WebSocket client without taking over the
+    # signal wakeup fd, so the ASGI loop remains the sole signal owner.
+    isolated_loop = (
+        asyncio.SelectorEventLoop()
+        if os.name == "nt"
+        else asyncio.new_event_loop()
+    )
+    ws_client_module.loop = isolated_loop
+    return isolated_loop
+
+
+def _install_lark_clean_close_handler() -> None:
+    """Treat a server WebSocket 1000 close as reconnectable, not an error.
+
+    lark-channel currently logs every ``ConnectionClosedOK`` at ERROR and
+    re-raises it while a deliberate stop is in progress. Its other receive
+    failures and reconnect policy remain unchanged by this compatibility shim.
+    """
+
+    from lark_channel.ws import client as ws_client_module
+    from websockets.exceptions import ConnectionClosedOK
+
+    client_type = ws_client_module.Client
+    current = client_type._receive_message_loop
+    if getattr(current, "_personal_assistant_clean_close", False):
+        return
+
+    async def receive_message_loop(client: Any, connection: Any) -> None:
+        try:
+            while True:
+                message = await connection.recv()
+                await client._schedule_handle_message(message)
+        except ConnectionClosedOK:
+            if client._auto_reconnect:
+                await client._disconnect_and_reconnect(
+                    expected_conn=connection,
+                )
+            else:
+                await client._disconnect(expected_conn=connection)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            ws_client_module.logger.error(
+                client._fmt_log("receive message loop exit, err: {}", exc)
+            )
+            if client._auto_reconnect:
+                await client._disconnect_and_reconnect(
+                    expected_conn=connection,
+                )
+            else:
+                await client._disconnect(expected_conn=connection)
+                raise
+
+    setattr(receive_message_loop, "_personal_assistant_clean_close", True)
+    setattr(client_type, "_receive_message_loop", receive_message_loop)
+
+
+def _install_bounded_lark_disconnect(ws_client: Any) -> None:
+    """Replace the SDK's lock-bound disconnect only for local shutdown."""
+
+    async def bounded_disconnect(
+        client: Any,
+        *,
+        expected_conn: Any = None,
+    ) -> bool:
+        connection = getattr(client, "_conn", None)
+        if connection is None:
+            return False
+        if expected_conn is not None and connection is not expected_conn:
+            return False
+
+        # Clear first so a simultaneous receive-loop close becomes a no-op.
+        client._conn = None
+        client._conn_url = ""
+        client._conn_id = ""
+        client._service_id = ""
+        try:
+            await asyncio.wait_for(connection.close(), timeout=0.75)
+        except Exception:
+            pass
+        return True
+
+    ws_client._disconnect = MethodType(bounded_disconnect, ws_client)
+
+
+def _bind_lark_channel_to_loop(
+    channel: FeishuChannel,
+    isolated_loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Make SDK helpers created in its executor thread use the isolated loop."""
+
+    start = channel.start
+
+    def start_on_isolated_loop() -> None:
+        asyncio.set_event_loop(isolated_loop)
+        try:
+            start()
+        finally:
+            asyncio.set_event_loop(None)
+
+    channel.start = start_on_isolated_loop  # type: ignore[method-assign]
+
+
+def _drain_and_close_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+
+    async def cancel_pending_tasks() -> None:
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks(loop)
+            if task is not current and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        loop.run_until_complete(cancel_pending_tasks())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 class FeishuResourceError(AssetError):
@@ -255,6 +392,160 @@ class SQLiteChannelStore:
                 (chat_id,),
             )
 
+    def start_style_collection(
+        self,
+        chat_id: str,
+        sender_id: str,
+    ) -> list[tuple[str, str]]:
+        """Start a durable per-user collection and return replaced images."""
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT images_json FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            ).fetchone()
+            previous = self._decode_style_images(row[0]) if row else []
+            connection.execute(
+                """
+                INSERT INTO channel_style_collections (
+                    chat_id, sender_id, images_json, updated_at
+                ) VALUES (?, ?, '[]', ?)
+                ON CONFLICT(chat_id, sender_id)
+                DO UPDATE SET images_json = '[]', updated_at = excluded.updated_at
+                """,
+                (chat_id, sender_id, time.time()),
+            )
+        return previous
+
+    def style_collection(
+        self,
+        chat_id: str,
+        sender_id: str,
+        *,
+        max_age_seconds: float,
+    ) -> list[tuple[str, str]] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT images_json, updated_at
+                FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if float(row[1]) < time.time() - max_age_seconds:
+                connection.execute(
+                    """
+                    DELETE FROM channel_style_collections
+                    WHERE chat_id = ? AND sender_id = ?
+                    """,
+                    (chat_id, sender_id),
+                )
+                return None
+            return self._decode_style_images(row[0])
+
+    def append_style_image(
+        self,
+        chat_id: str,
+        sender_id: str,
+        *,
+        source_image_id: str,
+        message_id: str,
+        max_age_seconds: float,
+    ) -> list[tuple[str, str]] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT images_json, updated_at
+                FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            ).fetchone()
+            if row is None or float(row[1]) < time.time() - max_age_seconds:
+                if row is not None:
+                    connection.execute(
+                        """
+                        DELETE FROM channel_style_collections
+                        WHERE chat_id = ? AND sender_id = ?
+                        """,
+                        (chat_id, sender_id),
+                    )
+                return None
+            images = self._decode_style_images(row[0])
+            if len(images) >= 4:
+                raise ValueError("图片风格化最多收集四张图片。")
+            images.append((source_image_id, message_id))
+            payload = [
+                {"source_image_id": source_id, "message_id": linked_message_id}
+                for source_id, linked_message_id in images
+            ]
+            connection.execute(
+                """
+                UPDATE channel_style_collections
+                SET images_json = ?, updated_at = ?
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (
+                    json.dumps(payload, ensure_ascii=False),
+                    time.time(),
+                    chat_id,
+                    sender_id,
+                ),
+            )
+            return images
+
+    def clear_style_collection(
+        self,
+        chat_id: str,
+        sender_id: str,
+    ) -> list[tuple[str, str]]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT images_json FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            ).fetchone()
+            connection.execute(
+                """
+                DELETE FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            )
+        return self._decode_style_images(row[0]) if row else []
+
+    @staticmethod
+    def _decode_style_images(value: Any) -> list[tuple[str, str]]:
+        try:
+            payload = json.loads(str(value))
+        except (TypeError, ValueError):
+            return []
+        images: list[tuple[str, str]] = []
+        if not isinstance(payload, list):
+            return images
+        for item in payload[:4]:
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("source_image_id", ""))
+            message_id = str(item.get("message_id", ""))
+            if (
+                source_id
+                and Path(source_id).name == source_id
+                and len(source_id) <= 100
+                and message_id
+                and len(message_id) <= 200
+            ):
+                images.append((source_id, message_id))
+        return images
+
     def _mark(
         self,
         message_id: str,
@@ -311,6 +602,14 @@ class SQLiteChannelStore:
                     chat_id TEXT PRIMARY KEY,
                     sent_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS channel_style_collections (
+                    chat_id TEXT NOT NULL,
+                    sender_id TEXT NOT NULL,
+                    images_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, sender_id)
+                );
                 """
             )
             columns = {
@@ -342,6 +641,7 @@ ChannelFactory = Callable[..., FeishuChannelLike]
 class FeishuChannelRuntime:
     max_message_chars = 4000
     max_reply_chars = 8000
+    style_collection_ttl_seconds = 30 * 60
 
     def __init__(
         self,
@@ -350,6 +650,7 @@ class FeishuChannelRuntime:
         store: SQLiteChannelStore,
         channel_factory: ChannelFactory = FeishuChannel,
         spatial_service: SpatialSceneService | None = None,
+        style_service: PhotoStyleService | None = None,
         viewer_link_factory: Callable[[str], str] | None = None,
         job_poll_interval: float = 2,
         job_timeout_seconds: float = 10 * 60,
@@ -359,6 +660,7 @@ class FeishuChannelRuntime:
         self.store = store
         self.channel_factory = channel_factory
         self.spatial_service = spatial_service
+        self.style_service = style_service
         self.viewer_link_factory = viewer_link_factory
         self.job_poll_interval = job_poll_interval
         self.job_timeout_seconds = job_timeout_seconds
@@ -368,6 +670,8 @@ class FeishuChannelRuntime:
         self._last_error: str | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
         self._lifecycle_lock = asyncio.Lock()
+        self._style_collection_lock = asyncio.Lock()
+        self._sdk_ws_loop: asyncio.AbstractEventLoop | None = None
 
     def public_status(self) -> FeishuRuntimePublic:
         snapshot_method = getattr(self._channel, "connection_snapshot", None)
@@ -448,17 +752,37 @@ class FeishuChannelRuntime:
                 channel.on("reconnecting", self._on_reconnecting)
                 channel.on("reconnected", self._on_reconnected)
                 self._channel = channel
-                await channel.connect_until_ready(timeout=12)
+                if isinstance(channel, FeishuChannel):
+                    self._sdk_ws_loop = _install_isolated_lark_ws_loop()
+                    _bind_lark_channel_to_loop(channel, self._sdk_ws_loop)
+                    try:
+                        await asyncio.wait_for(
+                            channel.connect_until_ready(timeout=None),
+                            timeout=5,
+                        )
+                    except asyncio.TimeoutError:
+                        # A clean server close can enter the SDK's jittered
+                        # reconnect delay. Keep that worker alive instead of
+                        # stopping its loop during application startup.
+                        self._status = "reconnecting"
+                        self._last_error = (
+                            "飞书长连接暂未稳定，正在后台自动重连。"
+                        )
+                        self._track_background_start(channel)
+                        return
+                else:
+                    await channel.connect_until_ready(timeout=12)
                 self._status = "connected"
             except Exception as exc:
                 self._status = "error"
                 self._last_error = self._safe_error(exc)
                 if self._channel is not None:
                     try:
-                        await self._channel.disconnect()
+                        await self._disconnect_channel(self._channel)
                     except Exception:
                         pass
                 self._channel = None
+                await self._release_sdk_ws_loop()
 
     async def send_agent_run_update(
         self,
@@ -503,9 +827,97 @@ class FeishuChannelRuntime:
         self._channel = None
         if channel is not None:
             try:
-                await channel.disconnect()
+                await self._disconnect_channel(channel)
             except Exception:
                 pass
+        await self._release_sdk_ws_loop()
+
+    async def _disconnect_channel(self, channel: FeishuChannelLike) -> None:
+        if not isinstance(channel, FeishuChannel):
+            await channel.disconnect()
+            return
+
+        ws_client = getattr(channel, "_ws_client", None)
+        if ws_client is not None:
+            # A deliberate local stop must not enter the SDK reconnect loop.
+            setattr(ws_client, "_auto_reconnect", False)
+            _install_bounded_lark_disconnect(ws_client)
+
+        safety = getattr(channel, "_safety", None)
+        dispose = getattr(safety, "dispose", None)
+        if callable(dispose):
+            try:
+                await asyncio.wait_for(dispose(), timeout=2)
+            except Exception:
+                pass
+
+        cancel_background_tasks = getattr(channel, "_cancel_bg_tasks", None)
+        if callable(cancel_background_tasks):
+            await asyncio.to_thread(cancel_background_tasks)
+        await self._close_sdk_device_flow(channel)
+        stop_background_loop = getattr(channel, "_stop_bg_loop", None)
+        if callable(stop_background_loop):
+            await asyncio.to_thread(stop_background_loop, join_timeout=3.0)
+        stop = getattr(channel, "stop")
+        await asyncio.to_thread(stop, join_timeout=3.0)
+
+    def _track_background_start(self, channel: FeishuChannel) -> None:
+        """Consume a late SDK startup failure after readiness timed out."""
+
+        future = getattr(channel, "_start_future", None)
+        if future is None:
+            return
+
+        def completed(done: asyncio.Future[Any]) -> None:
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None and self._channel is channel:
+                self._status = "error"
+                self._last_error = self._safe_error(error)
+
+        future.add_done_callback(completed)
+
+    async def _close_sdk_device_flow(self, channel: FeishuChannelLike) -> None:
+        device_flow = getattr(channel, "_device_flow", None)
+        close = getattr(device_flow, "close", None)
+        if not callable(close):
+            return
+        background_loop = getattr(channel, "_bg_loop", None)
+        future = None
+        try:
+            if background_loop is not None and background_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(close(), background_loop)
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=2)
+            else:
+                await asyncio.wait_for(close(), timeout=2)
+        except Exception:
+            if future is not None:
+                future.cancel()
+                try:
+                    drain = asyncio.run_coroutine_threadsafe(
+                        asyncio.sleep(0),
+                        background_loop,
+                    )
+                    await asyncio.wait_for(asyncio.wrap_future(drain), timeout=0.5)
+                except Exception:
+                    pass
+            # The SDK owns this best-effort client; prevent its synchronous stop
+            # path from emitting a second timeout after a failed handshake.
+            if device_flow is not None:
+                setattr(device_flow, "_http", None)
+
+    async def _release_sdk_ws_loop(self) -> None:
+        loop = self._sdk_ws_loop
+        self._sdk_ws_loop = None
+        if loop is None:
+            return
+        running_loop = asyncio.get_running_loop()
+        deadline = running_loop.time() + 3
+        while loop.is_running() and running_loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        if not loop.is_running() and not loop.is_closed():
+            await asyncio.to_thread(_drain_and_close_event_loop, loop)
 
     async def _on_channel_error(self, error: Exception) -> None:
         self._last_error = self._safe_error(error)
@@ -628,22 +1040,47 @@ class FeishuChannelRuntime:
             await self._send_feature_menu(chat_id, message_id)
             self.store.mark_completed(message_id, "feature-menu")
             return
-        if self.store.claim_feature_menu(chat_id):
-            try:
-                await self._send_feature_menu(chat_id, message_id)
-            except Exception as exc:
-                self.store.release_feature_menu(chat_id)
-                self._status = "error"
-                self._last_error = self._safe_error(exc)
-
-        image_resources = self._image_resources(message)
+        image_resources = self._image_resource_entries(message)
         if image_resources:
+            style_collection = self.store.style_collection(
+                chat_id,
+                sender_id,
+                max_age_seconds=self.style_collection_ttl_seconds,
+            )
+            if style_collection is not None:
+                remaining = 4 - len(style_collection)
+                if len(image_resources) > remaining:
+                    self.store.mark_rejected(message_id, "too_many_style_images")
+                    await self._reply_safely(
+                        chat_id,
+                        message_id,
+                        (
+                            f"图片风格化当前还可接收 {remaining} 张图片，"
+                            f"本次选择了 {len(image_resources)} 张。"
+                            "请减少选择数量后重新发送。"
+                        ),
+                        "too-many-style-images",
+                    )
+                    return
+                for file_key, file_name, resource_message_id in image_resources:
+                    await self._collect_photo_style_image(
+                        message_id=message_id,
+                        resource_message_id=resource_message_id,
+                        chat_id=chat_id,
+                        sender_id=sender_id,
+                        file_key=file_key,
+                        file_name=file_name,
+                    )
+                return
             if len(image_resources) > 1:
                 self.store.mark_rejected(message_id, "too_many_images")
                 await self._reply_safely(
                     chat_id,
                     message_id,
-                    "当前一次只能处理一张图片，请重新发送单张图片。",
+                    (
+                        "检测到多张图片。若要进行图片风格化，请先发送"
+                        "“图片风格化”；空间照片功能一次只处理一张图片。"
+                    ),
                     "too-many-images",
                 )
                 return
@@ -694,6 +1131,62 @@ class FeishuChannelRuntime:
                 "too-long",
             )
             return
+
+        compact_command = re.sub(r"\s+", "", text).casefold()
+        active_style_collection = self.store.style_collection(
+            chat_id,
+            sender_id,
+            max_age_seconds=self.style_collection_ttl_seconds,
+        )
+        if compact_command in {
+            "图片风格化",
+            "开始图片风格化",
+            "进入图片风格化",
+            "风格迁移",
+            "风格化",
+        } or (
+            compact_command == "开始风格化"
+            and active_style_collection is None
+        ):
+            await self._begin_photo_style_collection(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+            )
+            return
+        if compact_command in {"取消风格化", "退出风格化", "取消图片风格化"}:
+            await self._cancel_photo_style_collection(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+            )
+            return
+        if active_style_collection is not None and (
+            compact_command in {
+                "开始",
+                "生成",
+                "开始生成",
+                "开始风格化",
+                "生成风格化",
+                "执行风格化",
+            }
+            or compact_command.startswith("开始风格化：")
+            or compact_command.startswith("开始风格化:")
+        ):
+            await self._start_photo_style_transfer(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+            )
+            return
+
+        if self.store.claim_feature_menu(chat_id):
+            try:
+                await self._send_feature_menu(chat_id, message_id)
+            except Exception as exc:
+                self.store.release_feature_menu(chat_id)
+                self._status = "error"
+                self._last_error = self._safe_error(exc)
 
         await self._reply_safely(
             chat_id,
@@ -801,15 +1294,10 @@ class FeishuChannelRuntime:
             )
             return
         if command == "photo_style_transfer":
-            await self._reply_safely(
-                chat_id,
-                message_id,
-                (
-                    "图片风格化已上线，需要 1 张内容图和 1–3 张风格参考图。\n"
-                    "当前请在电脑端 Web 控制台的“工具库 → 图片风格化”中上传；"
-                    "飞书多图角色收集链路仍在开发中，暂不能在聊天内直接提交。"
-                ),
-                "card-photo-style-help",
+            await self._begin_photo_style_collection(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
             )
             return
         prompts = {
@@ -928,6 +1416,445 @@ class FeishuChannelRuntime:
                 "能力列表、当前时间"
             ),
         )
+
+    async def _begin_photo_style_collection(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        sender_id: str,
+    ) -> None:
+        spatial = self.spatial_service
+        style = self.style_service
+        async with self._style_collection_lock:
+            # Persist the routing mode before the first await. Mobile Feishu can
+            # dispatch a selected photo immediately after the card click; if the
+            # mode were created only after a provider health check, that photo
+            # could incorrectly fall through to the spatial-photo route.
+            previous = self.store.start_style_collection(chat_id, sender_id)
+            await self._delete_staged_style_images(
+                [source_id for source_id, _ in previous],
+                owner_id=self._owner_id(sender_id),
+            )
+
+        provider_ready: bool | None = None
+        if style is not None:
+            provider_status = await asyncio.to_thread(style.provider_status)
+            provider_ready = provider_status.get("ready")
+        self.store.mark_completed(message_id, "photo-style-collection")
+        availability_note = ""
+        if spatial is None or style is None:
+            availability_note = (
+                "\n注意：电脑端图片风格化服务尚未加载；图片不会转入空间照片，"
+                "请启动服务后再上传。"
+            )
+        elif provider_ready is False:
+            availability_note = (
+                "\n注意：SDXL + IP-Adapter 服务当前未通过健康检查。"
+                "你仍可先上传图片，服务恢复后再发送“开始风格化”。"
+            )
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            (
+                "已进入图片风格化模式，收集状态会保留 30 分钟。\n"
+                "1. 先发送 1 张内容图；\n"
+                "2. 再发送 1–3 张风格参考图；\n"
+                "3. 发送“开始风格化”。\n"
+                "如需退出，请发送“取消风格化”。"
+                f"{availability_note}"
+            ),
+            "photo-style-collection-started",
+        )
+
+    async def _cancel_photo_style_collection(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        sender_id: str,
+    ) -> None:
+        async with self._style_collection_lock:
+            images = await asyncio.to_thread(
+                self.store.clear_style_collection,
+                chat_id,
+                sender_id,
+            )
+            await self._delete_staged_style_images(
+                [source_id for source_id, _ in images],
+                owner_id=self._owner_id(sender_id),
+            )
+        self.store.mark_completed(message_id, "photo-style-cancelled")
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            (
+                "图片风格化模式已取消，临时图片已经清理。"
+                if images
+                else "当前没有正在收集的图片风格化任务。"
+            ),
+            "photo-style-cancelled",
+        )
+
+    async def _collect_photo_style_image(
+        self,
+        *,
+        message_id: str,
+        resource_message_id: str | None = None,
+        chat_id: str,
+        sender_id: str,
+        file_key: str,
+        file_name: str | None,
+    ) -> None:
+        spatial = self.spatial_service
+        if spatial is None or self.style_service is None:
+            self.store.mark_failed(message_id, "photo_style_unavailable")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "图片风格化能力当前不可用，请确认电脑端服务已经启动。",
+                "photo-style-unavailable",
+            )
+            return
+
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            "已收到图片，正在安全下载并校验。",
+            "photo-style-image-accepted",
+        )
+        staged_source_id: str | None = None
+        try:
+            channel = self._channel
+            if channel is None:
+                raise RuntimeError("飞书长连接当前不可用")
+            image_bytes = await self._download_image_resource(
+                channel,
+                file_key=file_key,
+                message_id=resource_message_id or message_id,
+            )
+            source = await asyncio.to_thread(
+                spatial.stage_source_image,
+                image_bytes,
+                original_name=file_name or "feishu-style-image.jpg",
+                owner_id=self._owner_id(sender_id),
+            )
+            staged_source_id = source.id
+            async with self._style_collection_lock:
+                images = await asyncio.to_thread(
+                    self.store.append_style_image,
+                    chat_id,
+                    sender_id,
+                    source_image_id=source.id,
+                    message_id=message_id,
+                    max_age_seconds=self.style_collection_ttl_seconds,
+                )
+            if images is None:
+                await self._delete_staged_style_images(
+                    [source.id],
+                    owner_id=self._owner_id(sender_id),
+                )
+                await self._reply_safely(
+                    chat_id,
+                    message_id,
+                    "图片收集会话已过期，请重新发送“图片风格化”后上传。",
+                    "photo-style-collection-expired",
+                )
+                self.store.mark_rejected(message_id, "photo_style_collection_expired")
+                return
+            count = len(images)
+            role = "内容图" if count == 1 else f"风格参考图 {count - 1}"
+            next_step = (
+                "请继续发送 1–3 张风格参考图。"
+                if count == 1
+                else (
+                    "已达到 3 张参考图上限，请发送“开始风格化”。"
+                    if count == 4
+                    else "可以继续发送参考图，或发送“开始风格化”。"
+                )
+            )
+            self.store.mark_completed(message_id, f"photo-style-image-{count}")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    f"第 {count} 张图片已保存为{role}"
+                    f"（{source.width} × {source.height}）。\n{next_step}"
+                ),
+                f"photo-style-image-{count}-stored",
+            )
+        except ValueError as exc:
+            if staged_source_id:
+                await self._delete_staged_style_images(
+                    [staged_source_id],
+                    owner_id=self._owner_id(sender_id),
+                )
+            self.store.mark_rejected(message_id, "photo_style_image_limit")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                f"{exc} 请发送“开始风格化”或“取消风格化”。",
+                "photo-style-image-limit",
+            )
+        except AssetError as exc:
+            self.store.mark_failed(message_id, "invalid_style_image")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                f"图片无法处理：{exc}",
+                "invalid-style-image",
+            )
+        except Exception:
+            if staged_source_id:
+                await self._delete_staged_style_images(
+                    [staged_source_id],
+                    owner_id=self._owner_id(sender_id),
+                )
+            self.store.mark_failed(message_id, "style_image_download_failed")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "图片下载失败，请检查消息资源权限和电脑端日志后重试。",
+                "style-image-download-failed",
+            )
+
+    async def _start_photo_style_transfer(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        sender_id: str,
+    ) -> None:
+        style = self.style_service
+        if style is None:
+            self.store.mark_failed(message_id, "photo_style_unavailable")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "图片风格化能力当前不可用，请确认电脑端服务已经启动。",
+                "photo-style-unavailable",
+            )
+            return
+        provider_status = await asyncio.to_thread(style.provider_status)
+        if provider_status.get("ready") is False:
+            self.store.mark_rejected(
+                message_id,
+                "photo_style_provider_unavailable",
+            )
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    "图片已保留，但 SDXL + IP-Adapter 服务当前未就绪。"
+                    "请在电脑端恢复服务后再次发送“开始风格化”；"
+                    "这些图片不会被送往空间照片功能。"
+                ),
+                "photo-style-provider-unavailable",
+            )
+            return
+        try:
+            async with self._style_collection_lock:
+                images = await asyncio.to_thread(
+                    self.store.style_collection,
+                    chat_id,
+                    sender_id,
+                    max_age_seconds=self.style_collection_ttl_seconds,
+                )
+                if images is None:
+                    self.store.mark_rejected(
+                        message_id,
+                        "photo_style_collection_missing",
+                    )
+                    await self._reply_safely(
+                        chat_id,
+                        message_id,
+                        "当前没有图片风格化收集会话，请先发送“图片风格化”。",
+                        "photo-style-collection-missing",
+                    )
+                    return
+                if len(images) < 2:
+                    self.store.mark_rejected(
+                        message_id,
+                        "photo_style_reference_missing",
+                    )
+                    await self._reply_safely(
+                        chat_id,
+                        message_id,
+                        "还缺少风格参考图，请至少再发送一张图片。",
+                        "photo-style-reference-missing",
+                    )
+                    return
+                source_ids = [source_id for source_id, _ in images]
+                created = await asyncio.to_thread(
+                    style.create_transfer_from_sources,
+                    source_ids[0],
+                    source_ids[1:],
+                    title="飞书图片风格化",
+                    owner_id=self._owner_id(sender_id),
+                )
+                await asyncio.to_thread(
+                    self.store.clear_style_collection,
+                    chat_id,
+                    sender_id,
+                )
+            linked_urls = [
+                created.asset.source_url,
+                *created.asset.style_reference_urls,
+            ]
+            for (_, linked_message_id), media_url in zip(images, linked_urls):
+                self.store.attach_event_media(linked_message_id, media_url)
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    "图片风格化任务已创建。\n"
+                    f"任务 ID：{created.job.id}\n"
+                    "本机正在处理，完成后会自动返回预览图和可下载文件。"
+                ),
+                "photo-style-job-created",
+            )
+            await self._deliver_photo_style_result(
+                chat_id=chat_id,
+                message_id=message_id,
+                job_id=created.job.id,
+                tracked_message_id=message_id,
+            )
+        except AssetError as exc:
+            self.store.mark_failed(message_id, "photo_style_create_failed")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                f"图片风格化任务无法创建：{exc}",
+                "photo-style-create-failed",
+            )
+        except TimeoutError:
+            self.store.mark_failed(message_id, "photo_style_job_timeout")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "图片风格化超过 10 分钟，请在电脑端个人资产库查看进度。",
+                "photo-style-job-timeout",
+            )
+        except Exception:
+            self.store.mark_failed(message_id, "photo_style_execution_failed")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "图片风格化执行失败，请在电脑端查看日志后重试。",
+                "photo-style-execution-failed",
+            )
+
+    async def _deliver_photo_style_result(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        job_id: str,
+        tracked_message_id: str,
+    ) -> None:
+        style = self.style_service
+        if style is None:
+            raise AssetError("图片风格化能力当前不可用。")
+        job = await self._wait_for_photo_style_job(job_id)
+        if job.status == "failed":
+            self.store.mark_failed(tracked_message_id, "photo_style_job_failed")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                f"图片风格化失败：{job.error or job.message}",
+                f"photo-style-job-{job.id}-failed",
+            )
+            return
+
+        asset = await asyncio.to_thread(
+            style.asset_library.get_asset,
+            job.asset_id,
+        )
+        if not asset.result_url:
+            raise AssetError("图片风格化任务完成，但结果文件不存在。")
+        result_name = asset.result_url.rsplit("/", maxsplit=1)[-1]
+        result_path = await asyncio.to_thread(
+            style.asset_library.resolve_asset_file,
+            asset.id,
+            result_name,
+        )
+        await self._reply_safely(
+            chat_id,
+            message_id,
+            (
+                f"图片风格化“{asset.name}”已完成。\n"
+                f"尺寸：{asset.width} × {asset.height}\n"
+                "下方先发送预览图，再发送可下载的原始结果文件。"
+            ),
+            f"photo-style-job-{job.id}-completed",
+        )
+        preview_delivered = False
+        file_delivered = False
+        try:
+            await self._send_image(
+                chat_id,
+                message_id,
+                result_path,
+                self._uuid(message_id, f"photo-style-{job.id}-preview"),
+                media_url=asset.result_url,
+            )
+            preview_delivered = True
+        except Exception as exc:
+            self._last_error = self._safe_error(exc)
+        try:
+            await self._send_file(
+                chat_id,
+                message_id,
+                result_path,
+                self._uuid(message_id, f"photo-style-{job.id}-download"),
+                file_name=f"style-result-{asset.id[:8]}.webp",
+                media_url=asset.result_url,
+            )
+            file_delivered = True
+        except Exception as exc:
+            self._last_error = self._safe_error(exc)
+        if preview_delivered or file_delivered:
+            self.store.mark_completed(tracked_message_id, job.id)
+            if not file_delivered:
+                await self._reply_safely(
+                    chat_id,
+                    message_id,
+                    (
+                        "原始结果文件上传失败，可先长按预览图保存；"
+                        "完整结果仍保留在电脑端个人资产库。"
+                    ),
+                    f"photo-style-{job.id}-file-delivery-failed",
+                )
+        else:
+            self.store.mark_failed(
+                tracked_message_id,
+                "photo_style_result_delivery_failed",
+            )
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                "结果已保存在电脑端，但上传到飞书失败，请检查图片/文件上传权限。",
+                f"photo-style-{job.id}-delivery-failed",
+            )
+
+    async def _delete_staged_style_images(
+        self,
+        source_ids: list[str],
+        *,
+        owner_id: str,
+    ) -> None:
+        spatial = self.spatial_service
+        if spatial is None:
+            return
+        for source_id in source_ids:
+            try:
+                await asyncio.to_thread(
+                    spatial.delete_source_image,
+                    source_id,
+                    owner_id=owner_id,
+                )
+            except AssetError:
+                pass
 
     async def _process_image_message(
         self,
@@ -1284,6 +2211,21 @@ class FeishuChannelRuntime:
             await asyncio.sleep(self.job_poll_interval)
         raise TimeoutError("spatial job timed out")
 
+    async def _wait_for_photo_style_job(self, job_id: str) -> Any:
+        style = self.style_service
+        if style is None:
+            raise RuntimeError("图片风格化能力当前不可用")
+        deadline = time.monotonic() + self.job_timeout_seconds
+        while time.monotonic() < deadline:
+            job = await asyncio.to_thread(
+                style.asset_library.get_job,
+                job_id,
+            )
+            if job.status in {"completed", "failed"}:
+                return job
+            await asyncio.sleep(self.job_poll_interval)
+        raise TimeoutError("photo style job timed out")
+
     @staticmethod
     def _image_resources(message: Any) -> list[tuple[str, str | None]]:
         images: list[tuple[str, str | None]] = []
@@ -1298,6 +2240,32 @@ class FeishuChannelRuntime:
         content = getattr(message, "content", None)
         image_key = str(getattr(content, "image_key", "") or "")
         return [(image_key, None)] if image_key else []
+
+    @classmethod
+    def _image_resource_entries(
+        cls,
+        message: Any,
+    ) -> list[tuple[str, str | None, str]]:
+        """Return image resources with the message that owns each file key.
+
+        Feishu mobile can send a multi-select as either one post containing
+        several image resources or as a rapid media batch. Message-resource
+        downloads require the original source message id, not necessarily the
+        id of the merged dispatch produced by the SDK.
+        """
+
+        sources = list(getattr(message, "batched_sources", None) or [])
+        if not sources:
+            sources = [message]
+        entries: list[tuple[str, str | None, str]] = []
+        for source in sources:
+            source_message_id = str(
+                getattr(source, "message_id", None)
+                or getattr(source, "id", "")
+            )
+            for file_key, file_name in cls._image_resources(source):
+                entries.append((file_key, file_name, source_message_id))
+        return entries
 
     async def _reply_safely(
         self,
@@ -1389,6 +2357,35 @@ class FeishuChannelRuntime:
             direction="outbound",
             kind="image",
             content=f"[图片] {path.name}",
+            message_id=message_id,
+            media_url=media_url,
+        )
+
+    async def _send_file(
+        self,
+        chat_id: str,
+        message_id: str,
+        path: Path,
+        uuid: str,
+        *,
+        file_name: str,
+        media_url: str | None = None,
+    ) -> None:
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("飞书长连接当前不可用")
+        result = await channel.send(
+            chat_id,
+            {"file": {"source": str(path), "file_name": file_name}},
+            {"reply_to": message_id, "uuid": uuid},
+        )
+        self._ensure_send_success(result)
+        self.store.record_event(
+            chat_id=chat_id,
+            sender_id=None,
+            direction="outbound",
+            kind="file",
+            content=f"[可下载文件] {file_name}",
             message_id=message_id,
             media_url=media_url,
         )

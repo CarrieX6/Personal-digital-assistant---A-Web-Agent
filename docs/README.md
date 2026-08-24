@@ -25,6 +25,8 @@
   数据模型、安全边界和分阶段路线图。
 - [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)：已实现的循环
   节点与代码硬边界，以及待完成的人工确认、异步恢复和幂等控制。
+- [分层长短期记忆设计](architecture/layered-memory.md)：工作记忆、滚动摘要、
+  类型化长期记忆、混合检索、时间有效性、证据追踪与结果反馈闭环。
 
 ### 配置指南
 

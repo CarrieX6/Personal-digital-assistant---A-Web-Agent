@@ -1,7 +1,7 @@
 # 调研与实现中心
 
 作者：**Zhuofan Xie**
-更新日期：2026-08-21
+更新日期：2026-08-24
 
 本文件是项目技术调研与实现进度的统一入口。它回答四个问题：
 
@@ -121,7 +121,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态、出站重试和任务回收；待真实断网/休眠/恢复实验与指标 |
-| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并图片预览关联、图片风格化菜单和空间任务失败后的飞书“重新生成”卡片；待真实飞书新图片与卡片点击回归、多图角色收集，文件/视频仍未做 |
+| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并图片预览关联、图片风格化菜单和空间任务失败后的飞书“重新生成”卡片；当前分支已打通按会话/用户隔离的一张内容图 + 一至三张参考图收集、风格化任务、预览图和可下载文件回传，自动回归覆盖图片收集、路由隔离和结果回传；待真实手机飞书回归，通用文件输入/视频仍未做 |
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书图片预览、卡片语义化展示和按 `chat_id` 删除只读镜像；待真机验收、群聊 sender 边界、隐私保留策略和统一 Message 迁移 |
 | `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并独立 `8766` 只读 Viewer、HMAC 短时链接、文件白名单、触控/陀螺仪视差与安全响应头；待 iOS/Android 真机、弱网和链接撤销测试，GLB/3DGS 未接入 |
@@ -132,9 +132,9 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 完成按 owner/channel/thread 隔离的 SQLite 会话历史、服务端会话/消息 API、Run 元数据恢复和显式长期记忆；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并本机会话删除确认和飞书只读镜像清理，明确不级联删除资产、长期记忆或飞书原消息；待导出、加密与保留策略 |
+| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 既有 owner/channel/thread 隔离、会话 API 和显式记忆基础上，`codex/feat-layered-memory` 已实现 [分层长短期记忆设计](architecture/layered-memory.md) 的类型、范围、时间有效性、证据、滚动摘要、开放事项和记忆管理 API/UI；本分支已通过 83 项后端完整回归、前端正式构建与服务端渲染测试，待 PR 评审、字段级加密和保留策略 |
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
-| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 检索基准、召回质量、延迟与隐私对比 |
+| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | `codex/feat-layered-memory` 已实现 SQLite FTS5/关键词/同义词与范围、时效、置信度、重要性、效用的混合排序，上下文采用滚动摘要优先和严格预算，并以 Run 结果回写效用；待建立检索基准、测量召回/延迟并评估本地向量模型增益 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
 | `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟡 调研中` | `🧱 局部实现` | Zhuofan Xie | 图片个性化已有固定模型清单、许可/哈希门禁与独立 GPU 依赖；尚无统一下载、升级、卸载和跨能力沙箱 |
 | `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 为会话、记忆和空间资产加入 owner 隔离与增量迁移；会话增加 channel/title，消息增加 run_id/metadata，26 项后端测试通过；待补 ER 图、正式迁移工具、生命周期及备份恢复 |
@@ -143,7 +143,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `LLM-001` | P0 | DeepSeek、Qwen、GLM、OpenAI 等模型的 Tool Calling 和视觉能力 | `⬜ 未开始` | `🧱 局部实现` | 待领取 | 固定测试集、成功率、延迟、价格、上下文和隐私对比 |
+| `LLM-001` | P0 | DeepSeek、Qwen、GLM、OpenAI 等模型的 Tool Calling 和视觉能力 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 已实现普通问答与 Tool Calling 双验证、原子启用、基础问答降级和可观察运行状态；待按真实供应商建立固定测试集并测量成功率、延迟、价格、上下文和隐私 |
 | `LLM-002` | P1 | 云端 LLM、本地小模型和规则执行如何自动路由 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 路由规则、降级策略、离线模式和成本实验 |
 | `LLM-003` | P1 | Prompt、工具 Schema 和上下文如何版本化与回归测试 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 版本格式、评测工具、失败样本库 |
 
@@ -155,7 +155,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 质量评分、失败检测与 2D 回退机制 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并旧功能迁移，并把产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书功能菜单和真实能力边界提示；待目标 Windows GPU 服务联调及飞书内容图/参考图多轮收集 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并旧功能迁移，并把产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书功能菜单和真实能力边界提示；当前分支已完成飞书逐张/多选图片收集及风格化路由隔离，自动回归覆盖输入角色判定、数量边界和结果文件回传；待目标 Windows GPU 服务与真实手机飞书联调 |
 
 ## 9. 虚拟试衣与数字人
 

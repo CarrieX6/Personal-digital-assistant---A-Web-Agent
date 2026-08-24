@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +21,13 @@ from backend.app.settings import (
     SettingsService,
     StoredLLMSettings,
 )
+
+
+def assert_private_file_permissions(path: Path) -> None:
+    """Require owner-only mode bits where the platform exposes POSIX modes."""
+    assert path.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 class MemorySecretStore:
@@ -234,6 +242,62 @@ def test_real_llm_tool_calling_round_trip(tmp_path: Path) -> None:
     assert request_bodies[1]["messages"][-1]["tool_call_id"] == "call_test_1"
 
 
+def test_real_llm_direct_answer_uses_multi_turn_context(tmp_path: Path) -> None:
+    request_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        request_bodies.append(body)
+        answer = "你好，小林。" if len(request_bodies) == 1 else "你叫小林。"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": answer,
+                        }
+                    }
+                ]
+            },
+        )
+
+    planner = OpenAICompatiblePlanner(
+        api_key="test-key",
+        base_url="https://model.example/v1",
+        model="test-chat-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    settings, _ = build_test_settings(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            planner=planner,
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+
+    first = client.post(
+        "/api/agent/run",
+        json={"message": "我叫小林。", "session_id": "basic-qa"},
+    )
+    second = client.post(
+        "/api/agent/run",
+        json={"message": "我叫什么？", "session_id": "basic-qa"},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["answer"] == "你好，小林。"
+    assert second.status_code == 200
+    assert second.json()["answer"] == "你叫小林。"
+    assert second.json()["mode"] == "llm:test-chat-model"
+    roles = [item["role"] for item in request_bodies[1]["messages"]]
+    assert roles[-3:] == ["user", "assistant", "user"]
+    assert request_bodies[1]["messages"][-3]["content"] == "我叫小林。"
+
+
 def test_agent_run_query_and_duplicate_decision_are_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -251,6 +315,8 @@ def test_agent_run_query_and_duplicate_decision_are_idempotent(
     )
     assert created.status_code == 200
     run = created.json()
+    assert run["status"] == "completed"
+    assert "Asia/Shanghai" in run["answer"]
 
     fetched = client.get(f"/api/agent/runs/{run['run_id']}")
     listed = client.get("/api/agent/runs", params={"status": "completed"})
@@ -269,7 +335,51 @@ def test_agent_run_query_and_duplicate_decision_are_idempotent(
 
 
 def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
-    settings, secrets = build_test_settings(tmp_path)
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("tools"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_time",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "current_time",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "模型连接正常。",
+                        }
+                    }
+                ]
+            },
+        )
+
+    model_client = httpx.Client(transport=httpx.MockTransport(handler))
+    settings, secrets = build_test_settings(tmp_path, model_client)
     client = TestClient(
         create_app(
             tmp_path / "runs.jsonl",
@@ -319,11 +429,13 @@ def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
     settings_text = (tmp_path / "settings.json").read_text(encoding="utf-8")
     assert "sk-private-example" not in settings_text
     assert json.loads(settings_text)["model"] == "qwen3.7-plus"
-    assert stat.S_IMODE((tmp_path / "settings.json").stat().st_mode) == 0o600
+    assert_private_file_permissions(tmp_path / "settings.json")
 
     health = client.get("/health").json()
     assert health["llm_configured"] is True
+    assert health["llm_status"] == "ready"
     assert health["model"] == "qwen3.7-plus"
+    assert len(requests) == 2
 
     wrong_provider_without_key = client.put(
         "/api/settings/llm",
@@ -338,6 +450,23 @@ def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
     assert wrong_provider_without_key.status_code == 422
     assert "该供应商" in wrong_provider_without_key.json()["detail"]
 
+    disabled = client.put(
+        "/api/settings/llm",
+        json={
+            "enabled": False,
+            "provider_id": "qwen",
+            "base_url": providers["qwen"]["base_url"],
+            "model": providers["qwen"]["default_model"],
+            "timeout_seconds": 45,
+        },
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["has_api_key"] is True
+    disabled_health = client.get("/health").json()
+    assert disabled_health["llm_configured"] is False
+    assert disabled_health["llm_status"] == "disabled"
+
     cleared = client.delete("/api/settings/llm/api-key")
     assert cleared.status_code == 200
     assert cleared.json()["has_api_key"] is False
@@ -346,11 +475,126 @@ def test_provider_catalog_and_ui_settings_persistence(tmp_path: Path) -> None:
     assert client.get("/health").json()["llm_configured"] is False
 
 
+def test_saved_key_without_activation_is_reported_explicitly(
+    tmp_path: Path,
+) -> None:
+    settings, secrets = build_test_settings(tmp_path)
+    secrets.value = "saved-key"
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+
+    catalog = client.get("/api/settings/providers").json()
+    health = client.get("/health").json()
+
+    assert catalog["settings"]["has_api_key"] is True
+    assert catalog["runtime"]["status"] == "configured_not_enabled"
+    assert catalog["runtime"]["active"] is False
+    assert health["llm_status"] == "configured_not_enabled"
+    assert health["agent_mode"] == "demo-rule-planner"
+
+
+def test_disabling_real_model_preserves_saved_key(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("tools"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_time",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "current_time",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "连接正常。",
+                        }
+                    }
+                ]
+            },
+        )
+
+    settings, secrets = build_test_settings(
+        tmp_path,
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+    payload = {
+        "enabled": True,
+        "provider_id": "custom",
+        "base_url": "https://model.example/v1",
+        "model": "working-model",
+        "api_key": "saved-key",
+        "timeout_seconds": 30,
+    }
+    assert client.put("/api/settings/llm", json=payload).status_code == 200
+
+    disabled = client.put(
+        "/api/settings/llm",
+        json={**payload, "enabled": False, "api_key": None},
+    )
+
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["has_api_key"] is True
+    assert secrets.value == "saved-key"
+    health = client.get("/health").json()
+    assert health["llm_configured"] is False
+    assert health["llm_status"] == "disabled"
+    assert health["agent_mode"] == "demo-rule-planner"
+
+
 def test_connection_check_uses_draft_without_saving_key(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        body = json.loads(request.content)
+        if not body.get("tools"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "模型连接正常。",
+                            }
+                        }
+                    ]
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -399,13 +643,164 @@ def test_connection_check_uses_draft_without_saving_key(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["selected_tools"] == ["current_time"]
-    assert len(requests) == 1
-    assert str(requests[0].url) == "https://api.deepseek.com/chat/completions"
-    assert requests[0].headers["Authorization"] == "Bearer temporary-test-key"
-    request_body = json.loads(requests[0].content)
-    assert request_body["tool_choice"] == "auto"
+    assert response.json()["qa_ok"] is True
+    assert response.json()["tool_calling_ok"] is True
+    assert response.json()["answer_preview"] == "模型连接正常。"
+    assert len(requests) == 2
+    assert all(
+        str(request.url) == "https://api.deepseek.com/chat/completions"
+        for request in requests
+    )
+    assert all(
+        request.headers["Authorization"] == "Bearer temporary-test-key"
+        for request in requests
+    )
+    qa_request = json.loads(requests[0].content)
+    tool_request = json.loads(requests[1].content)
+    assert "tools" not in qa_request
+    assert "tool_choice" not in qa_request
+    assert tool_request["tool_choice"] == "auto"
     assert secrets.value is None
     assert json.loads((tmp_path / "settings.json").read_text())["enabled"] is False
+
+
+def test_failed_model_activation_keeps_previous_planner_and_settings(
+    tmp_path: Path,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["model"] == "broken-model":
+            return httpx.Response(401, json={"error": {"message": "invalid"}})
+        if body.get("tools"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_time",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "current_time",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "连接正常。",
+                        }
+                    }
+                ]
+            },
+        )
+
+    model_client = httpx.Client(transport=httpx.MockTransport(handler))
+    settings, secrets = build_test_settings(tmp_path, model_client)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+    working = {
+        "enabled": True,
+        "provider_id": "custom",
+        "base_url": "https://working.example/v1",
+        "model": "working-model",
+        "api_key": "working-key",
+        "timeout_seconds": 30,
+    }
+    assert client.put("/api/settings/llm", json=working).status_code == 200
+
+    failed = client.put(
+        "/api/settings/llm",
+        json={
+            **working,
+            "model": "broken-model",
+            "api_key": "replacement-key",
+        },
+    )
+
+    assert failed.status_code == 502
+    health = client.get("/health").json()
+    assert health["llm_configured"] is True
+    assert health["llm_status"] == "ready"
+    assert health["model"] == "working-model"
+    stored = json.loads((tmp_path / "settings.json").read_text())
+    assert stored["model"] == "working-model"
+    assert secrets.value == "working-key"
+
+
+def test_model_without_tool_calling_still_enables_basic_qa(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        answer = "我会直接回答。" if body.get("tools") else "连接正常。"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": answer,
+                        }
+                    }
+                ]
+            },
+        )
+
+    settings, _ = build_test_settings(
+        tmp_path,
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+    activated = client.put(
+        "/api/settings/llm",
+        json={
+            "enabled": True,
+            "provider_id": "custom",
+            "base_url": "https://qa-only.example/v1",
+            "model": "qa-only-model",
+            "api_key": "qa-only-key",
+            "timeout_seconds": 30,
+        },
+    )
+
+    assert activated.status_code == 200
+    status = client.get("/api/settings/llm/status").json()
+    assert status["status"] == "degraded"
+    assert status["active"] is True
+    assert status["qa_available"] is True
+    assert status["tool_calling_available"] is False
+    answer = client.post(
+        "/api/agent/run",
+        json={"message": "请回答一个基础问题", "session_id": "qa-only"},
+    )
+    assert answer.status_code == 200
+    assert answer.json()["mode"] == "llm:qa-only-model"
+    assert answer.json()["answer"] == "我会直接回答。"
 
 
 def test_encrypted_secret_store_never_writes_plaintext(tmp_path: Path) -> None:
@@ -417,8 +812,8 @@ def test_encrypted_secret_store_never_writes_plaintext(tmp_path: Path) -> None:
 
     assert store.get() == "sk-sensitive-value"
     assert b"sk-sensitive-value" not in secret_path.read_bytes()
-    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(master_key_path.stat().st_mode) == 0o600
+    assert_private_file_permissions(secret_path)
+    assert_private_file_permissions(master_key_path)
 
     store.delete()
     assert store.get() is None
@@ -784,4 +1179,81 @@ def test_spatial_assets_are_isolated_by_owner(tmp_path: Path) -> None:
     ).id == created.asset.id
     with pytest.raises(AssetError, match="找不到"):
         spatial.get_asset(created.asset.id, owner_id="user-b")
+    spatial.close()
+
+
+def test_memory_center_crud_and_export_api(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+        )
+    )
+
+    created = client.post(
+        "/api/memories",
+        json={
+            "content": "我偏好在本机处理私人图片",
+            "memory_type": "preference",
+            "importance": 0.9,
+        },
+    )
+    assert created.status_code == 201
+    memory = created.json()
+    assert memory["memory_type"] == "preference"
+    assert memory["source"] == "web:memory-center"
+    assert memory["status"] == "active"
+
+    listed = client.get(
+        "/api/memories",
+        params={"type": "preference", "query": "本机"},
+    )
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["memories"]] == [memory["id"]]
+
+    rejected = client.put(
+        f"/api/memories/{memory['id']}",
+        json={"content": None},
+    )
+    assert rejected.status_code == 422
+
+    updated = client.put(
+        f"/api/memories/{memory['id']}",
+        json={"content": "我偏好仅在本机处理私人图片", "importance": 1},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["importance"] == 1
+    assert "仅在本机" in updated.json()["content"]
+
+    run = client.post(
+        "/api/agent/run",
+        json={
+            "message": "请复述我处理私人图片的偏好",
+            "session_id": "memory-recall",
+        },
+    )
+    assert run.status_code == 200
+    recalled = client.get(
+        "/api/memories",
+        params={"type": "preference", "query": "本机"},
+    ).json()["memories"][0]
+    assert recalled["access_count"] == 1
+    assert recalled["utility_score"] > memory["utility_score"]
+
+    exported = client.get("/api/memories/export")
+    assert exported.status_code == 200
+    assert exported.json()["version"] == "1"
+    assert exported.json()["memories"][0]["id"] == memory["id"]
+
+    deleted = client.delete(f"/api/memories/{memory['id']}")
+    assert deleted.status_code == 204
+    assert client.get(
+        "/api/memories",
+        params={"type": "preference"},
+    ).json()["memories"] == []
+    remaining = client.get("/api/memories").json()["memories"]
+    assert any(item["memory_type"] == "episode" for item in remaining)
     spatial.close()

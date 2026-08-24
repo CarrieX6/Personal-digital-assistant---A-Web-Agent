@@ -4,9 +4,8 @@ import re
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
-from zoneinfo import ZoneInfo
 
 from .models import CapabilityInfo, ToolInfo
 
@@ -238,7 +237,11 @@ def extract_keywords(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def current_time(_: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    # China Standard Time has used UTC+08:00 year-round since 1991. A fixed
+    # offset keeps this local current-time tool independent of the optional
+    # system/IANA tzdata package, which is commonly absent on Windows.
+    shanghai_timezone = timezone(timedelta(hours=8), name="Asia/Shanghai")
+    now = datetime.now(shanghai_timezone)
     return {
         "iso": now.isoformat(timespec="seconds"),
         "display": now.strftime("%Y-%m-%d %H:%M:%S"),

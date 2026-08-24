@@ -2,7 +2,12 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 
-type RuntimeStatus = "disabled" | "starting" | "connected" | "error";
+type RuntimeStatus =
+  | "disabled"
+  | "starting"
+  | "connected"
+  | "reconnecting"
+  | "error";
 
 export type FeishuSettingsPublic = {
   enabled: boolean;
@@ -55,11 +60,24 @@ const statusCopy: Record<
     label: "已连接",
     detail: "现在可从已授权的飞书账号发送文本指令。",
   },
+  reconnecting: {
+    label: "正在重连",
+    detail: "飞书长连接暂时中断，电脑端正在后台自动恢复。",
+  },
   error: {
     label: "连接异常",
     detail: "请检查应用权限、事件订阅、网络和凭证。",
   },
 };
+
+function runtimeStatusCopy(status: string) {
+  return (
+    statusCopy[status as RuntimeStatus] ?? {
+      label: "状态更新中",
+      detail: "后端返回了新的连接状态，请稍后刷新后重试。",
+    }
+  );
+}
 
 async function responseError(response: Response): Promise<string> {
   try {
@@ -241,7 +259,7 @@ export function FeishuSettingsDialog({
       setDraft(toDraft(settings));
       setAppSecret("");
       setShowSecret(false);
-      const runtime = statusCopy[settings.runtime.status];
+      const runtime = runtimeStatusCopy(settings.runtime.status);
       setFeedback({
         tone: settings.runtime.status === "error" ? "error" : "success",
         message:
@@ -299,7 +317,7 @@ export function FeishuSettingsDialog({
     status: "disabled" as const,
     last_error: null,
   };
-  const runtimeCopy = statusCopy[runtime.status];
+  const runtimeCopy = runtimeStatusCopy(runtime.status);
   const sameSavedApp =
     Boolean(savedSettings?.has_app_secret) &&
     savedSettings?.app_id === draft?.app_id.trim();

@@ -284,6 +284,13 @@ class AssetRepository:
             except FileNotFoundError:
                 # SQLite may remove the transient WAL/SHM file between glob and chmod.
                 continue
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+                # Windows locks SQLite's live WAL/SHM handles. The main database
+                # file is still hardened, and retrying after every connection
+                # would otherwise make concurrent background jobs fail.
+                continue
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

@@ -69,8 +69,7 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
             json={
                 "message": "把内容图按参考图进行图片风格化",
                 "session_id": "style-test",
-                "source_image_id": content.id,
-                "style_image_ids": [reference.id],
+                "attachment_image_ids": [content.id, reference.id],
             },
         )
         assert response.status_code == 200
@@ -80,8 +79,124 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
             if step["label"] == "调用 create_photo_style_transfer"
         )
         assert tool_output["kind"] == "photo_style_transfer"
+        messages = client.get(
+            "/api/conversations/style-test/messages"
+        ).json()["messages"]
+        user_metadata = next(
+            item["metadata"] for item in messages if item["role"] == "user"
+        )
+        assert [item["name"] for item in user_metadata["attachments"]] == [
+            "content.png",
+            "reference.png",
+        ]
+        assert "attachment" not in user_metadata
+        assert "style_attachments" not in user_metadata
+        content_preview = user_metadata["attachments"][0]["preview_url"]
+        style_preview = user_metadata["attachments"][1]["preview_url"]
+        assert content_preview == (
+            f"/api/assets/{tool_output['asset_id']}/files/source.webp"
+        )
+        assert style_preview == (
+            f"/api/assets/{tool_output['asset_id']}/files/style-1.webp"
+        )
+        assert client.get(content_preview).status_code == 200
+        assert client.get(style_preview).status_code == 200
         assert not (spatial.source_image_dir / content.id).exists()
         assert not (spatial.source_image_dir / reference.id).exists()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_generic_attachment_router_requests_missing_style_reference(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+    try:
+        content = spatial.stage_source_image(
+            _png("#b88d72"),
+            original_name="only-content.png",
+        )
+
+        response = client.post(
+            "/api/agent/run",
+            json={
+                "message": "把这张图片进行风格化",
+                "session_id": "style-clarification",
+                "attachment_image_ids": [content.id],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["mode"] == "deterministic-attachment-router"
+        assert "至少 1 张参考图" in body["answer"]
+        assert body["steps"][0]["output"]["attachment_action"] == (
+            "clarification_required"
+        )
+        assert not (spatial.source_image_dir / content.id).exists()
+        messages = client.get(
+            "/api/conversations/style-clarification/messages"
+        ).json()["messages"]
+        user_metadata = next(
+            item["metadata"] for item in messages if item["role"] == "user"
+        )
+        assert user_metadata["attachments"][0]["name"] == "only-content.png"
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_generic_attachment_router_clarifies_spatial_image_choice(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+    try:
+        first = spatial.stage_source_image(
+            _png("#c69a73"), original_name="first.png"
+        )
+        second = spatial.stage_source_image(
+            _png("#527aa3"), original_name="second.png"
+        )
+
+        response = client.post(
+            "/api/agent/run",
+            json={
+                "message": "生成空间照片",
+                "session_id": "spatial-clarification",
+                "attachment_image_ids": [first.id, second.id],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["mode"] == "deterministic-attachment-router"
+        assert "请说明使用第几张图片" in body["answer"]
+        output = body["steps"][0]["output"]
+        assert output["attachment_action"] == "clarification_required"
+        assert output["release_image_ids"] == [first.id, second.id]
+        assert not (spatial.source_image_dir / first.id).exists()
+        assert not (spatial.source_image_dir / second.id).exists()
     finally:
         style.close()
         spatial.close()

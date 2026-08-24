@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field, HttpUrl, SecretStr
 class AgentRunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=100)
+    attachment_image_ids: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+    # Compatibility fields for existing clients and the Feishu channel.
     source_image_id: str | None = Field(default=None, max_length=100)
     style_image_ids: list[str] = Field(default_factory=list, max_length=3)
 
@@ -88,6 +93,83 @@ class ConversationMessageListResponse(BaseModel):
     messages: list[ConversationMessagePublic]
 
 
+MemoryTypeName = Literal[
+    "profile",
+    "preference",
+    "fact",
+    "task_state",
+    "episode",
+    "procedure",
+    "asset_relation",
+]
+MemoryScopeName = Literal["user", "channel", "thread", "project"]
+MemoryStatusName = Literal["candidate", "active", "superseded", "archived"]
+MemorySensitivityName = Literal["normal", "private", "sensitive"]
+
+
+class MemoryCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    memory_type: MemoryTypeName | None = None
+    scope: MemoryScopeName = "user"
+    scope_id: str | None = Field(default=None, max_length=160)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    importance: float = Field(default=0.65, ge=0, le=1)
+    sensitivity: MemorySensitivityName | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryUpdateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    memory_type: MemoryTypeName | None = None
+    scope: MemoryScopeName | None = None
+    scope_id: str | None = Field(default=None, max_length=160)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    importance: float | None = Field(default=None, ge=0, le=1)
+    sensitivity: MemorySensitivityName | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    status: MemoryStatusName | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class MemoryPublic(BaseModel):
+    id: str
+    memory_type: MemoryTypeName
+    scope: MemoryScopeName
+    scope_id: str | None = None
+    content: str
+    topic_key: str | None = None
+    source: str
+    source_message_id: int | None = None
+    source_run_id: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    importance: float = Field(ge=0, le=1)
+    sensitivity: MemorySensitivityName
+    valid_from: datetime
+    valid_to: datetime | None = None
+    status: MemoryStatusName
+    supersedes_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_accessed_at: datetime | None = None
+    access_count: int = Field(ge=0)
+    utility_score: float = Field(ge=0, le=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    relevance_score: float = Field(default=0, ge=0)
+
+
+class MemoryListResponse(BaseModel):
+    memories: list[MemoryPublic]
+
+
+class MemoryExportResponse(BaseModel):
+    version: Literal["1"] = "1"
+    exported_at: datetime
+    memories: list[MemoryPublic]
+
+
 class ToolInfo(BaseModel):
     name: str
     description: str
@@ -120,6 +202,16 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     agent_mode: str
     llm_configured: bool
+    llm_status: Literal[
+        "disabled",
+        "unconfigured",
+        "configured_not_enabled",
+        "testing",
+        "ready",
+        "degraded",
+        "error",
+    ] = "unconfigured"
+    llm_provider: str | None = None
     model: str | None = None
     tool_count: int
     feishu_status: Literal[
@@ -157,15 +249,39 @@ class LLMSettingsPublic(BaseModel):
     secret_storage: str
 
 
+class LLMRuntimePublic(BaseModel):
+    status: Literal[
+        "disabled",
+        "unconfigured",
+        "configured_not_enabled",
+        "testing",
+        "ready",
+        "degraded",
+        "error",
+    ]
+    active: bool
+    provider_id: str
+    model: str
+    has_api_key: bool
+    qa_available: bool
+    tool_calling_available: bool
+    last_tested_at: datetime | None = None
+    last_error: str | None = None
+
+
 class ProviderCatalogResponse(BaseModel):
     providers: list[ProviderPreset]
     settings: LLMSettingsPublic
+    runtime: LLMRuntimePublic | None = None
 
 
 class ConnectionTestResponse(BaseModel):
     ok: Literal[True]
     model: str
     selected_tools: list[str]
+    qa_ok: bool = True
+    tool_calling_ok: bool
+    answer_preview: str
     latency_ms: int
     message: str
 
@@ -214,7 +330,7 @@ class ChannelMessagePublic(BaseModel):
     chat_id: str
     sender_id: str | None = None
     direction: Literal["inbound", "outbound", "system"]
-    kind: Literal["text", "markdown", "image", "card", "status"]
+    kind: Literal["text", "markdown", "image", "file", "card", "status"]
     content: str
     media_url: str | None = None
     created_at: datetime
