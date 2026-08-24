@@ -201,6 +201,12 @@ def create_app(
         registry,
         selected_planner,
         JsonlTraceStore(trace_path),
+        image_loader=lambda source_image_id, owner_id: (
+            selected_spatial_service.read_source_image(
+                source_image_id,
+                owner_id=owner_id,
+            )
+        ),
     )
     channel_data_path = trace_path.parent
     selected_feishu_settings_service = feishu_settings_service or (
@@ -597,6 +603,28 @@ def create_app(
             return Response(status_code=204)
         except AssetError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/source-images/{source_image_id}/content")
+    def get_source_image_content(
+        source_image_id: str,
+        request: Request,
+    ) -> FileResponse:
+        service: SpatialSceneService = request.app.state.spatial_service
+        try:
+            path = service.resolve_source_image_file(
+                source_image_id,
+                owner_id=WEB_OWNER_ID,
+            )
+        except AssetError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            media_type="image/webp",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post(
         "/api/spatial-scenes",

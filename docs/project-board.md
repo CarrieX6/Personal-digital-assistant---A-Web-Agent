@@ -132,7 +132,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 既有 owner/channel/thread 隔离、会话 API 和显式记忆基础上，`codex/feat-layered-memory` 已实现 [分层长短期记忆设计](architecture/layered-memory.md) 的类型、范围、时间有效性、证据、滚动摘要、开放事项和记忆管理 API/UI；本分支已通过 83 项后端完整回归、前端正式构建与服务端渲染测试，待 PR 评审、字段级加密和保留策略 |
+| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 既有 owner/channel/thread 隔离、会话 API 和显式记忆基础上，`codex/feat-layered-memory` 已实现 [分层长短期记忆设计](architecture/layered-memory.md) 的类型、范围、时间有效性、证据、滚动摘要、开放事项和记忆管理 API/UI；本分支已通过 86 项后端完整回归、前端正式构建与服务端渲染测试，待 PR 评审、字段级加密和保留策略 |
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
 | `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | `codex/feat-layered-memory` 已实现 SQLite FTS5/关键词/同义词与范围、时效、置信度、重要性、效用的混合排序，上下文采用滚动摘要优先和严格预算，并以 Run 结果回写效用；待建立检索基准、测量召回/延迟并评估本地向量模型增益 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
@@ -143,7 +143,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `LLM-001` | P0 | DeepSeek、Qwen、GLM、OpenAI 等模型的 Tool Calling 和视觉能力 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 已实现普通问答与 Tool Calling 双验证、原子启用、基础问答降级和可观察运行状态；待按真实供应商建立固定测试集并测量成功率、延迟、价格、上下文和隐私 |
+| `LLM-001` | P0 | DeepSeek、Qwen、GLM、OpenAI 等模型的 Tool Calling 和视觉能力 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 已实现普通问答与 Tool Calling 双验证、原子启用、基础问答降级和可观察运行状态；当前分支增加兼容 `image_url` 的视觉问答、连续看图追问、生成工具意图隔离和瞬时图片上下文，待增加视觉连接测试并按真实供应商测量成功率、延迟、价格、上下文和隐私 |
 | `LLM-002` | P1 | 云端 LLM、本地小模型和规则执行如何自动路由 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 路由规则、降级策略、离线模式和成本实验 |
 | `LLM-003` | P1 | Prompt、工具 Schema 和上下文如何版本化与回归测试 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 版本格式、评测工具、失败样本库 |
 

@@ -22,10 +22,12 @@ SYSTEM_PROMPT = """你是 Agent Lab 的个人数字助手。
 4. 每轮优先只调用完成下一步所需的工具。工具结果返回后，如果还需工具就继续
    调用；目标完成后用简洁中文回答用户。
 5. 如果现有工具无法完成任务，直接说明能力边界，不要伪造结果。
-6. 如果系统提供本地图片附件 ID，且用户要求生成空间照片，调用
-   create_spatial_scene 并原样传入 source_image_id。模型不可查看附件原图，
-   不要推测图片内容。
-6.1 如果可信附件元数据同时标记一张 content 与一至三张 style，且用户要求图片
+6. 当附件标记为 vision 时，原图会作为当前用户消息的视觉输入提供；直接根据图像
+   回答用户的识别、描述、比较、OCR 和追问，不要把视觉问答改成图片生成任务。
+6.1 如果系统提供 content 角色的本地图片附件 ID，且用户明确要求生成空间照片，
+    调用 create_spatial_scene 并原样传入 source_image_id。content/style 角色只提供
+    工具资产 ID，模型不可查看附件原图，不要推测图片内容。
+6.2 如果可信附件元数据同时标记一张 content 与一至三张 style，且用户要求图片
     风格化，调用 create_photo_style_transfer；严格按 attachment_role 传入 ID，
     不能根据文件名或顺序猜测角色。
 7. 回答用于 Web 与聊天软件共同展示：不要使用 Markdown 标题（#、##、###）或
@@ -50,6 +52,17 @@ def _content_as_text(content: Any) -> str:
         ]
         return "".join(pieces).strip()
     return ""
+
+
+def _has_vision_parts(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in message["content"]
+        )
+        for message in messages
+    )
 
 
 class OpenAICompatiblePlanner:
@@ -116,20 +129,85 @@ class OpenAICompatiblePlanner:
             messages.append({"role": role, "content": content})
         if len(messages) == 1 or messages[-1]["role"] != "user":
             raise LLMError("结构化上下文缺少最后一条用户消息。")
+        vision_inputs = self._validated_vision_inputs(planning_context)
+        if vision_inputs:
+            text_content = str(messages[-1]["content"])
+            messages[-1] = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text_content},
+                    *[
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": item["data_url"],
+                                "detail": "auto",
+                            },
+                        }
+                        for item in vision_inputs
+                    ],
+                ],
+            }
         assistant_message = self._chat(
             messages=messages,
             tools=tool_schemas,
             tool_choice="auto" if tool_schemas else None,
         )
         tool_calls = self._parse_tool_calls(assistant_message.get("tool_calls", []))
+        if vision_inputs and tool_calls:
+            raise LLMError("视觉问答被限制为直接回答，不能在同一轮自动调用工具。")
         return PlanningResult(
             tool_calls=tool_calls,
             direct_answer=_content_as_text(assistant_message.get("content")),
-            provider_context={
-                "messages": messages,
-                "assistant_message": assistant_message,
-            },
+            # A direct answer never needs provider context again. In particular,
+            # this keeps inline image data out of durable LangGraph checkpoints.
+            provider_context=(
+                {
+                    "messages": messages,
+                    "assistant_message": assistant_message,
+                }
+                if tool_calls
+                else None
+            ),
         )
+
+    @staticmethod
+    def _validated_vision_inputs(
+        planning_context: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        raw_inputs = planning_context.get("_vision_inputs", [])
+        if not isinstance(raw_inputs, list) or not raw_inputs:
+            return []
+        attachments = planning_context.get("attachments", [])
+        trusted_ids = {
+            str(trusted.get("source_image_id"))
+            for item in attachments
+            if isinstance(item, dict)
+            and isinstance((trusted := item.get("trusted_system")), dict)
+            and trusted.get("attachment_role") == "vision"
+            and trusted.get("source_image_id")
+        }
+        validated: list[dict[str, str]] = []
+        for item in raw_inputs[:4]:
+            if not isinstance(item, dict):
+                continue
+            source_image_id = item.get("source_image_id")
+            data_url = item.get("data_url")
+            if source_image_id not in trusted_ids or not isinstance(data_url, str):
+                continue
+            if not data_url.startswith(
+                ("data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,")
+            ):
+                continue
+            if len(data_url) > 8 * 1024 * 1024:
+                raise LLMError("图片视觉输入过大，请压缩后重试。")
+            validated.append(
+                {
+                    "source_image_id": str(source_image_id),
+                    "data_url": data_url,
+                }
+            )
+        return validated
 
     def compose_answer(
         self,
@@ -222,6 +300,7 @@ class OpenAICompatiblePlanner:
         if tool_choice:
             payload["tool_choice"] = tool_choice
 
+        vision_request = _has_vision_parts(messages)
         try:
             response = self.client.post(
                 self.chat_completions_url,
@@ -235,6 +314,11 @@ class OpenAICompatiblePlanner:
             body = response.json()
             message = body["choices"][0]["message"]
         except httpx.HTTPStatusError as exc:
+            if vision_request and exc.response.status_code in {400, 404, 413, 415, 422}:
+                raise LLMError(
+                    "视觉请求被模型服务拒绝，请确认当前模型支持图片输入，"
+                    "且 Base URL 使用兼容的 Chat Completions 接口。"
+                ) from exc
             raise LLMError(
                 f"模型服务返回错误状态 {exc.response.status_code}。"
             ) from exc

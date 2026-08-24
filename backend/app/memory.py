@@ -89,6 +89,7 @@ class ConversationContext:
     session_summary: str = ""
     open_loops: tuple[str, ...] = ()
     decisions: tuple[str, ...] = ()
+    recent_attachments: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,21 +160,57 @@ class SQLiteMemoryStore:
             channel=channel,
         )
         self._refresh_session_summary(owner_id=owner_id, thread_id=thread_id)
-        with self._connect() as connection:
-            message_rows = connection.execute(
-                """
-                SELECT role, content
-                FROM agent_messages
-                WHERE owner_id = ? AND thread_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (owner_id, thread_id, max(1, min(message_limit, 50))),
-            ).fetchall()
         summary = self.get_session_summary(
             owner_id=owner_id,
             thread_id=thread_id,
         )
+        summarized_through = summary.last_message_id if summary else 0
+        with self._connect() as connection:
+            message_rows = connection.execute(
+                """
+                SELECT role, content, metadata_json
+                FROM agent_messages
+                WHERE owner_id = ? AND thread_id = ?
+                  AND id > ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (
+                    owner_id,
+                    thread_id,
+                    summarized_through,
+                    max(1, min(message_limit, 50)),
+                ),
+            ).fetchall()
+        recent_attachments: list[dict[str, Any]] = []
+        for row in message_rows:
+            if str(row[0]) != "user":
+                continue
+            try:
+                metadata = json.loads(str(row[2] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                continue
+            candidates = metadata.get("attachments", [])
+            if not isinstance(candidates, list):
+                candidates = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                source_image_id = candidate.get("source_image_id")
+                if not isinstance(source_image_id, str) or not source_image_id:
+                    continue
+                recent_attachments.append(
+                    {
+                        "id": source_image_id[:100],
+                        "original_name": str(candidate.get("name", ""))[:160],
+                        "width": candidate.get("width"),
+                        "height": candidate.get("height"),
+                    }
+                )
+            if recent_attachments:
+                break
         memory_items = self.search_memories(
             owner_id=owner_id,
             query=query,
@@ -193,6 +230,7 @@ class SQLiteMemoryStore:
             session_summary=summary.summary if summary else "",
             open_loops=tuple(summary.open_loops if summary else []),
             decisions=tuple(summary.decisions if summary else []),
+            recent_attachments=tuple(recent_attachments[:4]),
         )
 
     def ensure_thread(

@@ -744,6 +744,34 @@ class SpatialSceneService:
         except (OSError, ValueError, TypeError) as exc:
             raise AssetError("图片附件信息无法读取，请重新选择。") from exc
 
+    def resolve_source_image_file(
+        self,
+        source_image_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> Path:
+        """Resolve a validated staged image without exposing its path to models."""
+        self.get_source_image(source_image_id, owner_id=owner_id)
+        source_path = self.source_image_dir / source_image_id / "source.webp"
+        if not source_path.is_file():
+            raise AssetError("图片附件不存在或已经过期，请重新选择。")
+        return source_path
+
+    def read_source_image(
+        self,
+        source_image_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> tuple[str, bytes]:
+        source_path = self.resolve_source_image_file(
+            source_image_id,
+            owner_id=owner_id,
+        )
+        try:
+            return "image/webp", source_path.read_bytes()
+        except OSError as exc:
+            raise AssetError("图片附件无法读取，请重新选择。") from exc
+
     def delete_source_image(
         self,
         source_image_id: str,

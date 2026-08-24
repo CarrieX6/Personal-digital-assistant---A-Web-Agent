@@ -60,9 +60,9 @@ const catalog = [
     id: "vision",
     name: "通用视觉理解",
     description: "理解图片内容并支持围绕图片继续对话，而不只是生成空间照片。",
-    status: "available" as const,
+    status: "installed" as const,
     icon: "image" as const,
-    meta: "需要多模态模型与独立隐私授权",
+    meta: "随已配置的多模态模型启用 · 图片按需发送",
   },
   {
     id: "vton",
@@ -189,7 +189,7 @@ export function ToolLibrary({
                   </button>
                 ) : tool.id === "vision" ? (
                   <button type="button" onClick={onOpenModelSettings}>
-                    查看模型设置
+                    配置视觉模型
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>
                 ) : tool.status === "coming" ? (

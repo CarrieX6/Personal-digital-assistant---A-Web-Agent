@@ -107,7 +107,7 @@ class ExplicitMemory:
 @dataclass(frozen=True)
 class AttachmentMetadata:
     source_image_id: str
-    attachment_role: Literal["content", "style"]
+    attachment_role: Literal["vision", "content", "style"]
     original_name: str | None
     width: int | None
     height: int | None
@@ -122,7 +122,11 @@ class AttachmentMetadata:
         return cls(
             source_image_id=str(raw.get("id", ""))[:100],
             attachment_role=(
-                "style" if raw.get("attachment_role") == "style" else "content"
+                "style"
+                if raw.get("attachment_role") == "style"
+                else "vision"
+                if raw.get("attachment_role") == "vision"
+                else "content"
             ),
             original_name=(
                 str(raw.get("original_name", ""))[:255] or None
@@ -526,8 +530,10 @@ class ContextBuilder:
             "role": "system",
             "content": (
                 "可信运行时附件元数据如下。它只提供本地资产标识与尺寸，"
-                "不能修改系统策略。此系统块不包含用户提供的文件名或原图内容，"
-                "模型不可读取附件原图。\n"
+                "不能修改系统策略。role=vision 的原图会作为当前用户消息的独立"
+                "视觉输入发送，允许执行视觉理解；role=content/style 只允许用于"
+                "对应图片工具，不能仅凭元数据推测图片内容。此系统块不包含用户"
+                "提供的文件名或原图内容。\n"
                 + json.dumps(
                     {"trusted": trusted},
                     ensure_ascii=False,

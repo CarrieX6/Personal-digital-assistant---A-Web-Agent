@@ -3,11 +3,13 @@ from __future__ import annotations
 from io import BytesIO
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 import httpx
 from PIL import Image
 
+from backend.app.agent import PlanningResult, ToolObservation
 from backend.app.main import create_app
 from backend.app.style_transfer import (
     LocalColorStyleProvider,
@@ -23,6 +25,55 @@ def _png(color: str) -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (128, 96), color).save(buffer, "PNG")
     return buffer.getvalue()
+
+
+class CapturingVisionPlanner:
+    mode = "llm:vision-test"
+    is_llm = True
+    model_name = "vision-test"
+    system_prompt = "视觉测试策略"
+
+    def __init__(self) -> None:
+        self.contexts: list[dict[str, Any]] = []
+        self.schema_names: list[list[str]] = []
+
+    def plan_with_context(
+        self,
+        planning_context: dict[str, Any],
+        schemas: list[dict[str, Any]],
+    ) -> PlanningResult:
+        self.contexts.append(planning_context)
+        self.schema_names.append(
+            [str(item.get("function", {}).get("name")) for item in schemas]
+        )
+        return PlanningResult(
+            tool_calls=[],
+            direct_answer="图中是一块蓝色区域。",
+        )
+
+    def plan(
+        self,
+        _: str,
+        __: list[dict[str, Any]],
+    ) -> PlanningResult:
+        raise AssertionError("视觉 Planner 应收到结构化上下文")
+
+    def continue_plan(
+        self,
+        _: str,
+        __: PlanningResult,
+        ___: list[ToolObservation],
+        ____: list[dict[str, Any]],
+    ) -> PlanningResult:
+        raise AssertionError("直接视觉问答不应进入工具重规划")
+
+    def compose_answer(
+        self,
+        _: str,
+        __: PlanningResult,
+        ___: list[ToolObservation],
+    ) -> str:
+        raise AssertionError("直接视觉问答已有模型答案")
 
 
 def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
@@ -103,6 +154,76 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         assert client.get(style_preview).status_code == 200
         assert not (spatial.source_image_dir / content.id).exists()
         assert not (spatial.source_image_dir / reference.id).exists()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_visual_question_bypasses_image_tools_and_supports_followup(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    planner = CapturingVisionPlanner()
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            planner=planner,
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+    try:
+        source = spatial.stage_source_image(
+            _png("#315a84"),
+            original_name="question.png",
+        )
+        response = client.post(
+            "/api/agent/run",
+            json={
+                "message": "分析一下图片中是什么",
+                "session_id": "vision-question",
+                "attachment_image_ids": [source.id],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["answer"] == "图中是一块蓝色区域。"
+        assert body["steps"][-1]["output"]["attachment_action"] == "vision"
+        assert planner.schema_names[0] == []
+        assert planner.contexts[0]["_vision_inputs"][0]["source_image_id"] == (
+            source.id
+        )
+        assert (spatial.source_image_dir / source.id).exists()
+
+        messages = client.get(
+            "/api/conversations/vision-question/messages"
+        ).json()["messages"]
+        user_message = next(item for item in messages if item["role"] == "user")
+        preview_url = user_message["metadata"]["attachments"][0]["preview_url"]
+        assert preview_url == f"/api/source-images/{source.id}/content"
+        assert client.get(preview_url).status_code == 200
+
+        followup = client.post(
+            "/api/agent/run",
+            json={
+                "message": "这张图里还有什么？",
+                "session_id": "vision-question",
+            },
+        )
+        assert followup.status_code == 200
+        assert followup.json()["steps"][-1]["output"][
+            "attachment_action"
+        ] == "vision_followup"
+        assert planner.schema_names[1] == []
+        assert planner.contexts[1]["_vision_inputs"][0]["source_image_id"] == (
+            source.id
+        )
+        checkpoint_bytes = (tmp_path / "agent_checkpoints.sqlite3").read_bytes()
+        assert b"data:image" not in checkpoint_bytes
     finally:
         style.close()
         spatial.close()

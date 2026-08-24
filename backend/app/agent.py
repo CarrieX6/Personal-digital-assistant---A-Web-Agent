@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -7,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Literal, Protocol
 from uuid import uuid4
 
 from .context import ContextBuilder
@@ -45,6 +46,26 @@ _SPATIAL_TASK_TERMS = (
     "2.5d",
     "视差",
 )
+_VISUAL_FOLLOWUP_TERMS = (
+    "图中",
+    "图片中",
+    "照片中",
+    "画面中",
+    "这张图",
+    "这张图片",
+    "这幅图",
+    "这个图片",
+    "看图",
+    "识别",
+    "描述",
+    "分析",
+    "是什么",
+    "有什么",
+    "在哪里",
+    "文字",
+    "ocr",
+    "它",
+)
 _ORDINAL_INDEX = {
     "一": 0,
     "二": 1,
@@ -72,8 +93,9 @@ def _route_image_attachments(
     dict[str, Any] | None,
     list[dict[str, Any]],
     str | None,
+    Literal["vision", "spatial", "style"],
 ]:
-    """Assign generic ordered images only after the user states an intent."""
+    """Separate visual understanding from explicit image-generation tools."""
 
     lowered = message.casefold()
     style_requested = any(term in lowered for term in _STYLE_TASK_TERMS)
@@ -87,6 +109,7 @@ def _route_image_attachments(
                 [],
                 "已收到 1 张图片。图片风格化还需要至少 1 张参考图；"
                 "请继续添加附件，或改为说明要生成空间照片。",
+                "style",
             )
         content_index = _requested_attachment_index(message, count) or 0
         content = attachments[content_index]
@@ -95,28 +118,28 @@ def _route_image_attachments(
             for index, item in enumerate(attachments)
             if index != content_index
         ][:3]
-        return content, styles, None
+        return content, styles, None, "style"
 
     if spatial_requested:
         if count == 1:
-            return attachments[0], [], None
+            return attachments[0], [], None, "spatial"
         requested_index = _requested_attachment_index(message, count)
         if requested_index is not None:
-            return attachments[requested_index], [], None
+            return attachments[requested_index], [], None, "spatial"
         return (
             None,
             [],
             f"已收到 {count} 张图片。空间照片一次使用一张内容图，"
             "请说明使用第几张图片，例如“用第一张生成空间照片”。",
+            "spatial",
         )
 
-    return (
-        None,
-        [],
-        f"已收到 {count} 张图片。请说明希望如何处理："
-        "可以生成空间照片，或在至少两张图片时进行风格化；"
-        "风格化默认使用第一张作为内容图，其余图片作为参考图。",
-    )
+    return None, [], None, "vision"
+
+
+def _looks_like_visual_followup(message: str) -> bool:
+    lowered = message.casefold()
+    return any(term in lowered for term in _VISUAL_FOLLOWUP_TERMS)
 
 
 @dataclass
@@ -352,6 +375,7 @@ class AgentRunner:
         memory_store: SQLiteMemoryStore | None = None,
         checkpoint_path: Path | None = None,
         context_builder: ContextBuilder | None = None,
+        image_loader: Callable[[str, str], tuple[str, bytes]] | None = None,
     ) -> None:
         self.registry = registry
         self.planner = planner
@@ -361,6 +385,7 @@ class AgentRunner:
             trace_store.path.parent / "agent_memory.sqlite3"
         )
         self.context_builder = context_builder or ContextBuilder()
+        self.image_loader = image_loader
         from .orchestration import LangGraphOrchestrator
 
         self.orchestrator = LangGraphOrchestrator(
@@ -409,18 +434,29 @@ class AgentRunner:
             )
 
         generic_attachments = list(attachment_contexts or [])
+        vision_attachments: list[dict[str, Any]] = []
+        vision_inputs: list[dict[str, str]] = []
         attachment_routing: dict[str, Any] | None = None
         if generic_attachments:
             (
                 source_image_context,
                 style_image_contexts,
                 clarification,
+                attachment_intent,
             ) = _route_image_attachments(message, generic_attachments)
             attachment_ids = [
                 str(item.get("id", ""))
                 for item in generic_attachments
                 if item.get("id")
             ]
+            if attachment_intent == "vision" and (
+                not self.planner.is_llm or self.image_loader is None
+            ):
+                clarification = (
+                    f"已收到 {len(generic_attachments)} 张图片，但当前没有启用可接收"
+                    "图片输入的真实模型。请先在模型设置中启用视觉模型；也可以明确"
+                    "要求生成空间照片，或在至少两张图片时进行风格化。"
+                )
             if clarification is not None:
                 return self._direct_response(
                     message=message,
@@ -438,6 +474,7 @@ class AgentRunner:
                         "attachments": [
                             {
                                 "name": item.get("original_name"),
+                                "source_image_id": item.get("id"),
                                 "width": item.get("width"),
                                 "height": item.get("height"),
                             }
@@ -445,38 +482,80 @@ class AgentRunner:
                         ]
                     },
                 )
-            used_ids = {
-                str(item.get("id", ""))
-                for item in [
-                    source_image_context,
-                    *(style_image_contexts or []),
-                ]
-                if item and item.get("id")
-            }
+            if attachment_intent == "vision":
+                vision_attachments = generic_attachments
+                attachment_routing = {
+                    "attachment_action": "vision",
+                    "vision_image_ids": attachment_ids,
+                    # Keep recent vision inputs briefly for preview and follow-up.
+                    # The staged-image cleanup policy removes stale files.
+                    "release_image_ids": [],
+                }
+            else:
+                used_ids = {
+                    str(item.get("id", ""))
+                    for item in [
+                        source_image_context,
+                        *(style_image_contexts or []),
+                    ]
+                    if item and item.get("id")
+                }
+                attachment_routing = {
+                    "attachment_action": "assigned",
+                    "content_image_id": (
+                        source_image_context.get("id")
+                        if source_image_context
+                        else None
+                    ),
+                    "style_image_ids": [
+                        item.get("id") for item in (style_image_contexts or [])
+                    ],
+                    "release_image_ids": [
+                        item for item in attachment_ids if item not in used_ids
+                    ],
+                }
+        elif (
+            self.planner.is_llm
+            and self.image_loader is not None
+            and conversation.recent_attachments
+            and _looks_like_visual_followup(message)
+        ):
+            vision_attachments = list(conversation.recent_attachments)
             attachment_routing = {
-                "attachment_action": "assigned",
-                "content_image_id": (
-                    source_image_context.get("id")
-                    if source_image_context
-                    else None
-                ),
-                "style_image_ids": [
-                    item.get("id") for item in (style_image_contexts or [])
+                "attachment_action": "vision_followup",
+                "vision_image_ids": [
+                    item.get("id") for item in vision_attachments if item.get("id")
                 ],
-                "release_image_ids": [
-                    item for item in attachment_ids if item not in used_ids
-                ],
+                "release_image_ids": [],
             }
+
+        if vision_attachments:
+            vision_inputs = self._load_vision_inputs(
+                vision_attachments,
+                owner_id=owner_id,
+            )
+            if not vision_inputs:
+                if generic_attachments:
+                    raise AgentRunError("图片视觉输入无法读取，请重新上传后重试。")
+                vision_attachments = []
+                if attachment_routing is not None:
+                    attachment_routing = None
 
         context_builder = ContextBuilder(
             self.context_builder.config,
             system_prompt=str(getattr(self.planner, "system_prompt", "")),
         )
         all_tool_schemas = self.registry.openai_schemas()
-        selected_tool_schemas = context_builder.select_tools(
-            user_message=message,
-            tool_schemas=all_tool_schemas,
-            attachment_present=bool(source_image_context or style_image_contexts),
+        selected_tool_schemas = (
+            []
+            if vision_inputs
+            else context_builder.select_tools(
+                user_message=message,
+                tool_schemas=all_tool_schemas,
+                attachment_present=bool(
+                    source_image_context or style_image_contexts
+                ),
+            )
         )
         built_context = context_builder.build(
             current_user_message=message,
@@ -488,6 +567,10 @@ class AgentRunner:
             open_loops=conversation.open_loops,
             decisions=conversation.decisions,
             attachments=[
+                *[
+                    {**item, "attachment_role": "vision"}
+                    for item in vision_attachments
+                ],
                 *(
                     [{**source_image_context, "attachment_role": "content"}]
                     if source_image_context
@@ -530,6 +613,7 @@ class AgentRunner:
             run_id=run_id,
             planner_context=built_context.to_planner_context(),
             selected_tool_names=list(built_context.selected_tool_names),
+            vision_inputs=vision_inputs,
         )
         response = self._response_from_state(
             graph_state,
@@ -574,6 +658,16 @@ class AgentRunner:
                     "source_image_id": item.get("id"),
                     "width": item.get("width"),
                     "height": item.get("height"),
+                    **(
+                        {
+                            "preview_url": (
+                                f"/api/source-images/{item.get('id')}/content"
+                            )
+                        }
+                        if attachment_routing
+                        and attachment_routing.get("attachment_action") == "vision"
+                        else {}
+                    ),
                     **(
                         {
                             "preview_url": (
@@ -649,6 +743,39 @@ class AgentRunner:
             thread_id=thread_id,
         )
         return response
+
+    def _load_vision_inputs(
+        self,
+        attachments: list[dict[str, Any]],
+        *,
+        owner_id: str,
+    ) -> list[dict[str, str]]:
+        if self.image_loader is None:
+            return []
+        inputs: list[dict[str, str]] = []
+        for item in attachments[:4]:
+            source_image_id = item.get("id")
+            if not isinstance(source_image_id, str) or not source_image_id:
+                continue
+            try:
+                media_type, image_bytes = self.image_loader(
+                    source_image_id,
+                    owner_id,
+                )
+            except (OSError, ValueError):
+                continue
+            if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+                continue
+            inputs.append(
+                {
+                    "source_image_id": source_image_id,
+                    "data_url": (
+                        f"data:{media_type};base64,"
+                        + base64.b64encode(image_bytes).decode("ascii")
+                    ),
+                }
+            )
+        return inputs
 
     def get_run(
         self,

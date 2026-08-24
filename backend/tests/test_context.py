@@ -221,6 +221,91 @@ def test_real_planner_receives_structured_role_history() -> None:
     ]
 
 
+def test_real_planner_sends_vision_parts_without_persisting_image_data() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "图中是一只猫。",
+                        }
+                    }
+                ]
+            },
+        )
+
+    planner = OpenAICompatiblePlanner(
+        api_key="test",
+        base_url="https://model.example/v1",
+        model="vision-test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    plan = planner.plan_with_context(
+        {
+            "messages": [{"role": "user", "content": "图中是什么？"}],
+            "attachments": [
+                {
+                    "trusted_system": {
+                        "source_image_id": "image-1",
+                        "attachment_role": "vision",
+                    }
+                }
+            ],
+            "_vision_inputs": [
+                {
+                    "source_image_id": "image-1",
+                    "data_url": "data:image/webp;base64,AAAA",
+                }
+            ],
+        },
+        [],
+    )
+
+    content = requests[0]["messages"][-1]["content"]
+    assert content[0] == {"type": "text", "text": "图中是什么？"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"] == "data:image/webp;base64,AAAA"
+    assert plan.direct_answer == "图中是一只猫。"
+    assert plan.provider_context is None
+
+
+def test_context_does_not_include_summary_covered_raw_messages(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.sqlite3")
+    for index in range(8):
+        store.append_message(
+            owner_id="user-a",
+            thread_id="thread-a",
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"消息 {index}",
+        )
+
+    context = store.context(
+        owner_id="user-a",
+        thread_id="thread-a",
+        channel="test",
+        query="消息",
+    )
+
+    assert context.session_summary
+    assert context.messages == [
+        ("assistant", "消息 3"),
+        ("user", "消息 4"),
+        ("assistant", "消息 5"),
+        ("user", "消息 6"),
+        ("assistant", "消息 7"),
+    ]
+
+
 class CapturingPlanner:
     mode = "capture-context"
     is_llm = True

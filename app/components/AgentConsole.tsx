@@ -676,7 +676,7 @@ export function AgentConsole({
       return;
     }
     const threadId = selectedLocal.id;
-    const userText = message.trim() || "请处理这些附件";
+    const userText = message.trim() || "请分析这些图片";
     const pendingAttachments = [...attachments];
     const userMessage: LocalMessage = {
       id: makeId(),
@@ -779,7 +779,7 @@ export function AgentConsole({
               ? "photo_style_transfer"
               : "spatial_scene",
         });
-      } else {
+      } else if (attachmentAction !== "vision") {
         await Promise.all(
           stagedImages.map((image) =>
             fetch(`${apiBase}/api/source-images/${image.id}`, {
@@ -1148,7 +1148,7 @@ export function AgentConsole({
                   </article>
                 ))}
                 <span className="composer-attachment-note">
-                  {attachments.length}/4 · 发送后由 Agent 判断图片用途
+                  {attachments.length}/4 · 可直接看图问答；生成类任务需明确说明用途
                 </span>
               </div>
             ) : null}

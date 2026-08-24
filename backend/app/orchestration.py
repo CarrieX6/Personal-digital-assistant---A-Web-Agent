@@ -208,6 +208,7 @@ class LangGraphOrchestrator:
             self.max_steps * 5 + self.max_replans * 3 + 10,
         )
         self._lock = threading.Lock()
+        self._transient_vision_inputs: dict[str, list[dict[str, str]]] = {}
         self._connection = sqlite3.connect(
             checkpoint_path,
             check_same_thread=False,
@@ -272,6 +273,7 @@ class LangGraphOrchestrator:
         run_id: str | None = None,
         planner_context: dict[str, Any] | None = None,
         selected_tool_names: list[str] | None = None,
+        vision_inputs: list[dict[str, str]] | None = None,
     ) -> AgentGraphState:
         selected_run_id = run_id or str(uuid4())
         selected_names = (
@@ -308,7 +310,14 @@ class LangGraphOrchestrator:
         }
         config = self._config(context.thread_id)
         with self._lock:
-            result = self.graph.invoke(initial, config)
+            if vision_inputs:
+                self._transient_vision_inputs[selected_run_id] = list(
+                    vision_inputs
+                )
+            try:
+                result = self.graph.invoke(initial, config)
+            finally:
+                self._transient_vision_inputs.pop(selected_run_id, None)
         return self._with_interrupt(result)
 
     def resume(
@@ -354,8 +363,12 @@ class LangGraphOrchestrator:
         tool_schemas = self._selected_tool_schemas(state)
         plan_with_context = getattr(self.planner, "plan_with_context", None)
         if callable(plan_with_context) and state["planner_context"]:
+            planning_context = dict(state["planner_context"])
+            vision_inputs = self._transient_vision_inputs.get(state["run_id"])
+            if vision_inputs:
+                planning_context["_vision_inputs"] = vision_inputs
             plan = plan_with_context(
-                state["planner_context"],
+                planning_context,
                 tool_schemas,
             )
         else:

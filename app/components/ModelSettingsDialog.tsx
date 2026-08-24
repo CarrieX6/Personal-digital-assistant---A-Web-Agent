@@ -458,7 +458,7 @@ export function ModelSettingsDialog({
             <h2 id="model-settings-title">模型供应商设置</h2>
             <p id="model-settings-description">
               选择供应商并同时验证基础问答与 Tool Calling。只有点击“保存并启用”
-              后，真实模型才会接管对话。
+              后，真实模型才会接管对话；看图问答还要求所填模型支持图片输入。
             </p>
           </div>
           <button
@@ -514,7 +514,7 @@ export function ModelSettingsDialog({
                   onChange={(event) =>
                     setDraft({ ...draft, model: event.target.value })
                   }
-                  placeholder="输入支持 Tool Calling 的模型 ID"
+                  placeholder="输入支持 Tool Calling；看图时还需支持视觉"
                   required
                 />
                 <datalist id="provider-models">
@@ -603,7 +603,9 @@ export function ModelSettingsDialog({
                   查看供应商官方文档
                 </a>
               ) : (
-                <span>自定义服务需要兼容 Chat Completions Tool Calling。</span>
+                <span>
+                  自定义服务需兼容 Chat Completions；视觉模型还需支持 image_url。
+                </span>
               )}
               {hasKeyForDraft ? (
                 <button
