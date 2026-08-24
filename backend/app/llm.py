@@ -20,7 +20,8 @@ SYSTEM_PROMPT = """你是 Agent Lab 的个人数字助手。
 3. 普通知识问答不需要调用工具；只有任务确实依赖工具能力时才调用。一个任务
    可以调用多个互补工具。
 4. 每轮优先只调用完成下一步所需的工具。工具结果返回后，如果还需工具就继续
-   调用；目标完成后用简洁中文回答用户。
+   调用；目标完成后用简洁中文回答用户。调用工具时必须使用接口原生的
+   tool_calls 字段，不要把 <tool_call> 或 JSON 调用内容写进普通回答。
 5. 如果现有工具无法完成任务，直接说明能力边界，不要伪造结果。
 6. 当附件标记为 vision 时，原图会作为当前用户消息的视觉输入提供；直接根据图像
    回答用户的识别、描述、比较、OCR 和追问，不要把视觉问答改成图片生成任务。
@@ -153,7 +154,10 @@ class OpenAICompatiblePlanner:
             tools=tool_schemas,
             tool_choice="auto" if tool_schemas else None,
         )
-        tool_calls = self._parse_tool_calls(assistant_message.get("tool_calls", []))
+        tool_calls, assistant_message = self._resolve_tool_calls(
+            assistant_message,
+            tool_schemas,
+        )
         if vision_inputs and tool_calls:
             raise LLMError("视觉问答被限制为直接回答，不能在同一轮自动调用工具。")
         return PlanningResult(
@@ -272,8 +276,9 @@ class OpenAICompatiblePlanner:
             tools=tool_schemas,
             tool_choice="auto",
         )
-        tool_calls = self._parse_tool_calls(
-            assistant_message.get("tool_calls", [])
+        tool_calls, assistant_message = self._resolve_tool_calls(
+            assistant_message,
+            tool_schemas,
         )
         return PlanningResult(
             tool_calls=tool_calls,
@@ -360,6 +365,105 @@ class OpenAICompatiblePlanner:
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
                 raise LLMError("模型返回了无效的工具调用参数。") from exc
         return parsed
+
+    @classmethod
+    def _resolve_tool_calls(
+        cls,
+        assistant_message: dict[str, Any],
+        tool_schemas: list[dict[str, Any]],
+    ) -> tuple[list[ToolCall], dict[str, Any]]:
+        """Normalize native and common text-encoded tool calls.
+
+        Some OpenAI-compatible visual models ignore ``tool_choice`` and put a
+        JSON call after a ``<tool_call>`` marker in ordinary text. Accept that
+        narrow compatibility form only for tools exposed in this exact turn,
+        then rebuild a native assistant tool-call message so the following
+        tool result remains valid Chat Completions history.
+        """
+
+        native_calls = cls._parse_tool_calls(
+            assistant_message.get("tool_calls", [])
+        )
+        if native_calls:
+            return native_calls, assistant_message
+
+        content = _content_as_text(assistant_message.get("content"))
+        text_call = cls._parse_text_tool_call(content, tool_schemas)
+        if text_call is None:
+            return [], assistant_message
+
+        normalized = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": text_call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": text_call.name,
+                        "arguments": json.dumps(
+                            text_call.arguments,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            ],
+        }
+        return [text_call], normalized
+
+    @staticmethod
+    def _parse_text_tool_call(
+        content: str,
+        tool_schemas: list[dict[str, Any]],
+    ) -> ToolCall | None:
+        marker = "<tool_call>"
+        marker_index = content.find(marker)
+        if marker_index < 0:
+            return None
+
+        payload = content[marker_index + len(marker) :].lstrip()
+        if payload.startswith("```"):
+            first_line_end = payload.find("\n")
+            if first_line_end < 0:
+                raise LLMError("模型返回了无效的文本工具调用。")
+            payload = payload[first_line_end + 1 :].lstrip()
+        try:
+            raw_call, _ = json.JSONDecoder().raw_decode(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LLMError("模型返回了无效的文本工具调用。") from exc
+        if not isinstance(raw_call, dict):
+            raise LLMError("模型返回了无效的文本工具调用。")
+
+        function = raw_call.get("function")
+        call_data = function if isinstance(function, dict) else raw_call
+        name = call_data.get("name") or raw_call.get("action")
+        arguments = call_data.get(
+            "arguments",
+            raw_call.get("parameters", {}),
+        )
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                raise LLMError("模型返回了无效的文本工具调用参数。") from exc
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            raise LLMError("模型返回了无效的文本工具调用参数。")
+
+        allowed_names = {
+            str(function_schema.get("name"))
+            for schema in tool_schemas
+            if isinstance(schema, dict)
+            and isinstance((function_schema := schema.get("function")), dict)
+            and function_schema.get("name")
+        }
+        if name not in allowed_names:
+            raise LLMError(f"模型请求了当前未授权的工具：{name}。")
+        return ToolCall(
+            call_id=f"call_{uuid4().hex}",
+            name=name,
+            arguments=arguments,
+        )
 
 
 def build_planner_from_env(

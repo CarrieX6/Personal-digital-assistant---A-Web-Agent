@@ -690,23 +690,30 @@ class LangGraphOrchestrator:
         round_observations = self._deserialize_observations(
             state["round_observations"]
         )
-        continue_plan = getattr(self.planner, "continue_plan", None)
-        if callable(continue_plan):
-            next_plan = continue_plan(
-                state["message"],
-                current_plan,
-                round_observations,
-                self._selected_tool_schemas(state),
-            )
-        else:
+        async_handoff = self._async_job_handoff(round_observations)
+        if async_handoff:
             next_plan = PlanningResult(
                 tool_calls=[],
-                direct_answer=self.planner.compose_answer(
+                direct_answer=async_handoff,
+            )
+        else:
+            continue_plan = getattr(self.planner, "continue_plan", None)
+            if callable(continue_plan):
+                next_plan = continue_plan(
                     state["message"],
                     current_plan,
                     round_observations,
-                ),
-            )
+                    self._selected_tool_schemas(state),
+                )
+            else:
+                next_plan = PlanningResult(
+                    tool_calls=[],
+                    direct_answer=self.planner.compose_answer(
+                        state["message"],
+                        current_plan,
+                        round_observations,
+                    ),
+                )
 
         if next_plan.tool_calls and state["replan_count"] >= self.max_replans:
             return {
@@ -731,14 +738,22 @@ class LangGraphOrchestrator:
                 stage="decision",
                 label="判断下一步",
                 detail=(
-                    "工具结果仍不足，模型生成了下一轮工具调用。"
-                    if next_plan.tool_calls
-                    else "模型判断目标已经完成，进入最终回答。"
+                    "异步生成任务已创建，已交给任务监控，不在 Agent 循环内轮询。"
+                    if async_handoff
+                    else (
+                        "工具结果仍不足，模型生成了下一轮工具调用。"
+                        if next_plan.tool_calls
+                        else "模型判断目标已经完成，进入最终回答。"
+                    )
                 ),
                 duration_ms=_elapsed_ms(started),
                 output={
                     "decision": (
-                        "replan" if next_plan.tool_calls else "complete"
+                        "async_handoff"
+                        if async_handoff
+                        else (
+                            "replan" if next_plan.tool_calls else "complete"
+                        )
                     ),
                     "next_tools": [
                         call.name for call in next_plan.tool_calls
@@ -764,6 +779,31 @@ class LangGraphOrchestrator:
             ),
             "steps": steps,
         }
+
+    @staticmethod
+    def _async_job_handoff(
+        observations: list[ToolObservation],
+    ) -> str | None:
+        messages = {
+            "create_spatial_scene": (
+                "空间照片任务已创建，正在本机后台处理。完成后可在当前对话或"
+                "个人资产库查看结果。"
+            ),
+            "create_photo_style_transfer": (
+                "图片风格化任务已创建，正在本机后台处理。完成后可在当前对话或"
+                "个人资产库查看并下载结果。"
+            ),
+        }
+        for observation in reversed(observations):
+            answer = messages.get(observation.call.name)
+            if (
+                answer
+                and observation.output.get("job_id")
+                and observation.output.get("asset_id")
+                and not observation.output.get("error")
+            ):
+                return answer
+        return None
 
     @staticmethod
     def _route_after_decide(state: AgentGraphState) -> str:

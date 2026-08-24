@@ -180,8 +180,41 @@ const examples = [
   "现在几点？",
 ];
 
+const loadingPhases = [
+  "正在理解你的请求",
+  "正在整理会话上下文",
+  "正在等待模型或工具返回",
+];
+
 function makeId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function AgentLoadingIndicator() {
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    const contextTimer = window.setTimeout(() => setPhase(1), 1200);
+    const responseTimer = window.setTimeout(() => setPhase(2), 3200);
+    return () => {
+      window.clearTimeout(contextTimer);
+      window.clearTimeout(responseTimer);
+    };
+  }, []);
+
+  return (
+    <div className="message-row assistant" role="status" aria-live="polite">
+      <div className="assistant-avatar">A</div>
+      <div className="message-bubble assistant typing-bubble" aria-atomic="true">
+        <span className="typing-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="typing-label">{loadingPhases[phase]}</span>
+      </div>
+    </div>
+  );
 }
 
 export function AgentConsole({
@@ -193,6 +226,12 @@ export function AgentConsole({
 }: AgentConsoleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const followMessagesRef = useRef(true);
+  const forceMessageScrollRef = useRef(false);
+  const messageScrollSnapshotRef = useRef({
+    selectedId: "",
+    messageCount: 0,
+  });
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const [localThreads, setLocalThreads] = useState<LocalThread[]>([]);
@@ -338,6 +377,14 @@ export function AgentConsole({
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [imagePreview]);
 
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice((current) => (current === notice ? "" : current));
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
   const loadChannelMessages = useCallback(async () => {
     try {
       const response = await fetch(`${apiBase}/api/channels/messages?limit=200`, {
@@ -381,12 +428,38 @@ export function AgentConsole({
     };
   }, [loadChannelMessages, loadPendingApprovals]);
 
+  const selectedMessageCount = selectedId.startsWith("local:")
+    ? (localThreads.find((thread) => `local:${thread.id}` === selectedId)
+        ?.messages.length ?? 0)
+    : selectedId.startsWith("feishu:")
+      ? channelMessages.filter(
+          (item) => `feishu:${item.chat_id}` === selectedId,
+        ).length
+      : 0;
+
   useEffect(() => {
-    messageListRef.current?.scrollTo({
-      top: messageListRef.current.scrollHeight,
-      behavior: "smooth",
+    const viewport = messageListRef.current;
+    const previous = messageScrollSnapshotRef.current;
+    const selectionChanged = previous.selectedId !== selectedId;
+    const messageAdded = selectedMessageCount > previous.messageCount;
+    messageScrollSnapshotRef.current = {
+      selectedId,
+      messageCount: selectedMessageCount,
+    };
+
+    const shouldScroll =
+      selectionChanged ||
+      (messageAdded &&
+        (forceMessageScrollRef.current || followMessagesRef.current));
+    forceMessageScrollRef.current = false;
+    if (!viewport || !shouldScroll) return;
+
+    if (selectionChanged) followMessagesRef.current = true;
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: "auto",
     });
-  }, [localThreads, selectedId, channelMessages, loading, job]);
+  }, [selectedId, selectedMessageCount]);
 
   useEffect(() => {
     if (!deleteTarget) return;
@@ -676,6 +749,7 @@ export function AgentConsole({
       return;
     }
     const threadId = selectedLocal.id;
+    forceMessageScrollRef.current = true;
     const userText = message.trim() || "请分析这些图片";
     const pendingAttachments = [...attachments];
     const userMessage: LocalMessage = {
@@ -1020,7 +1094,17 @@ export function AgentConsole({
           </section>
         ) : null}
 
-        <div className="chat-message-scroll" ref={messageListRef} aria-live="polite">
+        <div
+          className="chat-message-scroll"
+          ref={messageListRef}
+          aria-live="polite"
+          onScroll={(event) => {
+            const viewport = event.currentTarget;
+            const distanceFromBottom =
+              viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+            followMessagesRef.current = distanceFromBottom <= 120;
+          }}
+        >
           {selectedLocal ? (
             selectedLocal.messages.length ? (
               selectedLocal.messages.map((item) => (
@@ -1045,17 +1129,7 @@ export function AgentConsole({
             <ChatWelcome onExample={setMessage} />
           )}
 
-          {loading ? (
-            <div className="message-row assistant">
-              <div className="assistant-avatar">A</div>
-              <div className="message-bubble assistant typing-bubble">
-                <span />
-                <span />
-                <span />
-                <strong>正在规划和调用工具</strong>
-              </div>
-            </div>
-          ) : null}
+          {loading ? <AgentLoadingIndicator /> : null}
 
           {job ? (
             <div className="message-row assistant">

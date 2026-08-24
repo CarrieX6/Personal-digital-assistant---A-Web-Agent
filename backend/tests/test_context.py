@@ -221,6 +221,49 @@ def test_real_planner_receives_structured_role_history() -> None:
     ]
 
 
+def test_real_planner_normalizes_text_encoded_tool_call() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "我将创建空间照片。\n"
+                                '<tool_call>{"action":"create_spatial_scene",'
+                                '"parameters":{"source_image_id":"image-1"}}'
+                            ),
+                        }
+                    }
+                ]
+            },
+        )
+
+    planner = OpenAICompatiblePlanner(
+        api_key="test",
+        base_url="https://model.example/v1",
+        model="text-tool-call-test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    plan = planner.plan_with_context(
+        {"messages": [{"role": "user", "content": "生成空间照片"}]},
+        [_schema("create_spatial_scene")],
+    )
+
+    assert len(plan.tool_calls) == 1
+    assert plan.tool_calls[0].name == "create_spatial_scene"
+    assert plan.tool_calls[0].arguments == {"source_image_id": "image-1"}
+    assert plan.direct_answer == ""
+    assert plan.provider_context is not None
+    assistant = plan.provider_context["assistant_message"]
+    assert assistant["content"] is None
+    assert assistant["tool_calls"][0]["function"]["name"] == (
+        "create_spatial_scene"
+    )
+
+
 def test_real_planner_sends_vision_parts_without_persisting_image_data() -> None:
     requests: list[dict[str, Any]] = []
 

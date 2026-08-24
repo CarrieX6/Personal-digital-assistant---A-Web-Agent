@@ -182,12 +182,23 @@ class SQLiteMemoryStore:
                     max(1, min(message_limit, 50)),
                 ),
             ).fetchall()
+            attachment_rows = connection.execute(
+                """
+                SELECT metadata_json
+                FROM agent_messages
+                WHERE owner_id = ? AND thread_id = ? AND role = 'user'
+                ORDER BY id DESC
+                LIMIT 20
+                """,
+                (owner_id, thread_id),
+            ).fetchall()
         recent_attachments: list[dict[str, Any]] = []
-        for row in message_rows:
-            if str(row[0]) != "user":
-                continue
+        # Attachment continuity is independent of text summarization. The
+        # latest image may have moved behind the summary boundary while its
+        # short-lived local source file is still valid for a follow-up turn.
+        for row in attachment_rows:
             try:
-                metadata = json.loads(str(row[2] or "{}"))
+                metadata = json.loads(str(row[0] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 metadata = {}
             if not isinstance(metadata, dict):

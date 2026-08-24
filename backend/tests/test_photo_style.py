@@ -11,6 +11,7 @@ from PIL import Image
 
 from backend.app.agent import PlanningResult, ToolObservation
 from backend.app.main import create_app
+from backend.app.models import ToolCall
 from backend.app.style_transfer import (
     LocalColorStyleProvider,
     PhotoStyleService,
@@ -74,6 +75,36 @@ class CapturingVisionPlanner:
         ___: list[ToolObservation],
     ) -> str:
         raise AssertionError("直接视觉问答已有模型答案")
+
+
+class VisualThenSpatialPlanner(CapturingVisionPlanner):
+    def plan_with_context(
+        self,
+        planning_context: dict[str, Any],
+        schemas: list[dict[str, Any]],
+    ) -> PlanningResult:
+        self.contexts.append(planning_context)
+        names = [
+            str(item.get("function", {}).get("name")) for item in schemas
+        ]
+        self.schema_names.append(names)
+        if len(self.contexts) == 1:
+            return PlanningResult(
+                tool_calls=[],
+                direct_answer="图中是一块蓝色区域。",
+            )
+
+        trusted = planning_context["attachments"][0]["trusted_system"]
+        return PlanningResult(
+            tool_calls=[
+                ToolCall(
+                    name="create_spatial_scene",
+                    arguments={
+                        "source_image_id": trusted["source_image_id"]
+                    },
+                )
+            ]
+        )
 
 
 def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
@@ -224,6 +255,70 @@ def test_visual_question_bypasses_image_tools_and_supports_followup(
         )
         checkpoint_bytes = (tmp_path / "agent_checkpoints.sqlite3").read_bytes()
         assert b"data:image" not in checkpoint_bytes
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_spatial_followup_reuses_recent_image_in_same_conversation(
+    tmp_path: Path,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    planner = VisualThenSpatialPlanner()
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            planner=planner,
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+    try:
+        source = spatial.stage_source_image(
+            _png("#315a84"), original_name="visual.png"
+        )
+        first = client.post(
+            "/api/agent/run",
+            json={
+                "message": "分析图片中的内容",
+                "session_id": "vision-to-spatial",
+                "attachment_image_ids": [source.id],
+            },
+        )
+        assert first.status_code == 200
+        assert (spatial.source_image_dir / source.id).exists()
+
+        followup = client.post(
+            "/api/agent/run",
+            json={
+                "message": "对其进行空间图片转化",
+                "session_id": "vision-to-spatial",
+            },
+        )
+
+        assert followup.status_code == 200
+        body = followup.json()
+        tool_step = next(
+            step
+            for step in body["steps"]
+            if step["label"] == "调用 create_spatial_scene"
+        )
+        assert tool_step["output"]["job_id"]
+        assert "create_spatial_scene" in planner.schema_names[1]
+        trusted = planner.contexts[1]["attachments"][0]["trusted_system"]
+        assert trusted == {
+            "source_image_id": source.id,
+            "attachment_role": "content",
+            "width": source.width,
+            "height": source.height,
+        }
+        assert planner.contexts[1].get("_vision_inputs") is None
+        assert body["steps"][-1]["output"]["attachment_action"] == (
+            "assigned_followup"
+        )
     finally:
         style.close()
         spatial.close()

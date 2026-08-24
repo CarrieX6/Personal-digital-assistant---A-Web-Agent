@@ -129,6 +129,50 @@ class ApprovalPlanner:
         return f"已发布到 {observations[-1].output['target']}。"
 
 
+class AsyncJobPlanner:
+    mode = "test-async-job"
+    is_llm = False
+    model_name = None
+
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+        self.decisions = 0
+
+    def plan(
+        self,
+        _: str,
+        __: list[dict[str, Any]],
+    ) -> PlanningResult:
+        return PlanningResult(
+            tool_calls=[ToolCall(name=self.tool_name, arguments={})]
+        )
+
+    def continue_plan(
+        self,
+        _: str,
+        __: PlanningResult,
+        ___: list[ToolObservation],
+        ____: list[dict[str, Any]],
+    ) -> PlanningResult:
+        self.decisions += 1
+        return PlanningResult(
+            tool_calls=[
+                ToolCall(
+                    name="get_job_status",
+                    arguments={"job_id": "job-1"},
+                )
+            ]
+        )
+
+    def compose_answer(
+        self,
+        _: str,
+        __: PlanningResult,
+        ___: list[ToolObservation],
+    ) -> str:
+        raise AssertionError("异步任务创建后不应再次调用模型")
+
+
 def build_registry(executed: list[int]) -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -230,6 +274,68 @@ def test_graph_replans_after_observation_and_executes_one_tool_per_loop(
             if step["stage"] == "decision"
             and step["label"] == "判断下一步"
         ] == ["replan", "complete"]
+    finally:
+        orchestrator.close()
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "answer_fragment"),
+    [
+        ("create_spatial_scene", "空间照片任务已创建"),
+        ("create_photo_style_transfer", "图片风格化任务已创建"),
+    ],
+)
+def test_async_visual_job_hands_off_without_model_polling(
+    tmp_path: Path,
+    tool_name: str,
+    answer_fragment: str,
+) -> None:
+    planner = AsyncJobPlanner(tool_name)
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name=tool_name,
+            description="创建异步视觉任务",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=lambda _: {
+                "job_id": "job-1",
+                "asset_id": "asset-1",
+                "status": "queued",
+            },
+        )
+    )
+    orchestrator = LangGraphOrchestrator(
+        planner=planner,
+        registry=registry,
+        checkpoint_path=tmp_path / f"{tool_name}.sqlite3",
+        max_steps=4,
+        max_replans=3,
+    )
+    try:
+        state = orchestrator.invoke(
+            message="创建视觉任务",
+            context=ToolExecutionContext(
+                owner_id="user-a",
+                thread_id=f"test:{tool_name}",
+                channel="test",
+            ),
+        )
+
+        assert state["status"] == "completed"
+        assert answer_fragment in state["answer"]
+        assert state["step_count"] == 1
+        assert state["replan_count"] == 0
+        assert planner.decisions == 0
+        decision = next(
+            step
+            for step in state["steps"]
+            if step["label"] == "判断下一步"
+        )
+        assert decision["output"]["decision"] == "async_handoff"
     finally:
         orchestrator.close()
 

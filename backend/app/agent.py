@@ -40,6 +40,7 @@ _STYLE_TASK_TERMS = (
 )
 _SPATIAL_TASK_TERMS = (
     "空间照片",
+    "空间图片",
     "空间场景",
     "可动视角",
     "可拖动视角",
@@ -140,6 +141,14 @@ def _route_image_attachments(
 def _looks_like_visual_followup(message: str) -> bool:
     lowered = message.casefold()
     return any(term in lowered for term in _VISUAL_FOLLOWUP_TERMS)
+
+
+def _looks_like_image_generation_followup(message: str) -> bool:
+    lowered = message.casefold()
+    return any(
+        term in lowered
+        for term in (*_STYLE_TASK_TERMS, *_SPATIAL_TASK_TERMS)
+    )
 
 
 @dataclass
@@ -434,6 +443,16 @@ class AgentRunner:
             )
 
         generic_attachments = list(attachment_contexts or [])
+        reused_recent_attachments = False
+        if (
+            not generic_attachments
+            and source_image_context is None
+            and not style_image_contexts
+            and conversation.recent_attachments
+            and _looks_like_image_generation_followup(message)
+        ):
+            generic_attachments = list(conversation.recent_attachments)
+            reused_recent_attachments = True
         vision_attachments: list[dict[str, Any]] = []
         vision_inputs: list[dict[str, str]] = []
         attachment_routing: dict[str, Any] | None = None
@@ -458,6 +477,11 @@ class AgentRunner:
                     "要求生成空间照片，或在至少两张图片时进行风格化。"
                 )
             if clarification is not None:
+                clarification_action = (
+                    "clarification_required_followup"
+                    if reused_recent_attachments
+                    else "clarification_required"
+                )
                 return self._direct_response(
                     message=message,
                     answer=clarification,
@@ -467,8 +491,10 @@ class AgentRunner:
                     label="确认附件用途",
                     detail="Agent 尚未执行图片工具，附件角色需要用户补充说明。",
                     step_output={
-                        "attachment_action": "clarification_required",
-                        "release_image_ids": attachment_ids,
+                        "attachment_action": clarification_action,
+                        "release_image_ids": (
+                            [] if reused_recent_attachments else attachment_ids
+                        ),
                     },
                     user_metadata={
                         "attachments": [
@@ -501,7 +527,11 @@ class AgentRunner:
                     if item and item.get("id")
                 }
                 attachment_routing = {
-                    "attachment_action": "assigned",
+                    "attachment_action": (
+                        "assigned_followup"
+                        if reused_recent_attachments
+                        else "assigned"
+                    ),
                     "content_image_id": (
                         source_image_context.get("id")
                         if source_image_context
@@ -511,7 +541,9 @@ class AgentRunner:
                         item.get("id") for item in (style_image_contexts or [])
                     ],
                     "release_image_ids": [
-                        item for item in attachment_ids if item not in used_ids
+                        item
+                        for item in attachment_ids
+                        if not reused_recent_attachments and item not in used_ids
                     ],
                 }
         elif (
