@@ -111,7 +111,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 已按 [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)实现单工具循环、Policy、硬预算、Interrupt 审批、持久化 Run、Web/飞书批准与拒绝、跨重启恢复和幂等执行账本；待强制超时、运行中恢复、审批过期、Outbox 和费用预算 |
+| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `👀 评审中` | Zhuofan Xie | [PR #10](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/10) 增加原子 Run 持久化、八节点崩溃恢复、Checkpoint 身份校验、人工处置状态和写工具幂等保护；待评审，以及强制超时、审批过期、Outbox 和费用预算 |
 | `AGENT-002` | P1 | 单 Agent、多 Agent 和确定性工作流的使用边界 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 场景边界、通信成本、调试与评测方案 |
 | `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并空间照片失败任务复用原始图片的一键重试、原子抢占防重复执行、Web 恢复入口和 API 测试；待抽象为通用 Job、取消、进程级恢复、退避和通知策略 |
 | `EVAL-001` | P1 | 如何评价规划正确率、工具调用成功率和任务完成率 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准任务集、指标、回归测试入口 |
@@ -121,7 +121,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态、出站重试和任务回收；待真实断网/休眠/恢复实验与指标 |
-| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并图片预览关联、图片风格化菜单和空间任务失败后的飞书“重新生成”卡片；当前分支已将图片风格化升级为持久化草稿卡片，支持逐张、多选相册、富文本图文及 JPG/PNG/WebP 文件输入，图文同发和后续文字可持续补充模型描述，直接多图不会进入空间照片任务；自动回归覆盖旧库迁移、资源类型、路由隔离、描述传参和结果回传；待真实手机飞书回归，通用非图片文件输入/视频仍未做 |
+| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `👀 评审中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 与 [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并基础媒体回传；[PR #10](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/10) 将图片风格化升级为持久化草稿卡片，支持逐张、多选相册、富文本图文及 JPG/PNG/WebP 文件输入和描述持续补充；待评审、真实手机飞书回归，通用非图片文件输入/视频仍未做 |
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书图片预览、卡片语义化展示和按 `chat_id` 删除只读镜像；待真机验收、群聊 sender 边界、隐私保留策略和统一 Message 迁移 |
 | `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并独立 `8766` 只读 Viewer、HMAC 短时链接、文件白名单、触控/陀螺仪视差与安全响应头；待 iOS/Android 真机、弱网和链接撤销测试，GLB/3DGS 未接入 |
@@ -132,9 +132,9 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | `codex/feat-layered-memory` 已实现类型、范围、时效、证据、字段加密、结构化滚动摘要、恢复操作和记忆管理 API/UI；[2026-08-27 硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 结论为未通过，当前仍缺 preference/task 的否定与取代模型、project 贯通、跨渠道主体解析和逐摘要项来源，因此保持开发中 |
+| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #10](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/10) 实现类型、范围、时效、否定与取代、证据链、字段加密、project 贯通、显式跨渠道身份映射、结构化滚动摘要和记忆管理 API/UI；[2026-08-28 硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 9/9 通过，待评审 |
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
-| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已实现结构化/词法/本地向量混合召回、证据加权、滚动摘要、可观测 fallback 和 Token 预算；离线集 9/9、500/2000 轮存储链路及 128-owner 隔离矩阵通过，但[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md)发现模型专属实际 Token 硬门禁、真实摘要忠实度和 old/new shadow 切换尚未完成 |
+| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #10](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/10) 实现结构化/词法/本地向量混合召回、证据加权、真实模型结构化滚动摘要、完整请求 Token 硬门禁和 old/new shadow 自动切换；[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 覆盖 500/1000/2000 轮与 128-owner 隔离，待评审 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
 | `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟡 调研中` | `🧱 局部实现` | Zhuofan Xie | 图片个性化已有固定模型清单、许可/哈希门禁与独立 GPU 依赖；尚无统一下载、升级、卸载和跨能力沙箱 |
 | `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 为会话、记忆和空间资产加入 owner 隔离与增量迁移；会话增加 channel/title，消息增加 run_id/metadata，26 项后端测试通过；待补 ER 图、正式迁移工具、生命周期及备份恢复 |
@@ -155,7 +155,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 质量评分、失败检测与 2D 回退机制 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并旧功能迁移，并把产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书功能菜单和真实能力边界提示；当前分支已完成飞书图片风格化草稿、逐张/多选/图文/图片文件输入、描述持久化与真实 `prompt` 传参，自动回归覆盖输入角色、数量边界、并发路由和结果文件回传；待目标 Windows GPU 服务与真实手机飞书联调 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `👀 评审中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 与 [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并基础能力；[PR #10](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/10) 增加飞书图片风格化草稿、逐张/多选/图文/图片文件输入、描述持久化、真实 `prompt` 传参和稳定幂等键；待评审、目标 Windows GPU 服务与真实手机飞书联调 |
 
 ## 9. 虚拟试衣与数字人
 
