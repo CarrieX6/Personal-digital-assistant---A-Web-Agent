@@ -51,6 +51,7 @@ __pycache__/
 /backend/data/assets.sqlite3*
 /backend/data/agent_checkpoints.sqlite3*
 /backend/data/agent_memory.sqlite3*
+*.memory-key
 
 # vercel
 .vercel
@@ -62,3 +63,4 @@ next-env.d.ts
 /outputs/
 /work/
 /backend/models/
+/.idea/

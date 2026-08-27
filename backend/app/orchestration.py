@@ -6,8 +6,9 @@ import logging
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 from uuid import uuid4
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -31,7 +32,7 @@ class AgentGraphState(TypedDict):
     planner_context: dict[str, Any]
     selected_tool_names: list[str]
     context_budget: dict[str, Any]
-    execution_context: dict[str, str]
+    execution_context: dict[str, Any]
     plan: dict[str, Any]
     pending_calls: list[dict[str, Any]]
     round_observations: list[dict[str, Any]]
@@ -195,6 +196,7 @@ class LangGraphOrchestrator:
         max_replans: int = 3,
         max_consecutive_errors: int = 2,
         max_runtime_seconds: float = 120.0,
+        failpoint: Callable[[str, str, AgentGraphState], None] | None = None,
     ) -> None:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self.planner = planner
@@ -203,6 +205,7 @@ class LangGraphOrchestrator:
         self.max_replans = max(0, max_replans)
         self.max_consecutive_errors = max(1, max_consecutive_errors)
         self.max_runtime_seconds = max(1.0, max_runtime_seconds)
+        self._failpoint = failpoint
         self._recursion_limit = max(
             25,
             self.max_steps * 5 + self.max_replans * 3 + 10,
@@ -217,14 +220,21 @@ class LangGraphOrchestrator:
         self._ledger = SQLiteToolExecutionLedger(checkpoint_path)
 
         builder = StateGraph(AgentGraphState)
-        builder.add_node("plan", self._plan)
-        builder.add_node("policy", self._policy)
-        builder.add_node("approval", self._approval)
-        builder.add_node("execute_tool", self._execute_tool)
-        builder.add_node("observe", self._observe)
-        builder.add_node("decide", self._decide)
-        builder.add_node("finalize", self._finalize)
-        builder.add_node("fail", self._fail)
+        builder.add_node("plan", self._guard_node("plan", self._plan))
+        builder.add_node("policy", self._guard_node("policy", self._policy))
+        builder.add_node(
+            "approval", self._guard_node("approval", self._approval)
+        )
+        builder.add_node(
+            "execute_tool",
+            self._guard_node("execute_tool", self._execute_tool),
+        )
+        builder.add_node("observe", self._guard_node("observe", self._observe))
+        builder.add_node("decide", self._guard_node("decide", self._decide))
+        builder.add_node(
+            "finalize", self._guard_node("finalize", self._finalize)
+        )
+        builder.add_node("fail", self._guard_node("fail", self._fail))
 
         builder.add_edge(START, "plan")
         builder.add_conditional_edges(
@@ -265,6 +275,23 @@ class LangGraphOrchestrator:
         builder.add_edge("fail", END)
         self.graph = builder.compile(checkpointer=self._checkpointer)
 
+    def _guard_node(
+        self,
+        name: str,
+        node: Callable[[AgentGraphState], dict[str, Any]],
+    ) -> Callable[[AgentGraphState], dict[str, Any]]:
+        def guarded(state: AgentGraphState) -> dict[str, Any]:
+            if self._failpoint is not None:
+                self._failpoint(name, "before", state)
+            result = node(state)
+            if self._failpoint is not None:
+                merged = dict(state)
+                merged.update(result)
+                self._failpoint(name, "after", merged)  # type: ignore[arg-type]
+            return result
+
+        return guarded
+
     def invoke(
         self,
         *,
@@ -292,6 +319,7 @@ class LangGraphOrchestrator:
                 "owner_id": context.owner_id,
                 "thread_id": context.thread_id,
                 "channel": context.channel,
+                "project_id": context.project_id,
             },
             "plan": {},
             "pending_calls": [],
@@ -308,14 +336,24 @@ class LangGraphOrchestrator:
             "approval_required": False,
             "approval": None,
         }
-        config = self._config(context.thread_id)
+        config = self._config(
+            self.checkpoint_thread_id(context, selected_run_id)
+        )
         with self._lock:
             if vision_inputs:
                 self._transient_vision_inputs[selected_run_id] = list(
                     vision_inputs
                 )
             try:
-                result = self.graph.invoke(initial, config)
+                snapshot = self.graph.get_state(config)
+                if snapshot.values and not self._is_finalized_state(
+                    dict(snapshot.values)
+                ):
+                    raise ValueError("这个 Agent Run 已经存在执行 Checkpoint。")
+                # Seed the durable START checkpoint before any node runs. This
+                # makes a hard process exit immediately before `plan` resumable.
+                self.graph.update_state(config, initial, as_node=START)
+                result = self.graph.invoke(None, config)
             finally:
                 self._transient_vision_inputs.pop(selected_run_id, None)
         return self._with_interrupt(result)
@@ -327,8 +365,9 @@ class LangGraphOrchestrator:
         context: ToolExecutionContext,
         approved: bool,
         actor_id: str,
+        checkpoint_thread_id: str | None = None,
     ) -> AgentGraphState:
-        config = self._config(context.thread_id)
+        config = self._config(checkpoint_thread_id or context.thread_id)
         with self._lock:
             snapshot = self.graph.get_state(config)
             values = snapshot.values
@@ -338,6 +377,7 @@ class LangGraphOrchestrator:
                     "owner_id": context.owner_id,
                     "thread_id": context.thread_id,
                     "channel": context.channel,
+                    "project_id": context.project_id,
                 }
             ):
                 raise ValueError("待审批运行与当前用户或会话不匹配。")
@@ -353,6 +393,169 @@ class LangGraphOrchestrator:
                 config,
             )
         return self._with_interrupt(result)
+
+    def inspect_checkpoint(
+        self,
+        *,
+        run_id: str,
+        context: ToolExecutionContext,
+        checkpoint_thread_id: str,
+    ) -> dict[str, Any]:
+        config = self._config(checkpoint_thread_id)
+        with self._lock:
+            snapshot = self.graph.get_state(config)
+        values = dict(snapshot.values or {})
+        if not values:
+            return {
+                "exists": False,
+                "resumable": False,
+                "waiting_approval": False,
+                "terminal": False,
+                "state": {},
+                "next": [],
+            }
+        self._validate_snapshot_identity(
+            values,
+            run_id=run_id,
+            context=context,
+        )
+        waiting_approval = any(task.interrupts for task in snapshot.tasks)
+        next_nodes = list(snapshot.next)
+        status = str(values.get("status", "running"))
+        restored_state = self._with_interrupt(values)
+        if waiting_approval:
+            restored_state["status"] = "waiting_approval"
+        steps = values.get("steps", [])
+        finalized = bool(
+            isinstance(steps, list)
+            and steps
+            and isinstance(steps[-1], dict)
+            and steps[-1].get("stage") == "final"
+        )
+        repairable = not next_nodes and not waiting_approval and not finalized
+        return {
+            "exists": True,
+            "resumable": (bool(next_nodes) or repairable) and not waiting_approval,
+            "waiting_approval": waiting_approval,
+            "terminal": (
+                not next_nodes
+                and finalized
+                and status in {"completed", "failed"}
+            ),
+            "state": restored_state,
+            "next": next_nodes,
+        }
+
+    def continue_from_checkpoint(
+        self,
+        *,
+        run_id: str,
+        context: ToolExecutionContext,
+        checkpoint_thread_id: str,
+    ) -> AgentGraphState:
+        config = self._config(checkpoint_thread_id)
+        with self._lock:
+            snapshot = self.graph.get_state(config)
+            values = dict(snapshot.values or {})
+            if not values:
+                raise ValueError("找不到这个 Agent Run 的执行 Checkpoint。")
+            self._validate_snapshot_identity(
+                values,
+                run_id=run_id,
+                context=context,
+            )
+            if any(task.interrupts for task in snapshot.tasks):
+                raise ValueError("这个 Agent Run 正在等待审批，不能直接继续。")
+            if not snapshot.next:
+                if self._is_finalized_state(values):
+                    return self._with_interrupt(values)
+                self._repair_stalled_checkpoint(config, values)
+                snapshot = self.graph.get_state(config)
+                if not snapshot.next:
+                    raise ValueError("执行 Checkpoint 无法确定安全恢复节点。")
+            # The runtime guard measures active execution time. A process outage
+            # is not active work, so a recovery attempt receives a fresh lease.
+            self.graph.update_state(
+                config,
+                {"started_at": time.time()},
+            )
+            result = self.graph.invoke(None, config)
+        return self._with_interrupt(result)
+
+    @staticmethod
+    def _is_finalized_state(values: dict[str, Any]) -> bool:
+        steps = values.get("steps", [])
+        return bool(
+            isinstance(steps, list)
+            and steps
+            and isinstance(steps[-1], dict)
+            and steps[-1].get("stage") == "final"
+            and values.get("status") in {"completed", "failed"}
+        )
+
+    def _repair_stalled_checkpoint(
+        self,
+        config: dict[str, Any],
+        values: dict[str, Any],
+    ) -> None:
+        steps = values.get("steps", [])
+        as_node = START
+        if isinstance(steps, list) and steps and isinstance(steps[-1], dict):
+            last = steps[-1]
+            label = str(last.get("label", ""))
+            stage = str(last.get("stage", ""))
+            if label == "观察工具结果":
+                as_node = "observe"
+            elif label == "判断下一步":
+                as_node = "decide"
+            elif stage == "planning":
+                as_node = "plan"
+            elif stage == "policy":
+                as_node = "policy"
+            elif stage == "approval":
+                as_node = "approval"
+            elif stage == "tool":
+                as_node = "execute_tool"
+        self.graph.update_state(config, {}, as_node=as_node)
+
+    @staticmethod
+    def _validate_snapshot_identity(
+        values: dict[str, Any],
+        *,
+        run_id: str,
+        context: ToolExecutionContext,
+    ) -> None:
+        if (
+            values.get("run_id") != run_id
+            or values.get("execution_context")
+            != {
+                "owner_id": context.owner_id,
+                "thread_id": context.thread_id,
+                "channel": context.channel,
+                "project_id": context.project_id,
+            }
+        ):
+            raise ValueError("执行 Checkpoint 与当前用户、会话或 Run 不匹配。")
+
+    @staticmethod
+    def checkpoint_thread_id(
+        context: ToolExecutionContext,
+        run_id: str,
+    ) -> str:
+        canonical = json.dumps(
+            {
+                "owner_id": context.owner_id,
+                "thread_id": context.thread_id,
+                "project_id": context.project_id,
+                "run_id": run_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "agent-run:" + hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
 
     def close(self) -> None:
         with self._lock:
@@ -547,6 +750,7 @@ class LangGraphOrchestrator:
         context = ToolExecutionContext(**state["execution_context"])
         spec = self.registry.get_spec(call.name)
         idempotency_key = self._idempotency_key(state, call)
+        context = replace(context, idempotency_key=idempotency_key)
         ledger_action, ledger_output = self._ledger.prepare(
             idempotency_key=idempotency_key,
             run_id=state["run_id"],

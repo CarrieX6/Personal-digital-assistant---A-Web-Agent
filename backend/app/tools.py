@@ -18,6 +18,8 @@ class ToolExecutionContext:
     owner_id: str = "local"
     thread_id: str = "local:default"
     channel: str = "web"
+    project_id: str | None = None
+    idempotency_key: str | None = None
 
 
 _CURRENT_TOOL_CONTEXT: ContextVar[ToolExecutionContext] = ContextVar(

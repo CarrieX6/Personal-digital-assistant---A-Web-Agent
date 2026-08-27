@@ -1182,6 +1182,33 @@ def test_spatial_assets_are_isolated_by_owner(tmp_path: Path) -> None:
     spatial.close()
 
 
+def test_spatial_scene_adapter_reuses_real_idempotency_key(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    image_buffer = BytesIO()
+    Image.new("RGB", (32, 32), "green").save(image_buffer, format="PNG")
+
+    first = spatial.create_scene(
+        image_buffer.getvalue(),
+        original_name="scene.png",
+        owner_id="user-a",
+        idempotency_key="run-7:call-1",
+    )
+    second = spatial.create_scene(
+        b"this body is not decoded on replay",
+        original_name="scene.png",
+        owner_id="user-a",
+        idempotency_key="run-7:call-1",
+    )
+
+    assert second.asset.id == first.asset.id
+    assert second.job.id == first.job.id
+    assert [asset.id for asset in spatial.list_assets(owner_id="user-a")] == [
+        first.asset.id
+    ]
+    spatial.wait_for_idle()
+    spatial.close()
+
+
 def test_memory_center_crud_and_export_api(tmp_path: Path) -> None:
     settings, _ = build_test_settings(tmp_path)
     spatial = build_test_spatial(tmp_path)
@@ -1206,6 +1233,9 @@ def test_memory_center_crud_and_export_api(tmp_path: Path) -> None:
     assert memory["memory_type"] == "preference"
     assert memory["source"] == "web:memory-center"
     assert memory["status"] == "active"
+    assert memory["retrieval_policy"] == "explicit_only"
+    assert memory["evidence_count"] == 1
+    assert memory["evidence_refs"] == ["web:memory-center"]
 
     listed = client.get(
         "/api/memories",
@@ -1222,11 +1252,26 @@ def test_memory_center_crud_and_export_api(tmp_path: Path) -> None:
 
     updated = client.put(
         f"/api/memories/{memory['id']}",
-        json={"content": "我偏好仅在本机处理私人图片", "importance": 1},
+        json={
+            "content": "我偏好仅在本机处理私人图片",
+            "importance": 1,
+            "retrieval_policy": "explicit_only",
+        },
     )
     assert updated.status_code == 200
     assert updated.json()["importance"] == 1
+    assert updated.json()["retrieval_policy"] == "explicit_only"
     assert "仅在本机" in updated.json()["content"]
+    assert updated.json()["evidence_count"] == 2
+
+    evidence = client.get(f"/api/memories/{memory['id']}/evidence")
+    assert evidence.status_code == 200
+    evidence_items = evidence.json()["evidence"]
+    assert {item["source_type"] for item in evidence_items} == {
+        "explicit",
+        "revision",
+    }
+    assert all(item["content_hash"] for item in evidence_items)
 
     run = client.post(
         "/api/agent/run",
@@ -1256,4 +1301,31 @@ def test_memory_center_crud_and_export_api(tmp_path: Path) -> None:
     ).json()["memories"] == []
     remaining = client.get("/api/memories").json()["memories"]
     assert any(item["memory_type"] == "episode" for item in remaining)
+    spatial.close()
+
+
+def test_atomic_memory_api_splits_compound_statement(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+        )
+    )
+
+    response = client.post(
+        "/api/memories/atomic",
+        json={"content": "我叫林舟，住在北京，喜欢简洁回答"},
+    )
+
+    assert response.status_code == 201
+    memories = response.json()["memories"]
+    assert [item["content"] for item in memories] == [
+        "我叫林舟",
+        "我住在北京",
+        "我喜欢简洁回答",
+    ]
+    assert {item["retrieval_policy"] for item in memories} == {"always"}
     spatial.close()

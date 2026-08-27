@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import threading
@@ -15,6 +16,9 @@ from .context import ContextBuilder
 from .models import AgentRunResponse, ToolCall, TraceStep
 from .memory import MemoryPolicyError, SQLiteMemoryStore
 from .tools import ToolExecutionContext, ToolRegistry
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -390,10 +394,18 @@ class AgentRunner:
         self.planner = planner
         self.trace_store = trace_store
         self.max_steps = max_steps
-        self.memory_store = memory_store or SQLiteMemoryStore(
-            trace_store.path.parent / "agent_memory.sqlite3"
+        self._owns_memory_store = memory_store is None
+        self.context_builder = context_builder or ContextBuilder(
+            token_counter=(
+                memory_store.token_counter if memory_store is not None else None
+            )
         )
-        self.context_builder = context_builder or ContextBuilder()
+        self.memory_store = memory_store or SQLiteMemoryStore(
+            trace_store.path.parent / "agent_memory.sqlite3",
+            token_counter=self.context_builder.token_counter,
+        )
+        if context_builder is not None and memory_store is not None:
+            self.memory_store.set_token_counter(context_builder.token_counter)
         self.image_loader = image_loader
         from .orchestration import LangGraphOrchestrator
 
@@ -406,6 +418,7 @@ class AgentRunner:
             ),
             max_steps=max_steps,
         )
+        self.reconcile_incomplete_runs()
 
     def run(
         self,
@@ -417,27 +430,43 @@ class AgentRunner:
         owner_id: str = "local",
         thread_id: str = "local:default",
         channel: str = "web",
+        project_id: str | None = None,
     ) -> AgentRunResponse:
         run_started = time.perf_counter()
+        owner_id = self.memory_store.resolve_verified_subject_id(owner_id)
+        project_id = (
+            project_id.strip()[:160]
+            if isinstance(project_id, str) and project_id.strip()
+            else None
+        )
+        summary_provider = (
+            self.planner
+            if callable(getattr(self.planner, "summarize_session", None))
+            else None
+        )
+        self.memory_store.set_summary_provider(summary_provider)
         execution_context = ToolExecutionContext(
             owner_id=owner_id,
             thread_id=thread_id,
             channel=channel,
+            project_id=project_id,
         )
         conversation = self.memory_store.context(
             owner_id=owner_id,
             thread_id=thread_id,
             channel=channel,
+            project_id=project_id,
             query=message,
+            raw_history_token_budget=(
+                self.context_builder.config.recent_history_tokens
+            ),
+            summary_token_budget=(
+                self.context_builder.config.session_summary_tokens
+            ),
         )
-        memory_answer = self._handle_memory_command(
-            message,
-            execution_context,
-        )
-        if memory_answer is not None:
-            return self._direct_response(
+        if self._is_memory_command(message):
+            return self._run_memory_command(
                 message=message,
-                answer=memory_answer,
                 context=execution_context,
                 started_at=run_started,
             )
@@ -576,6 +605,7 @@ class AgentRunner:
         context_builder = ContextBuilder(
             self.context_builder.config,
             system_prompt=str(getattr(self.planner, "system_prompt", "")),
+            token_counter=self.context_builder.token_counter,
         )
         all_tool_schemas = self.registry.openai_schemas()
         selected_tool_schemas = (
@@ -598,6 +628,11 @@ class AgentRunner:
             session_summary=conversation.session_summary,
             open_loops=conversation.open_loops,
             decisions=conversation.decisions,
+            completed_actions=conversation.completed_actions,
+            active_assumptions=conversation.active_assumptions,
+            artifact_refs=conversation.artifact_refs,
+            blockers=conversation.blockers,
+            next_goal=conversation.next_goal,
             attachments=[
                 *[
                     {**item, "attachment_role": "vision"}
@@ -617,6 +652,38 @@ class AgentRunner:
         )
 
         run_id = str(uuid4())
+        initial_user_metadata: dict[str, Any] = {}
+        if generic_attachments:
+            initial_user_metadata["attachments"] = [
+                {
+                    "name": item.get("original_name"),
+                    "source_image_id": item.get("id"),
+                    "width": item.get("width"),
+                    "height": item.get("height"),
+                }
+                for item in generic_attachments
+            ]
+        elif source_image_context:
+            initial_user_metadata["attachment"] = {
+                "name": source_image_context["original_name"],
+                "source_image_id": source_image_context["id"],
+                "width": source_image_context["width"],
+                "height": source_image_context["height"],
+            }
+        if style_image_contexts and not generic_attachments:
+            initial_user_metadata["style_attachments"] = [
+                {
+                    "name": item["original_name"],
+                    "source_image_id": item["id"],
+                    "width": item["width"],
+                    "height": item["height"],
+                }
+                for item in style_image_contexts
+            ]
+        checkpoint_thread_id = self.orchestrator.checkpoint_thread_id(
+            execution_context,
+            run_id,
+        )
         try:
             self.memory_store.create_run(
                 run_id=run_id,
@@ -624,6 +691,10 @@ class AgentRunner:
                 thread_id=thread_id,
                 channel=channel,
                 message=message,
+                project_id=project_id,
+                checkpoint_thread_id=checkpoint_thread_id,
+                persist_user_message=True,
+                user_metadata=initial_user_metadata,
             )
         except ValueError as exc:
             raise AgentRunError(str(exc)) from exc
@@ -639,14 +710,18 @@ class AgentRunner:
         )
 
         self.orchestrator.planner = self.planner
-        graph_state = self.orchestrator.invoke(
-            message=message,
-            context=execution_context,
-            run_id=run_id,
-            planner_context=built_context.to_planner_context(),
-            selected_tool_names=list(built_context.selected_tool_names),
-            vision_inputs=vision_inputs,
-        )
+        try:
+            graph_state = self.orchestrator.invoke(
+                message=message,
+                context=execution_context,
+                run_id=run_id,
+                planner_context=built_context.to_planner_context(),
+                selected_tool_names=list(built_context.selected_tool_names),
+                vision_inputs=vision_inputs,
+            )
+        except Exception:
+            self.reconcile_incomplete_runs()
+            raise
         response = self._response_from_state(
             graph_state,
             started_at=run_started,
@@ -762,17 +837,253 @@ class AgentRunner:
                 }
                 for index, item in enumerate(style_image_contexts, start=1)
             ]
-        self.memory_store.append_message(
+        self.memory_store.update_run_user_message_metadata(
             owner_id=owner_id,
             thread_id=thread_id,
-            role="user",
-            content=message,
+            run_id=run_id,
             metadata=user_metadata,
         )
         self._persist_response(
             response,
             owner_id=owner_id,
             thread_id=thread_id,
+        )
+        return response
+
+    def reconcile_incomplete_runs(self) -> dict[str, int]:
+        """Classify interrupted runs from durable checkpoints without replaying work."""
+
+        records: dict[str, Any] = {}
+        for status in ("running", "resuming"):
+            for record in self.memory_store.list_runs(status=status, limit=None):
+                records[record.run_id] = record
+        counts = {
+            "scanned": len(records),
+            "recoverable": 0,
+            "waiting_approval": 0,
+            "terminal": 0,
+            "needs_attention": 0,
+        }
+        for record in records.values():
+            context = ToolExecutionContext(
+                owner_id=record.owner_id,
+                thread_id=record.thread_id,
+                channel=record.channel,
+                project_id=record.project_id,
+            )
+            checkpoint_thread_id = (
+                record.checkpoint_thread_id or record.thread_id
+            )
+            try:
+                checkpoint = self.orchestrator.inspect_checkpoint(
+                    run_id=record.run_id,
+                    context=context,
+                    checkpoint_thread_id=checkpoint_thread_id,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Unable to inspect checkpoint for interrupted run %s (%s).",
+                    record.run_id,
+                    type(exc).__name__,
+                )
+                checkpoint = {"exists": False}
+
+            state = checkpoint.get("state")
+            if checkpoint.get("terminal") and isinstance(state, dict):
+                response = self._response_from_state(state, started_at=time.perf_counter())
+                self._persist_response(
+                    response,
+                    owner_id=record.owner_id,
+                    thread_id=record.thread_id,
+                )
+                counts["terminal"] += 1
+                continue
+            if checkpoint.get("waiting_approval") and isinstance(state, dict):
+                waiting_state = dict(state)
+                waiting_state["status"] = "waiting_approval"
+                response = self._response_from_state(
+                    waiting_state,
+                    started_at=time.perf_counter(),
+                )
+                self._persist_response(
+                    response,
+                    owner_id=record.owner_id,
+                    thread_id=record.thread_id,
+                )
+                counts["waiting_approval"] += 1
+                continue
+            if checkpoint.get("resumable") and isinstance(state, dict):
+                response = AgentRunResponse(
+                    run_id=record.run_id,
+                    status="recoverable",
+                    mode=self.planner.mode,
+                    answer=(
+                        "任务执行曾被中断，已找到一致的执行 Checkpoint，"
+                        "可以从上次安全边界继续。"
+                    ),
+                    steps=[
+                        TraceStep.model_validate(item)
+                        for item in state.get("steps", [])
+                    ],
+                    total_duration_ms=0,
+                )
+                self.memory_store.update_run(
+                    run_id=record.run_id,
+                    status=response.status,
+                    approval=None,
+                    response=response.model_dump(mode="json"),
+                )
+                counts["recoverable"] += 1
+                continue
+
+            response = AgentRunResponse(
+                run_id=record.run_id,
+                status="needs_attention",
+                mode=self.planner.mode,
+                answer=(
+                    "任务执行曾被中断，但没有找到可验证的一致 Checkpoint；"
+                    "系统不会猜测或重复执行可能产生副作用的步骤。"
+                ),
+                steps=[],
+                total_duration_ms=0,
+            )
+            self.memory_store.update_run(
+                run_id=record.run_id,
+                status=response.status,
+                approval=None,
+                response=response.model_dump(mode="json"),
+            )
+            counts["needs_attention"] += 1
+        return counts
+
+    def continue_run(
+        self,
+        run_id: str,
+        *,
+        requester_owner_id: str | None = None,
+        is_admin: bool = False,
+    ) -> AgentRunResponse:
+        record = self.memory_store.get_run(run_id)
+        if record is None:
+            raise AgentRunError("找不到这个 Agent Run。")
+        if not is_admin and record.owner_id != requester_owner_id:
+            raise AgentRunIsolationError("不能继续其他用户的 Agent Run。")
+        if record.status in {"completed", "failed", "waiting_approval"}:
+            if record.response is not None:
+                return AgentRunResponse.model_validate(record.response)
+            raise AgentRunError("这个 Agent Run 当前不能直接继续。")
+        if record.status != "recoverable":
+            raise AgentRunError("这个 Agent Run 没有可安全继续的 Checkpoint。")
+
+        owner_filter = None if is_admin else record.owner_id
+        if not self.memory_store.begin_continue(
+            run_id=run_id,
+            owner_id=owner_filter,
+        ):
+            latest = self.memory_store.get_run(run_id)
+            if latest is not None and latest.response is not None:
+                return AgentRunResponse.model_validate(latest.response)
+            raise AgentRunError("这个 Agent Run 正在由另一个请求恢复。")
+
+        context = ToolExecutionContext(
+            owner_id=record.owner_id,
+            thread_id=record.thread_id,
+            channel=record.channel,
+            project_id=record.project_id,
+        )
+        started = time.perf_counter()
+        self.orchestrator.planner = self.planner
+        try:
+            graph_state = self.orchestrator.continue_from_checkpoint(
+                run_id=run_id,
+                context=context,
+                checkpoint_thread_id=(
+                    record.checkpoint_thread_id or record.thread_id
+                ),
+            )
+            response = self._response_from_state(
+                graph_state,
+                started_at=started,
+            )
+            self._persist_response(
+                response,
+                owner_id=record.owner_id,
+                thread_id=record.thread_id,
+            )
+            return response
+        except Exception:
+            recovery_response = record.response or AgentRunResponse(
+                run_id=run_id,
+                status="recoverable",
+                mode=self.planner.mode,
+                answer="恢复尝试失败，原 Checkpoint 保持不变，可以稍后重试或明确终止。",
+                steps=[],
+                total_duration_ms=0,
+            ).model_dump(mode="json")
+            self.memory_store.update_run(
+                run_id=run_id,
+                status="recoverable",
+                approval=None,
+                response=recovery_response,
+            )
+            raise
+
+    def abandon_interrupted_run(
+        self,
+        run_id: str,
+        *,
+        requester_owner_id: str | None = None,
+        is_admin: bool = False,
+    ) -> AgentRunResponse:
+        """Close an interrupted run without replaying uncertain side effects."""
+
+        record = self.memory_store.get_run(run_id)
+        if record is None:
+            raise AgentRunError("找不到这个 Agent Run。")
+        if not is_admin and record.owner_id != requester_owner_id:
+            raise AgentRunIsolationError("不能处置其他用户的 Agent Run。")
+        if record.status in {"completed", "failed", "waiting_approval"}:
+            if record.response is not None:
+                return AgentRunResponse.model_validate(record.response)
+            raise AgentRunError("这个 Agent Run 当前不能标记为失败。")
+        if record.status not in {"recoverable", "needs_attention"}:
+            raise AgentRunError("这个 Agent Run 当前正在执行，不能直接终止。")
+
+        owner_filter = None if is_admin else record.owner_id
+        if not self.memory_store.begin_abandon(
+            run_id=run_id,
+            owner_id=owner_filter,
+        ):
+            latest = self.memory_store.get_run(run_id)
+            if latest is not None and latest.response is not None:
+                return AgentRunResponse.model_validate(latest.response)
+            raise AgentRunError("这个 Agent Run 已被另一个请求处置。")
+
+        previous_steps = []
+        if record.response is not None:
+            previous_steps = [
+                TraceStep.model_validate(item)
+                for item in record.response.get("steps", [])
+            ]
+        response = AgentRunResponse(
+            run_id=run_id,
+            status="failed",
+            mode=(
+                str(record.response.get("mode"))
+                if record.response is not None and record.response.get("mode")
+                else self.planner.mode
+            ),
+            answer=(
+                "该中断任务已被明确终止。系统没有重放未确认的步骤，"
+                "你现在可以在原会话发起新任务。"
+            ),
+            steps=previous_steps,
+            total_duration_ms=0,
+        )
+        self._persist_response(
+            response,
+            owner_id=record.owner_id,
+            thread_id=record.thread_id,
         )
         return response
 
@@ -877,6 +1188,7 @@ class AgentRunner:
             owner_id=record.owner_id,
             thread_id=record.thread_id,
             channel=record.channel,
+            project_id=record.project_id,
         )
         started = time.perf_counter()
         self.orchestrator.planner = self.planner
@@ -889,6 +1201,9 @@ class AgentRunner:
                     "root"
                     if is_admin
                     else requester_owner_id or record.owner_id
+                ),
+                checkpoint_thread_id=(
+                    record.checkpoint_thread_id or record.thread_id
                 ),
             )
             response = self._response_from_state(
@@ -966,6 +1281,7 @@ class AgentRunner:
                 outcome=response.status,
             )
         self.trace_store.append(response)
+        record = self.memory_store.get_run(response.run_id)
         assistant_metadata: dict[str, Any] = {"run": response_data}
         for step in response.steps:
             output = step.output or {}
@@ -979,11 +1295,11 @@ class AgentRunner:
         self.memory_store.upsert_assistant_run_message(
             owner_id=owner_id,
             thread_id=thread_id,
+            project_id=record.project_id if record is not None else None,
             run_id=response.run_id,
             content=response.answer,
             metadata=assistant_metadata,
         )
-        record = self.memory_store.get_run(response.run_id)
         if record is not None and response.status in {"completed", "failed"}:
             self.memory_store.record_episode(
                 owner_id=owner_id,
@@ -1003,6 +1319,9 @@ class AgentRunner:
         self,
         message: str,
         context: ToolExecutionContext,
+        *,
+        source_message_id: int | None = None,
+        source_run_id: str | None = None,
     ) -> str | None:
         stripped = message.strip()
         remember_match = re.fullmatch(
@@ -1013,15 +1332,19 @@ class AgentRunner:
         if remember_match:
             content = remember_match.group(1).strip()
             try:
-                self.memory_store.remember(
+                memory_ids = self.memory_store.remember_many(
                     owner_id=context.owner_id,
                     content=content,
                     source=f"{context.channel}:{context.thread_id}",
                     scope="user",
+                    source_message_id=source_message_id,
+                    source_run_id=source_run_id,
                 )
             except MemoryPolicyError as exc:
                 return str(exc)
-            return f"已为你保存这条记忆：{content}"
+            if len(memory_ids) == 1:
+                return f"已为你保存这条记忆：{content}"
+            return f"已将这段信息拆分并保存为 {len(memory_ids)} 条独立记忆。"
         if stripped in {"我的记忆", "你记得什么", "查看我的记忆"}:
             memories = self.memory_store.list_memories(context.owner_id)
             if not memories:
@@ -1040,6 +1363,74 @@ class AgentRunner:
             return f"已清空当前会话的 {count} 条历史消息。"
         return None
 
+    @staticmethod
+    def _is_memory_command(message: str) -> bool:
+        stripped = message.strip()
+        return bool(
+            re.fullmatch(r"(?:请)?记住[：:，,]?\s*(.+)", stripped, flags=re.DOTALL)
+            or stripped
+            in {
+                "我的记忆",
+                "你记得什么",
+                "查看我的记忆",
+                "忘记所有记忆",
+                "清空我的记忆",
+                "清空当前对话",
+                "新对话",
+            }
+        )
+
+    def _run_memory_command(
+        self,
+        *,
+        message: str,
+        context: ToolExecutionContext,
+        started_at: float,
+    ) -> AgentRunResponse:
+        run_id = str(uuid4())
+        try:
+            source_message_id = self.memory_store.create_run(
+                run_id=run_id,
+                owner_id=context.owner_id,
+                thread_id=context.thread_id,
+                channel=context.channel,
+                message=message,
+                project_id=context.project_id,
+                persist_user_message=True,
+            )
+        except ValueError as exc:
+            raise AgentRunError(str(exc)) from exc
+        try:
+            answer = self._handle_memory_command(
+                message,
+                context,
+                source_message_id=source_message_id,
+                source_run_id=run_id,
+            )
+            if answer is None:
+                raise AgentRunError("无法识别这个记忆操作。")
+            return self._finish_direct_response(
+                run_id=run_id,
+                answer=answer,
+                context=context,
+                started_at=started_at,
+                mode="deterministic-memory",
+                label="执行记忆操作",
+                detail="记忆操作由本地确定性规则执行，未发送给模型。",
+            )
+        except Exception as exc:
+            response = self._finish_direct_response(
+                run_id=run_id,
+                answer=f"记忆操作失败：{type(exc).__name__}",
+                context=context,
+                started_at=started_at,
+                mode="deterministic-memory",
+                label="记忆操作失败",
+                detail="持久化的记忆操作未能完成。",
+                status="failed",
+            )
+            return response
+
     def _direct_response(
         self,
         *,
@@ -1053,9 +1444,47 @@ class AgentRunner:
         step_output: dict[str, Any] | None = None,
         user_metadata: dict[str, Any] | None = None,
     ) -> AgentRunResponse:
+        run_id = str(uuid4())
+        try:
+            self.memory_store.create_run(
+                run_id=run_id,
+                owner_id=context.owner_id,
+                thread_id=context.thread_id,
+                channel=context.channel,
+                message=message,
+                project_id=context.project_id,
+                persist_user_message=True,
+                user_metadata=user_metadata,
+            )
+        except ValueError as exc:
+            raise AgentRunError(str(exc)) from exc
+        return self._finish_direct_response(
+            run_id=run_id,
+            answer=answer,
+            context=context,
+            started_at=started_at,
+            mode=mode,
+            label=label,
+            detail=detail,
+            step_output=step_output,
+        )
+
+    def _finish_direct_response(
+        self,
+        *,
+        run_id: str,
+        answer: str,
+        context: ToolExecutionContext,
+        started_at: float,
+        mode: str,
+        label: str,
+        detail: str,
+        step_output: dict[str, Any] | None = None,
+        status: Literal["completed", "failed"] = "completed",
+    ) -> AgentRunResponse:
         response = AgentRunResponse(
-            run_id=str(uuid4()),
-            status="completed",
+            run_id=run_id,
+            status=status,
             mode=mode,
             answer=answer,
             steps=[
@@ -1070,23 +1499,14 @@ class AgentRunner:
             ],
             total_duration_ms=_elapsed_ms(started_at),
         )
-        self.trace_store.append(response)
-        self.memory_store.append_message(
+        self._persist_response(
+            response,
             owner_id=context.owner_id,
             thread_id=context.thread_id,
-            role="user",
-            content=message,
-            metadata=user_metadata,
-        )
-        self.memory_store.append_message(
-            owner_id=context.owner_id,
-            thread_id=context.thread_id,
-            role="assistant",
-            content=answer,
-            run_id=response.run_id,
-            metadata={"run": response.model_dump(mode="json")},
         )
         return response
 
     def close(self) -> None:
         self.orchestrator.close()
+        if self._owns_memory_store:
+            self.memory_store.close()

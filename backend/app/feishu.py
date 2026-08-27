@@ -29,7 +29,10 @@ from .agent import AgentRunError, AgentRunner
 from .assets import AssetError, SpatialSceneService
 from .channel_settings import FeishuSettingsService, StoredFeishuSettings
 from .models import ChannelMessagePublic, FeishuRuntimePublic
-from .style_transfer import PhotoStyleService
+from .style_transfer import PhotoStyleService, StyleParameters
+
+
+FEISHU_IMAGE_FILE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class FeishuChannelLike(Protocol):
@@ -374,16 +377,32 @@ class SQLiteChannelStore:
             )
             return cursor.rowcount > 0
 
-    def claim_feature_menu(self, chat_id: str) -> bool:
+    def claim_feature_menu(
+        self,
+        chat_id: str,
+        *,
+        max_age_seconds: float | None = None,
+        force: bool = False,
+    ) -> bool:
         with self._lock, self._connect() as connection:
-            cursor = connection.execute(
+            row = connection.execute(
+                "SELECT sent_at FROM channel_feature_menu WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            if row is not None and not force and (
+                max_age_seconds is None
+                or float(row[0]) >= time.time() - max_age_seconds
+            ):
+                return False
+            connection.execute(
                 """
-                INSERT OR IGNORE INTO channel_feature_menu (chat_id, sent_at)
+                INSERT INTO channel_feature_menu (chat_id, sent_at)
                 VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET sent_at = excluded.sent_at
                 """,
                 (chat_id, time.time()),
             )
-            return cursor.rowcount == 1
+            return True
 
     def release_feature_menu(self, chat_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -396,9 +415,14 @@ class SQLiteChannelStore:
         self,
         chat_id: str,
         sender_id: str,
+        *,
+        description: str = "",
     ) -> list[tuple[str, str]]:
         """Start a durable per-user collection and return replaced images."""
 
+        normalized_description = description.strip()
+        if len(normalized_description) > 1000:
+            raise ValueError("图片风格化补充描述不能超过 1000 个字符。")
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
@@ -411,26 +435,29 @@ class SQLiteChannelStore:
             connection.execute(
                 """
                 INSERT INTO channel_style_collections (
-                    chat_id, sender_id, images_json, updated_at
-                ) VALUES (?, ?, '[]', ?)
+                    chat_id, sender_id, images_json, description, updated_at
+                ) VALUES (?, ?, '[]', ?, ?)
                 ON CONFLICT(chat_id, sender_id)
-                DO UPDATE SET images_json = '[]', updated_at = excluded.updated_at
+                DO UPDATE SET
+                    images_json = '[]',
+                    description = excluded.description,
+                    updated_at = excluded.updated_at
                 """,
-                (chat_id, sender_id, time.time()),
+                (chat_id, sender_id, normalized_description, time.time()),
             )
         return previous
 
-    def style_collection(
+    def style_collection_draft(
         self,
         chat_id: str,
         sender_id: str,
         *,
         max_age_seconds: float,
-    ) -> list[tuple[str, str]] | None:
+    ) -> tuple[list[tuple[str, str]], str] | None:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT images_json, updated_at
+                SELECT images_json, description, updated_at
                 FROM channel_style_collections
                 WHERE chat_id = ? AND sender_id = ?
                 """,
@@ -438,7 +465,7 @@ class SQLiteChannelStore:
             ).fetchone()
             if row is None:
                 return None
-            if float(row[1]) < time.time() - max_age_seconds:
+            if float(row[2]) < time.time() - max_age_seconds:
                 connection.execute(
                     """
                     DELETE FROM channel_style_collections
@@ -447,7 +474,68 @@ class SQLiteChannelStore:
                     (chat_id, sender_id),
                 )
                 return None
-            return self._decode_style_images(row[0])
+            return self._decode_style_images(row[0]), str(row[1] or "")
+
+    def style_collection(
+        self,
+        chat_id: str,
+        sender_id: str,
+        *,
+        max_age_seconds: float,
+    ) -> list[tuple[str, str]] | None:
+        draft = self.style_collection_draft(
+            chat_id,
+            sender_id,
+            max_age_seconds=max_age_seconds,
+        )
+        return draft[0] if draft is not None else None
+
+    def update_style_description(
+        self,
+        chat_id: str,
+        sender_id: str,
+        *,
+        description: str,
+        append: bool,
+        max_age_seconds: float,
+    ) -> tuple[list[tuple[str, str]], str] | None:
+        normalized = description.strip()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT images_json, description, updated_at
+                FROM channel_style_collections
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, sender_id),
+            ).fetchone()
+            if row is None or float(row[2]) < time.time() - max_age_seconds:
+                if row is not None:
+                    connection.execute(
+                        """
+                        DELETE FROM channel_style_collections
+                        WHERE chat_id = ? AND sender_id = ?
+                        """,
+                        (chat_id, sender_id),
+                    )
+                return None
+            current = str(row[1] or "").strip()
+            updated = (
+                "\n".join(item for item in (current, normalized) if item)
+                if append
+                else normalized
+            )
+            if len(updated) > 1000:
+                raise ValueError("图片风格化补充描述不能超过 1000 个字符。")
+            connection.execute(
+                """
+                UPDATE channel_style_collections
+                SET description = ?, updated_at = ?
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (updated, time.time(), chat_id, sender_id),
+            )
+            return self._decode_style_images(row[0]), updated
 
     def append_style_image(
         self,
@@ -607,6 +695,7 @@ class SQLiteChannelStore:
                     chat_id TEXT NOT NULL,
                     sender_id TEXT NOT NULL,
                     images_json TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (chat_id, sender_id)
                 );
@@ -626,6 +715,17 @@ class SQLiteChannelStore:
                 connection.execute(
                     "ALTER TABLE channel_events ADD COLUMN media_url TEXT"
                 )
+            style_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(channel_style_collections)"
+                ).fetchall()
+            }
+            if "description" not in style_columns:
+                connection.execute(
+                    "ALTER TABLE channel_style_collections "
+                    "ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+                )
         os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
@@ -642,6 +742,7 @@ class FeishuChannelRuntime:
     max_message_chars = 4000
     max_reply_chars = 8000
     style_collection_ttl_seconds = 30 * 60
+    feature_menu_repeat_seconds = 30 * 60
 
     def __init__(
         self,
@@ -1036,19 +1137,59 @@ class FeishuChannelRuntime:
                     "approval-rejected",
                 )
             return
-        if text.lower() in {"菜单", "功能", "功能菜单", "/menu", "menu", "help"}:
+        if self._is_feature_menu_request(text):
+            self.store.claim_feature_menu(chat_id, force=True)
             await self._send_feature_menu(chat_id, message_id)
             self.store.mark_completed(message_id, "feature-menu")
             return
+        # The menu is a channel affordance, not an Agent answer. Show it on the
+        # first authorized message regardless of whether that message is text,
+        # an image, or a deterministic workflow command.
+        await self._send_feature_menu_once(
+            chat_id,
+            message_id,
+            force=self._requests_photo_style(text),
+        )
         image_resources = self._image_resource_entries(message)
         if image_resources:
-            style_collection = self.store.style_collection(
+            style_draft = self.store.style_collection_draft(
                 chat_id,
                 sender_id,
                 max_age_seconds=self.style_collection_ttl_seconds,
             )
-            if style_collection is not None:
-                remaining = 4 - len(style_collection)
+            description_update = self._style_description_update(
+                text,
+                allow_plain=style_draft is not None,
+            )
+            if style_draft is None and (
+                len(image_resources) > 1 or self._looks_like_style_request(text)
+            ):
+                description_update = self._style_description_update(
+                    text,
+                    allow_plain=True,
+                )
+                initial_description = (
+                    self._photo_style_request_description(text)
+                    if self._looks_like_style_request(text)
+                    else (
+                        description_update[0]
+                        if description_update is not None
+                        else ""
+                    )
+                )
+                started = await self._begin_photo_style_collection(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    sender_id=sender_id,
+                    initial_description=initial_description,
+                    announce=False,
+                )
+                if not started:
+                    return
+                style_draft = ([], initial_description)
+                description_update = None
+            if style_draft is not None:
+                remaining = 4 - len(style_draft[0])
                 if len(image_resources) > remaining:
                     self.store.mark_rejected(message_id, "too_many_style_images")
                     await self._reply_safely(
@@ -1062,34 +1203,28 @@ class FeishuChannelRuntime:
                         "too-many-style-images",
                     )
                     return
-                for file_key, file_name, resource_message_id in image_resources:
-                    await self._collect_photo_style_image(
-                        message_id=message_id,
-                        resource_message_id=resource_message_id,
-                        chat_id=chat_id,
-                        sender_id=sender_id,
-                        file_key=file_key,
-                        file_name=file_name,
-                    )
-                return
-            if len(image_resources) > 1:
-                self.store.mark_rejected(message_id, "too_many_images")
-                await self._reply_safely(
-                    chat_id,
-                    message_id,
-                    (
-                        "检测到多张图片。若要进行图片风格化，请先发送"
-                        "“图片风格化”；空间照片功能一次只处理一张图片。"
-                    ),
-                    "too-many-images",
+                await self._collect_photo_style_images(
+                    message_id=message_id,
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    resources=image_resources,
+                    description_update=description_update,
                 )
                 return
+            (
+                file_key,
+                file_name,
+                resource_message_id,
+                resource_type,
+            ) = image_resources[0]
             await self._process_image_message(
                 message_id=message_id,
                 chat_id=chat_id,
                 sender_id=sender_id,
-                file_key=image_resources[0][0],
-                file_name=image_resources[0][1],
+                file_key=file_key,
+                file_name=file_name,
+                resource_message_id=resource_message_id,
+                resource_type=resource_type,
             )
             return
 
@@ -1108,7 +1243,8 @@ class FeishuChannelRuntime:
             await self._reply_safely(
                 chat_id,
                 message_id,
-                "当前版本支持文本和单张图片；文件与视频将在后续接入。",
+                "当前版本支持文本、图片及 JPG / PNG / WebP 图片文件；"
+                "其他文件与视频将在后续接入。",
                 "unsupported",
             )
             return
@@ -1133,60 +1269,170 @@ class FeishuChannelRuntime:
             return
 
         compact_command = re.sub(r"\s+", "", text).casefold()
-        active_style_collection = self.store.style_collection(
+        active_style_draft = self.store.style_collection_draft(
             chat_id,
             sender_id,
             max_age_seconds=self.style_collection_ttl_seconds,
         )
-        if compact_command in {
-            "图片风格化",
-            "开始图片风格化",
-            "进入图片风格化",
-            "风格迁移",
-            "风格化",
-        } or (
-            compact_command == "开始风格化"
-            and active_style_collection is None
-        ):
+        if self._requests_spatial_photo(text):
+            discarded = await self._discard_photo_style_collection(
+                chat_id=chat_id,
+                sender_id=sender_id,
+            )
+            self.store.mark_completed(message_id, "spatial-photo-selected")
+            await self._reply_safely(
+                chat_id,
+                message_id,
+                (
+                    "已切换到空间照片。原图片风格化草稿已清理。\n"
+                    if discarded
+                    else "已进入空间照片模式。\n"
+                )
+                + "请发送一张 JPG、PNG 或 WebP 图片，我会创建空间照片任务。",
+                "spatial-photo-selected",
+            )
+            return
+        if active_style_draft is None and self._requests_photo_style(text):
             await self._begin_photo_style_collection(
                 chat_id=chat_id,
                 message_id=message_id,
                 sender_id=sender_id,
+                initial_description=self._photo_style_request_description(text),
             )
             return
-        if compact_command in {"取消风格化", "退出风格化", "取消图片风格化"}:
+        if active_style_draft is not None and self._requests_photo_style(text):
+            self.store.mark_completed(message_id, "photo-style-draft-status")
+            await self._send_photo_style_draft_card(
+                chat_id=chat_id,
+                message_id=message_id,
+                images=active_style_draft[0],
+                description=active_style_draft[1],
+                phase="photo-style-draft-status",
+                notice="图片风格化草稿已在进行，请继续上传图片或补充描述。",
+            )
+            return
+        if compact_command in {"取消风格化", "退出风格化", "取消图片风格化"} or (
+            active_style_draft is not None and compact_command in {"取消", "退出"}
+        ):
             await self._cancel_photo_style_collection(
                 chat_id=chat_id,
                 message_id=message_id,
                 sender_id=sender_id,
             )
             return
-        if active_style_collection is not None and (
-            compact_command in {
-                "开始",
-                "生成",
-                "开始生成",
-                "开始风格化",
-                "生成风格化",
-                "执行风格化",
-            }
-            or compact_command.startswith("开始风格化：")
-            or compact_command.startswith("开始风格化:")
-        ):
-            await self._start_photo_style_transfer(
-                chat_id=chat_id,
-                message_id=message_id,
-                sender_id=sender_id,
+        if active_style_draft is not None:
+            if compact_command in {
+                "查看风格化任务",
+                "风格化任务",
+                "当前风格化任务",
+                "查看任务",
+                "当前任务",
+            }:
+                self.store.mark_completed(message_id, "photo-style-draft-status")
+                await self._send_photo_style_draft_card(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    images=active_style_draft[0],
+                    description=active_style_draft[1],
+                    phase="photo-style-draft-status",
+                )
+                return
+            if compact_command in {"清空描述", "删除描述", "清除描述"}:
+                updated = await asyncio.to_thread(
+                    self.store.update_style_description,
+                    chat_id,
+                    sender_id,
+                    description="",
+                    append=False,
+                    max_age_seconds=self.style_collection_ttl_seconds,
+                )
+                if updated is not None:
+                    self.store.mark_completed(
+                        message_id,
+                        "photo-style-description-cleared",
+                    )
+                    await self._send_photo_style_draft_card(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        images=updated[0],
+                        description=updated[1],
+                        phase="photo-style-description-cleared",
+                        notice="补充描述已清空。",
+                    )
+                return
+            if self._starts_photo_style_generation(text):
+                description_update = self._style_description_update(
+                    text,
+                    allow_plain=False,
+                )
+                if description_update is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self.store.update_style_description,
+                            chat_id,
+                            sender_id,
+                            description=description_update[0],
+                            append=description_update[1],
+                            max_age_seconds=self.style_collection_ttl_seconds,
+                        )
+                    except ValueError as exc:
+                        self.store.mark_rejected(
+                            message_id,
+                            "photo_style_description_too_long",
+                        )
+                        await self._reply_safely(
+                            chat_id,
+                            message_id,
+                            str(exc),
+                            "photo-style-description-too-long",
+                        )
+                        return
+                await self._start_photo_style_transfer(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    sender_id=sender_id,
+                )
+                return
+            description_update = self._style_description_update(
+                text,
+                allow_plain=True,
             )
-            return
-
-        if self.store.claim_feature_menu(chat_id):
-            try:
-                await self._send_feature_menu(chat_id, message_id)
-            except Exception as exc:
-                self.store.release_feature_menu(chat_id)
-                self._status = "error"
-                self._last_error = self._safe_error(exc)
+            if description_update is not None:
+                try:
+                    updated = await asyncio.to_thread(
+                        self.store.update_style_description,
+                        chat_id,
+                        sender_id,
+                        description=description_update[0],
+                        append=description_update[1],
+                        max_age_seconds=self.style_collection_ttl_seconds,
+                    )
+                except ValueError as exc:
+                    self.store.mark_rejected(
+                        message_id,
+                        "photo_style_description_too_long",
+                    )
+                    await self._reply_safely(
+                        chat_id,
+                        message_id,
+                        str(exc),
+                        "photo-style-description-too-long",
+                    )
+                    return
+                if updated is not None:
+                    self.store.mark_completed(
+                        message_id,
+                        "photo-style-description-updated",
+                    )
+                    await self._send_photo_style_draft_card(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        images=updated[0],
+                        description=updated[1],
+                        phase="photo-style-description-updated",
+                        notice="补充描述已保存，可继续上传图片或开始生成。",
+                    )
+                    return
 
         await self._reply_safely(
             chat_id,
@@ -1286,15 +1532,38 @@ class FeishuChannelRuntime:
             )
             return
         if command == "spatial_photo":
+            discarded = await self._discard_photo_style_collection(
+                chat_id=chat_id,
+                sender_id=sender_id,
+            )
             await self._reply_safely(
                 chat_id,
                 message_id,
-                "请直接发送一张 JPG、PNG 或 WebP 图片。我会在本机生成空间照片并返回封面。",
+                (
+                    "已切换到空间照片，之前的图片风格化草稿已清理。\n"
+                    if discarded
+                    else "已进入空间照片模式。\n"
+                )
+                + "请发送一张 JPG、PNG 或 WebP 图片，我会在本机生成空间照片并返回封面。",
                 "card-spatial-help",
             )
             return
         if command == "photo_style_transfer":
             await self._begin_photo_style_collection(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+            )
+            return
+        if command == "photo_style_start":
+            await self._start_photo_style_transfer(
+                chat_id=chat_id,
+                message_id=message_id,
+                sender_id=sender_id,
+            )
+            return
+        if command == "photo_style_cancel":
+            await self._cancel_photo_style_collection(
                 chat_id=chat_id,
                 message_id=message_id,
                 sender_id=sender_id,
@@ -1417,13 +1686,35 @@ class FeishuChannelRuntime:
             ),
         )
 
+    async def _send_feature_menu_once(
+        self,
+        chat_id: str,
+        message_id: str,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not self.store.claim_feature_menu(
+            chat_id,
+            max_age_seconds=self.feature_menu_repeat_seconds,
+            force=force,
+        ):
+            return
+        try:
+            await self._send_feature_menu(chat_id, message_id)
+        except Exception as exc:
+            self.store.release_feature_menu(chat_id)
+            self._status = "error"
+            self._last_error = self._safe_error(exc)
+
     async def _begin_photo_style_collection(
         self,
         *,
         chat_id: str,
         message_id: str,
         sender_id: str,
-    ) -> None:
+        initial_description: str = "",
+        announce: bool = True,
+    ) -> bool:
         spatial = self.spatial_service
         style = self.style_service
         async with self._style_collection_lock:
@@ -1431,41 +1722,56 @@ class FeishuChannelRuntime:
             # dispatch a selected photo immediately after the card click; if the
             # mode were created only after a provider health check, that photo
             # could incorrectly fall through to the spatial-photo route.
-            previous = self.store.start_style_collection(chat_id, sender_id)
+            try:
+                previous = self.store.start_style_collection(
+                    chat_id,
+                    sender_id,
+                    description=initial_description,
+                )
+            except ValueError as exc:
+                self.store.mark_rejected(
+                    message_id,
+                    "photo_style_description_too_long",
+                )
+                await self._reply_safely(
+                    chat_id,
+                    message_id,
+                    str(exc),
+                    "photo-style-description-too-long",
+                )
+                return False
             await self._delete_staged_style_images(
                 [source_id for source_id, _ in previous],
                 owner_id=self._owner_id(sender_id),
             )
 
+        self.store.mark_completed(message_id, "photo-style-collection")
+        if not announce:
+            return True
         provider_ready: bool | None = None
         if style is not None:
             provider_status = await asyncio.to_thread(style.provider_status)
             provider_ready = provider_status.get("ready")
-        self.store.mark_completed(message_id, "photo-style-collection")
         availability_note = ""
         if spatial is None or style is None:
             availability_note = (
-                "\n注意：电脑端图片风格化服务尚未加载；图片不会转入空间照片，"
+                "电脑端图片风格化服务尚未加载；图片不会转入空间照片，"
                 "请启动服务后再上传。"
             )
         elif provider_ready is False:
             availability_note = (
-                "\n注意：SDXL + IP-Adapter 服务当前未通过健康检查。"
+                "SDXL + IP-Adapter 服务当前未通过健康检查。"
                 "你仍可先上传图片，服务恢复后再发送“开始风格化”。"
             )
-        await self._reply_safely(
-            chat_id,
-            message_id,
-            (
-                "已进入图片风格化模式，收集状态会保留 30 分钟。\n"
-                "1. 先发送 1 张内容图；\n"
-                "2. 再发送 1–3 张风格参考图；\n"
-                "3. 发送“开始风格化”。\n"
-                "如需退出，请发送“取消风格化”。"
-                f"{availability_note}"
-            ),
-            "photo-style-collection-started",
+        await self._send_photo_style_draft_card(
+            chat_id=chat_id,
+            message_id=message_id,
+            images=[],
+            description=initial_description.strip(),
+            phase="photo-style-collection-started",
+            notice=availability_note or "风格化草稿已创建，30 分钟内持续有效。",
         )
+        return True
 
     async def _cancel_photo_style_collection(
         self,
@@ -1474,16 +1780,10 @@ class FeishuChannelRuntime:
         message_id: str,
         sender_id: str,
     ) -> None:
-        async with self._style_collection_lock:
-            images = await asyncio.to_thread(
-                self.store.clear_style_collection,
-                chat_id,
-                sender_id,
-            )
-            await self._delete_staged_style_images(
-                [source_id for source_id, _ in images],
-                owner_id=self._owner_id(sender_id),
-            )
+        images = await self._discard_photo_style_collection(
+            chat_id=chat_id,
+            sender_id=sender_id,
+        )
         self.store.mark_completed(message_id, "photo-style-cancelled")
         await self._reply_safely(
             chat_id,
@@ -1496,15 +1796,32 @@ class FeishuChannelRuntime:
             "photo-style-cancelled",
         )
 
-    async def _collect_photo_style_image(
+    async def _discard_photo_style_collection(
+        self,
+        *,
+        chat_id: str,
+        sender_id: str,
+    ) -> bool:
+        async with self._style_collection_lock:
+            images = await asyncio.to_thread(
+                self.store.clear_style_collection,
+                chat_id,
+                sender_id,
+            )
+            await self._delete_staged_style_images(
+                [source_id for source_id, _ in images],
+                owner_id=self._owner_id(sender_id),
+            )
+        return bool(images)
+
+    async def _collect_photo_style_images(
         self,
         *,
         message_id: str,
-        resource_message_id: str | None = None,
         chat_id: str,
         sender_id: str,
-        file_key: str,
-        file_name: str | None,
+        resources: list[tuple[str, str | None, str, str]],
+        description_update: tuple[str, bool] | None = None,
     ) -> None:
         spatial = self.spatial_service
         if spatial is None or self.style_service is None:
@@ -1520,73 +1837,102 @@ class FeishuChannelRuntime:
         await self._reply_safely(
             chat_id,
             message_id,
-            "已收到图片，正在安全下载并校验。",
-            "photo-style-image-accepted",
+            f"已收到 {len(resources)} 张图片，正在下载并加入风格化草稿。",
+            "photo-style-images-accepted",
         )
-        staged_source_id: str | None = None
+        pending_source_id: str | None = None
         try:
             channel = self._channel
             if channel is None:
                 raise RuntimeError("飞书长连接当前不可用")
-            image_bytes = await self._download_image_resource(
-                channel,
-                file_key=file_key,
-                message_id=resource_message_id or message_id,
-            )
-            source = await asyncio.to_thread(
-                spatial.stage_source_image,
-                image_bytes,
-                original_name=file_name or "feishu-style-image.jpg",
-                owner_id=self._owner_id(sender_id),
-            )
-            staged_source_id = source.id
             async with self._style_collection_lock:
-                images = await asyncio.to_thread(
-                    self.store.append_style_image,
+                draft = await asyncio.to_thread(
+                    self.store.style_collection_draft,
                     chat_id,
                     sender_id,
-                    source_image_id=source.id,
-                    message_id=message_id,
                     max_age_seconds=self.style_collection_ttl_seconds,
                 )
-            if images is None:
-                await self._delete_staged_style_images(
-                    [source.id],
-                    owner_id=self._owner_id(sender_id),
-                )
-                await self._reply_safely(
-                    chat_id,
-                    message_id,
-                    "图片收集会话已过期，请重新发送“图片风格化”后上传。",
-                    "photo-style-collection-expired",
-                )
-                self.store.mark_rejected(message_id, "photo_style_collection_expired")
-                return
+                if draft is None:
+                    raise LookupError("photo_style_collection_expired")
+                if len(draft[0]) + len(resources) > 4:
+                    raise ValueError("图片风格化最多收集四张图片。")
+                images = draft[0]
+                description = draft[1]
+                for (
+                    file_key,
+                    file_name,
+                    resource_message_id,
+                    resource_type,
+                ) in resources:
+                    image_bytes = await self._download_image_resource(
+                        channel,
+                        file_key=file_key,
+                        message_id=resource_message_id or message_id,
+                        resource_type=resource_type,
+                    )
+                    source = await asyncio.to_thread(
+                        spatial.stage_source_image,
+                        image_bytes,
+                        original_name=file_name or "feishu-style-image.jpg",
+                        owner_id=self._owner_id(sender_id),
+                    )
+                    pending_source_id = source.id
+                    appended = await asyncio.to_thread(
+                        self.store.append_style_image,
+                        chat_id,
+                        sender_id,
+                        source_image_id=source.id,
+                        message_id=message_id,
+                        max_age_seconds=self.style_collection_ttl_seconds,
+                    )
+                    if appended is None:
+                        raise LookupError("photo_style_collection_expired")
+                    images = appended
+                    pending_source_id = None
+                if description_update is not None:
+                    updated = await asyncio.to_thread(
+                        self.store.update_style_description,
+                        chat_id,
+                        sender_id,
+                        description=description_update[0],
+                        append=description_update[1],
+                        max_age_seconds=self.style_collection_ttl_seconds,
+                    )
+                    if updated is None:
+                        raise LookupError("photo_style_collection_expired")
+                    images, description = updated
             count = len(images)
-            role = "内容图" if count == 1 else f"风格参考图 {count - 1}"
-            next_step = (
-                "请继续发送 1–3 张风格参考图。"
-                if count == 1
-                else (
-                    "已达到 3 张参考图上限，请发送“开始风格化”。"
-                    if count == 4
-                    else "可以继续发送参考图，或发送“开始风格化”。"
+            self.store.mark_completed(message_id, f"photo-style-images-{count}")
+            await self._send_photo_style_draft_card(
+                chat_id=chat_id,
+                message_id=message_id,
+                images=images,
+                description=description,
+                phase=f"photo-style-images-{count}-stored",
+                notice=(
+                    f"本次新增 {len(resources)} 张图片。"
+                    "系统按发送顺序将首张识别为内容图，其余识别为风格参考图。"
+                    if len(resources) > 1 and count == len(resources)
+                    else f"本次新增 {len(resources)} 张图片，已保持原发送顺序。"
                 )
             )
-            self.store.mark_completed(message_id, f"photo-style-image-{count}")
+        except LookupError:
+            if pending_source_id:
+                await self._delete_staged_style_images(
+                    [pending_source_id],
+                    owner_id=self._owner_id(sender_id),
+                )
+            self.store.mark_rejected(message_id, "photo_style_collection_expired")
             await self._reply_safely(
                 chat_id,
                 message_id,
-                (
-                    f"第 {count} 张图片已保存为{role}"
-                    f"（{source.width} × {source.height}）。\n{next_step}"
-                ),
-                f"photo-style-image-{count}-stored",
+                "图片收集会话已过期，请重新发送“图片风格化”后上传。",
+                "photo-style-collection-expired",
             )
         except ValueError as exc:
-            if staged_source_id:
+            if pending_source_id:
                 await self._delete_staged_style_images(
-                    [staged_source_id],
+                    [pending_source_id],
                     owner_id=self._owner_id(sender_id),
                 )
             self.store.mark_rejected(message_id, "photo_style_image_limit")
@@ -1597,6 +1943,11 @@ class FeishuChannelRuntime:
                 "photo-style-image-limit",
             )
         except AssetError as exc:
+            if pending_source_id:
+                await self._delete_staged_style_images(
+                    [pending_source_id],
+                    owner_id=self._owner_id(sender_id),
+                )
             self.store.mark_failed(message_id, "invalid_style_image")
             await self._reply_safely(
                 chat_id,
@@ -1605,9 +1956,9 @@ class FeishuChannelRuntime:
                 "invalid-style-image",
             )
         except Exception:
-            if staged_source_id:
+            if pending_source_id:
                 await self._delete_staged_style_images(
-                    [staged_source_id],
+                    [pending_source_id],
                     owner_id=self._owner_id(sender_id),
                 )
             self.store.mark_failed(message_id, "style_image_download_failed")
@@ -1654,13 +2005,13 @@ class FeishuChannelRuntime:
             return
         try:
             async with self._style_collection_lock:
-                images = await asyncio.to_thread(
-                    self.store.style_collection,
+                draft = await asyncio.to_thread(
+                    self.store.style_collection_draft,
                     chat_id,
                     sender_id,
                     max_age_seconds=self.style_collection_ttl_seconds,
                 )
-                if images is None:
+                if draft is None:
                     self.store.mark_rejected(
                         message_id,
                         "photo_style_collection_missing",
@@ -1672,6 +2023,7 @@ class FeishuChannelRuntime:
                         "photo-style-collection-missing",
                     )
                     return
+                images, description = draft
                 if len(images) < 2:
                     self.store.mark_rejected(
                         message_id,
@@ -1690,6 +2042,7 @@ class FeishuChannelRuntime:
                     source_ids[0],
                     source_ids[1:],
                     title="飞书图片风格化",
+                    parameters=StyleParameters(prompt=description),
                     owner_id=self._owner_id(sender_id),
                 )
                 await asyncio.to_thread(
@@ -1709,6 +2062,7 @@ class FeishuChannelRuntime:
                 (
                     "图片风格化任务已创建。\n"
                     f"任务 ID：{created.job.id}\n"
+                    f"补充描述：{description or '未填写，使用模型默认描述'}\n"
                     "本机正在处理，完成后会自动返回预览图和可下载文件。"
                 ),
                 "photo-style-job-created",
@@ -1864,6 +2218,8 @@ class FeishuChannelRuntime:
         sender_id: str,
         file_key: str,
         file_name: str | None,
+        resource_message_id: str | None = None,
+        resource_type: str = "image",
     ) -> None:
         spatial = self.spatial_service
         if spatial is None:
@@ -1889,7 +2245,8 @@ class FeishuChannelRuntime:
             image_bytes = await self._download_image_resource(
                 channel,
                 file_key=file_key,
-                message_id=message_id,
+                message_id=resource_message_id or message_id,
+                resource_type=resource_type,
             )
             created = await asyncio.to_thread(
                 spatial.create_scene,
@@ -2133,6 +2490,7 @@ class FeishuChannelRuntime:
         *,
         file_key: str,
         message_id: str,
+        resource_type: str = "image",
     ) -> bytes:
         """Try both Feishu image routes and retain permission diagnostics."""
         client = getattr(channel, "client", None)
@@ -2145,20 +2503,21 @@ class FeishuChannelRuntime:
                 GetMessageResourceRequest,
             )
 
-            requests = (
+            requests = [
                 (
                     client.im.v1.message_resource,
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
                     .file_key(file_key)
-                    .type("image")
+                    .type(resource_type)
                     .build(),
-                ),
-                (
+                )
+            ]
+            if resource_type == "image":
+                requests.append((
                     client.im.v1.image,
                     GetImageRequest.builder().image_key(file_key).build(),
-                ),
-            )
+                ))
             for resource, request in requests:
                 try:
                     response = await resource.aget(request)
@@ -2176,7 +2535,7 @@ class FeishuChannelRuntime:
             for linked_message_id in (message_id, None):
                 payload = await channel.download_resource(
                     file_key,
-                    resource_type="image",
+                    resource_type=resource_type,
                     message_id=linked_message_id,
                 )
                 if payload:
@@ -2185,7 +2544,7 @@ class FeishuChannelRuntime:
         permission_denied = any(code == 99991672 for code, _ in errors)
         suffix = "（平台错误码 99991672）" if permission_denied else ""
         raise FeishuResourceError(
-            "无法下载飞书图片。请在开发者后台开通 im:resource，"
+            "无法下载飞书图片或图片文件。请在开发者后台开通 im:resource，"
             "并开通 im:message:readonly（或 im:message），发布新版本后"
             f"重新授权再试{suffix}。"
         )
@@ -2227,25 +2586,34 @@ class FeishuChannelRuntime:
         raise TimeoutError("photo style job timed out")
 
     @staticmethod
-    def _image_resources(message: Any) -> list[tuple[str, str | None]]:
-        images: list[tuple[str, str | None]] = []
+    def _image_resources(
+        message: Any,
+    ) -> list[tuple[str, str | None, str]]:
+        images: list[tuple[str, str | None, str]] = []
         for resource in list(getattr(message, "resources", []) or []):
-            if str(getattr(resource, "type", "")) != "image":
+            resource_type = str(getattr(resource, "type", "")).casefold()
+            file_name = str(getattr(resource, "file_name", "") or "") or None
+            if resource_type == "file" and (
+                file_name is None
+                or Path(file_name).suffix.casefold() not in FEISHU_IMAGE_FILE_SUFFIXES
+            ):
+                continue
+            if resource_type not in {"image", "file"}:
                 continue
             file_key = str(getattr(resource, "file_key", "") or "")
             if file_key:
-                images.append((file_key, getattr(resource, "file_name", None)))
+                images.append((file_key, file_name, resource_type))
         if images:
             return images
         content = getattr(message, "content", None)
         image_key = str(getattr(content, "image_key", "") or "")
-        return [(image_key, None)] if image_key else []
+        return [(image_key, None, "image")] if image_key else []
 
     @classmethod
     def _image_resource_entries(
         cls,
         message: Any,
-    ) -> list[tuple[str, str | None, str]]:
+    ) -> list[tuple[str, str | None, str, str]]:
         """Return image resources with the message that owns each file key.
 
         Feishu mobile can send a multi-select as either one post containing
@@ -2257,15 +2625,254 @@ class FeishuChannelRuntime:
         sources = list(getattr(message, "batched_sources", None) or [])
         if not sources:
             sources = [message]
-        entries: list[tuple[str, str | None, str]] = []
+        entries: list[tuple[str, str | None, str, str]] = []
         for source in sources:
             source_message_id = str(
                 getattr(source, "message_id", None)
                 or getattr(source, "id", "")
             )
-            for file_key, file_name in cls._image_resources(source):
-                entries.append((file_key, file_name, source_message_id))
+            for file_key, file_name, resource_type in cls._image_resources(source):
+                entries.append(
+                    (file_key, file_name, source_message_id, resource_type)
+                )
         return entries
+
+    @staticmethod
+    def _looks_like_style_request(text: str) -> bool:
+        return FeishuChannelRuntime._requests_photo_style(text)
+
+    @staticmethod
+    def _is_feature_menu_request(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).casefold()
+        return compact in {
+            "菜单",
+            "功能",
+            "功能菜单",
+            "功能卡片",
+            "功能列表",
+            "打开菜单",
+            "打开功能卡片",
+            "查看功能",
+            "查看功能卡片",
+            "你能做什么",
+            "你会什么",
+            "你好",
+            "您好",
+            "哈喽",
+            "嗨",
+            "在吗",
+            "/menu",
+            "menu",
+            "/help",
+            "help",
+            "hi",
+            "hello",
+        }
+
+    @staticmethod
+    def _requests_photo_style(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).casefold()
+        has_style_intent = any(
+            keyword in compact
+            for keyword in (
+                "图片风格化",
+                "照片风格化",
+                "图片风格转换",
+                "照片风格转换",
+                "图片风格迁移",
+                "照片风格迁移",
+                "风格迁移",
+                "风格化图片",
+                "风格化照片",
+            )
+        ) or compact.startswith("风格化")
+        if not has_style_intent:
+            return False
+        return re.search(
+            r"(?:不要|不想|无需|不用|取消|停止).{0,8}"
+            r"(?:图片|照片)?(?:风格化|风格转换|风格迁移)",
+            compact,
+        ) is None
+
+    @staticmethod
+    def _photo_style_request_description(text: str) -> str:
+        match = re.search(
+            r"(?:图片|照片)\s*(?:风格化|风格转换|风格迁移)|"
+            r"风格迁移|风格化(?:图片|照片)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return ""
+        tail = text[match.end() :].strip()
+        tail = re.sub(r"^(?:转换|转化)?\s*任务", "", tail).strip()
+        tail = tail.lstrip("：:，,。；;-— ").strip()
+        return "" if tail in {"转换", "转化", "处理"} else tail
+
+    @staticmethod
+    def _requests_spatial_photo(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).casefold()
+        if re.search(
+            r"(?:不要|不想|无需|不用|取消|停止).{0,8}空间(?:照片|图片)",
+            compact,
+        ):
+            return False
+        return compact in {"空间照片", "空间图片", "生成空间照片", "生成空间图片"} or (
+            re.search(
+                r"(?:生成|创建|制作|进入|切换到|我要进行).{0,8}"
+                r"空间(?:照片|图片)",
+                compact,
+            )
+            is not None
+        )
+
+    @staticmethod
+    def _starts_photo_style_collection(text: str) -> bool:
+        return FeishuChannelRuntime._requests_photo_style(text)
+
+    @staticmethod
+    def _starts_photo_style_generation(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).casefold()
+        return compact in {
+            "开始",
+            "生成",
+            "开始生成",
+            "开始风格化",
+            "生成风格化",
+            "执行风格化",
+        } or re.match(
+            r"^(?:开始风格化|开始生成|执行风格化|生成风格化|生成)"
+            r"[：:，,。；;\-—]",
+            compact,
+        ) is not None
+
+    @staticmethod
+    def _style_description_update(
+        text: str,
+        *,
+        allow_plain: bool,
+    ) -> tuple[str, bool] | None:
+        value = text.strip()
+        if not value or value in {"[图片]", "[文件]"}:
+            return None
+        if re.sub(r"\s+", "", value).casefold() in {
+            "内容图",
+            "风格图",
+            "参考图",
+            "风格参考图",
+            "图片风格化",
+            "开始图片风格化",
+            "进入图片风格化",
+            "风格迁移",
+            "风格化",
+            "开始",
+            "生成",
+            "开始生成",
+            "开始风格化",
+            "生成风格化",
+            "执行风格化",
+        }:
+            return None
+        description_match = re.match(
+            r"^\s*(补充|追加|修改|更新|设置)?\s*"
+            r"(?:补充)?描述\s*[：:]?\s*(.*)$",
+            value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if description_match:
+            description = description_match.group(2).strip()
+            if not description:
+                return None
+            append = description_match.group(1) in {"补充", "追加"}
+            return description, append
+        command_match = re.match(
+            r"^\s*(?:开始图片风格化|进入图片风格化|图片风格化|"
+            r"照片风格化|风格迁移|开始风格化|开始生成|执行风格化|"
+            r"生成风格化)\s*(?:任务)?\s*[：:，,。；;\-—]?\s*(.*)$",
+            value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if command_match:
+            description = command_match.group(1).strip()
+            return (description, True) if description else None
+        return (value, True) if allow_plain else None
+
+    async def _send_photo_style_draft_card(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        images: list[tuple[str, str]],
+        description: str,
+        phase: str,
+        notice: str = "",
+    ) -> None:
+        image_count = len(images)
+        reference_count = max(0, image_count - 1)
+        description_preview = description.strip()
+        if len(description_preview) > 300:
+            description_preview = description_preview[:297] + "..."
+        lines = []
+        if notice:
+            lines.append(notice)
+        lines.extend(
+            [
+                "**内容图**：" + ("已上传 1 张" if image_count else "待上传"),
+                f"**风格参考图**：已上传 {reference_count} / 3 张",
+                "**补充描述**：" + (description_preview or "未填写，可直接发送文字补充"),
+                "**目标风格**：由参考图与补充描述共同决定，不预设固定风格。",
+                "支持逐张发送、多选相册、富文本图文，以及 JPG / PNG / WebP 文件。",
+                "发送图片时附带的文字，或随后单独发送的文字，都会加入本次任务描述。",
+            ]
+        )
+        buttons: list[dict[str, Any]] = []
+        if image_count >= 2:
+            buttons.append(
+                {
+                    "label": "开始生成",
+                    "action": {"command": "photo_style_start"},
+                    "style": "primary",
+                }
+            )
+        buttons.append(
+            {
+                "label": "取消草稿",
+                "action": {"command": "photo_style_cancel"},
+            }
+        )
+        card = (
+            new_card()
+            .header(
+                title="图片风格化草稿",
+                subtitle=f"已收集 {image_count} / 4 张图片 · 30 分钟内有效",
+                template="blue" if image_count < 2 else "green",
+            )
+            .markdown("\n\n".join(lines))
+            .buttons(buttons)
+            .footer("继续发送图片或描述即可更新；也可发送“开始风格化”")
+            .build()
+        )
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("飞书长连接当前不可用")
+        result = await channel.send(
+            chat_id,
+            {"card": card.data},
+            {"reply_to": message_id, "uuid": self._uuid(message_id, phase)},
+        )
+        self._ensure_send_success(result)
+        self.store.record_event(
+            chat_id=chat_id,
+            sender_id=None,
+            direction="outbound",
+            kind="card",
+            content=(
+                f"[图片风格化草稿] 内容图 {1 if image_count else 0}/1，"
+                f"参考图 {reference_count}/3，"
+                f"补充描述：{description_preview or '未填写'}"
+            ),
+            message_id=message_id,
+        )
 
     async def _reply_safely(
         self,
@@ -2432,6 +3039,8 @@ class FeishuChannelRuntime:
         return {
             "spatial_photo": "生成空间照片",
             "photo_style_transfer": "图片风格化",
+            "photo_style_start": "开始图片风格化",
+            "photo_style_cancel": "取消图片风格化草稿",
             "retry_spatial_job": "重新生成空间照片",
             "list_assets": "查看个人资产",
             "capabilities": "能力列表",
@@ -2439,10 +3048,20 @@ class FeishuChannelRuntime:
         }.get(command, "未知功能")
 
     def _owner_id(self, sender_id: str) -> str:
+        owner_alias = self._owner_alias(sender_id)
+        memory_store = getattr(self.runner, "memory_store", None)
+        resolver = getattr(memory_store, "resolve_verified_subject_id", None)
+        if callable(resolver):
+            return str(resolver(owner_alias))
+        # Lightweight runner implementations may not provide linked-identity
+        # storage. The channel-qualified alias remains an isolated owner key.
+        return owner_alias
+
+    def _owner_alias(self, sender_id: str) -> str:
         return f"feishu:{self._settings.app_id}:{sender_id}"
 
     def _thread_id(self, chat_id: str, sender_id: str) -> str:
-        return f"{self._owner_id(sender_id)}:{chat_id}"
+        return f"{self._owner_alias(sender_id)}:{chat_id}"
 
     def _safe_error(self, error: Exception) -> str:
         name = type(error).__name__

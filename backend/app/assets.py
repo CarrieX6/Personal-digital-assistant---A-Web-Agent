@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Callable, Iterator, Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
@@ -787,7 +787,14 @@ class SpatialSceneService:
         *,
         title: str | None = None,
         owner_id: str = "local",
+        idempotency_key: str | None = None,
     ) -> SpatialSceneCreateResponse:
+        existing = self._existing_idempotent_scene(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return existing
         source = self.get_source_image(source_image_id, owner_id=owner_id)
         source_path = self.source_image_dir / source_image_id / "source.webp"
         try:
@@ -796,6 +803,7 @@ class SpatialSceneService:
                 original_name=source.original_name,
                 title=title,
                 owner_id=owner_id,
+                idempotency_key=idempotency_key,
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
@@ -883,17 +891,30 @@ class SpatialSceneService:
         original_name: str,
         title: str | None = None,
         owner_id: str = "local",
+        idempotency_key: str | None = None,
     ) -> SpatialSceneCreateResponse:
+        existing = self._existing_idempotent_scene(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return existing
         if not image_bytes:
             raise AssetError("请选择一张图片。")
         if len(image_bytes) > MAX_UPLOAD_BYTES:
             raise AssetError("图片不能超过 20MB。")
 
         image = self._decode_image(image_bytes)
-        asset_id = str(uuid4())
-        job_id = str(uuid4())
+        if idempotency_key:
+            asset_id, job_id = self._idempotent_scene_ids(
+                owner_id,
+                idempotency_key,
+            )
+        else:
+            asset_id = str(uuid4())
+            job_id = str(uuid4())
         directory = self.asset_dir / asset_id
-        directory.mkdir(parents=True, exist_ok=False)
+        directory.mkdir(parents=True, exist_ok=bool(idempotency_key))
         os.chmod(directory, 0o700)
         source_path = directory / "source.webp"
 
@@ -926,6 +947,35 @@ class SpatialSceneService:
         return SpatialSceneCreateResponse(
             asset=self.get_asset(asset_id),
             job=self.get_job(job_id),
+        )
+
+    @staticmethod
+    def _idempotent_scene_ids(
+        owner_id: str,
+        idempotency_key: str,
+    ) -> tuple[str, str]:
+        namespace = f"agent-spatial-scene:{owner_id}:{idempotency_key}"
+        return (
+            str(uuid5(NAMESPACE_URL, namespace + ":asset")),
+            str(uuid5(NAMESPACE_URL, namespace + ":job")),
+        )
+
+    def _existing_idempotent_scene(
+        self,
+        *,
+        owner_id: str,
+        idempotency_key: str | None,
+    ) -> SpatialSceneCreateResponse | None:
+        if not idempotency_key:
+            return None
+        asset_id, job_id = self._idempotent_scene_ids(owner_id, idempotency_key)
+        asset_row = self.repository.get_asset_row(asset_id, owner_id)
+        job_row = self.repository.get_job_row(job_id, owner_id)
+        if asset_row is None or job_row is None:
+            return None
+        return SpatialSceneCreateResponse(
+            asset=self.get_asset(asset_id, owner_id=owner_id),
+            job=self.get_job(job_id, owner_id=owner_id),
         )
 
     def _forget_future(self, future: Future[None]) -> None:
@@ -1275,10 +1325,12 @@ def register_asset_tools(
         if title is not None and not isinstance(title, str):
             raise ToolError("title must be a string")
         try:
+            execution_context = current_tool_context()
             created = service.create_scene_from_source(
                 source_image_id.strip(),
                 title=title.strip() if isinstance(title, str) else None,
-                owner_id=current_tool_context().owner_id,
+                owner_id=execution_context.owner_id,
+                idempotency_key=execution_context.idempotency_key,
             )
         except AssetError as exc:
             raise ToolError(str(exc)) from exc
@@ -1324,7 +1376,7 @@ def register_asset_tools(
             },
             create_spatial_scene,
             risk_level="local_write",
-            idempotent=False,
+            idempotent=True,
         )
     )
     registry.register(

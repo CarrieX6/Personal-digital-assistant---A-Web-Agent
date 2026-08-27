@@ -33,7 +33,7 @@ Demo。
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
 | 飞书聊天入口 | 文本闭环已实测，图片权限待用户发布应用版本 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载 |
 | 结果回传适配 | 局部实现 | 富文本、状态、功能卡片、封面和短时签名 Viewer；局域网已实现，公网 HTTPS 测试隧道需用户显式启用，固定域名待实现 |
-| 会话与长期记忆 | 增强 MVP 开发中 | SQLite 按用户/渠道/会话隔离；已加入滚动摘要、类型化与时间化长期记忆、FTS/关键词混合检索、证据和效用反馈，并提供 Web 记忆管理中心 |
+| 会话与长期记忆 | 增强 MVP | SQLite 按用户/渠道/会话隔离；Run 与用户事件原子落库，崩溃后按 Run 独立 Checkpoint 对账恢复；上下文使用真实本地 Tokenizer 和强制 Schema 的结构化滚动摘要，正则抽取仅作可观测兜底；长期 claim 与 evidence 分表、时态化、加密并支持审计；已加入敏感召回硬门禁、词法/槽位/语义 RRF+MMR 混合召回、离线评测和效用反馈 |
 | 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
@@ -66,7 +66,9 @@ LangGraph 和 SQLite Checkpointer 执行受控循环：每次工具调用前进�
 Schema 校验，执行后观察结果，模型可以继续规划或完成；代码限制工具步数、重规划、
 连续错误、总运行时间和图递归次数。高风险 Tool 可通过 LangGraph Interrupt 暂停，
 在 Web Root 控制台或飞书批准/拒绝后从 SQLite Checkpoint 恢复；执行账本避免重放
-造成重复副作用。会话历史按渠道、用户和聊天隔离，显式长期记忆按用户隔离。当前
+造成重复副作用。每个 Run 拥有独立 Checkpoint 标识；启动时会把遗留运行分类为可恢复、
+待审批、已终态或需人工处置，Root 可继续或明确终止，不会盲目重放。会话历史按渠道、
+用户和聊天隔离，显式长期记忆按用户隔离。当前
 工具包括：
 
 - 文本统计与关键词提取；
@@ -118,11 +120,13 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 
 单张图片消息已接入本地空间照片能力：机器人下载原消息中的图片资源，复用本地图片
 安全校验并创建空间照片任务；完成后回复任务状态、封面图和同局域网短时 Viewer
-链接。图片风格化也已形成手机闭环：从“菜单”点击“图片风格化”（或发送同名指令），
-依次发送一张内容图和一至三张参考图（也支持手机端一次选择两至四张），再发送
-“开始风格化”；任务完成后机器人同时
-返回预览图和可下载的 WebP 原始结果文件。收集状态按飞书会话和用户隔离、保存 30
-分钟，发送“取消风格化”会清理临时图片。Agent 最终回答使用飞书
+链接。图片风格化也已形成手机闭环：从“菜单”进入后，机器人会持续显示风格化草稿
+卡片。可以逐张发送或一次多选两至四张，也可以使用富文本图文，或把 JPG、PNG、
+WebP 作为文件发送；直接发送多张图片时也会自动创建风格化草稿，不再落入空间照片
+任务。图片随附文字、随后单独发送的文字，以及“开始风格化：……”中的文字都会合并
+为模型的补充描述。草稿按飞书会话和用户隔离、保存 30 分钟，可点击“开始生成”或
+发送“开始风格化”；完成后机器人同时返回预览图和可下载的 WebP 原始结果文件。
+发送“取消风格化”会清理临时图片。Agent 最终回答使用飞书
 富文本消息，首次对话或发送“菜单”会返回功能卡片，Web 控制台也会同步最近的渠道
 收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；若飞书内置浏览器
 阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
@@ -253,6 +257,45 @@ API 文档：`http://127.0.0.1:8000/docs`
 
 首次生成空间照片会下载约 100MB 的深度模型，之后可以离线推理。
 
+### 本地长期记忆 Embedding
+
+混合召回默认保留零下载 Hash Provider。若要启用真实的本地 Transformer，先显式准备
+固定版本的 IBM Granite Embedding 97M Multilingual R2：
+
+```powershell
+python backend/scripts/prepare_memory_embedding_model.py --download --smoke-test
+```
+
+随后在 `.env` 中设置：
+
+```dotenv
+AGENT_MEMORY_SEMANTIC_ENABLED=true
+AGENT_MEMORY_EMBEDDING_PROVIDER=transformer
+AGENT_MEMORY_EMBEDDING_MODEL_PATH=backend/models/embeddings/granite-embedding-97m-multilingual-r2
+```
+
+应用运行时强制 `local_files_only=True`、`trust_remote_code=False`，不会联网下载模型；
+向量使用长期记忆密钥加密。历史记忆可在服务停止或低流量时分批回填：
+
+```powershell
+python backend/scripts/backfill_memory_embeddings.py `
+  --model-path backend/models/embeddings/granite-embedding-97m-multilingual-r2 `
+  --all-owners
+```
+
+回填只处理允许自动召回的 `always` 记忆，不会为 `never` 记忆生成向量。模型准备需要
+联网一次；服务运行、查询和回填均只读取已准备的本地文件。
+
+上下文预算默认复用同一模型目录中的真实 Tokenizer，仅加载 tokenizer 文件：
+
+```dotenv
+AGENT_TOKENIZER_BACKEND=auto
+AGENT_TOKENIZER_PATH=
+```
+
+`AGENT_TOKENIZER_PATH` 留空时复用 `AGENT_MEMORY_EMBEDDING_MODEL_PATH`。`auto` 在本地
+Tokenizer 缺失时记录并回退保守估算；生产环境可设为 `transformers`，使配置错误快速失败。
+
 ### 前端
 
 另开一个终端：
@@ -323,6 +366,7 @@ Web 控制台是运行电脑上的 Root 管理员视图，可以查看本机记�
 - `backend/data/feishu_settings.json`：飞书非敏感配置和 Open ID 白名单；
 - `backend/data/channel.sqlite3`：飞书事件去重、执行状态和最近 500 条已授权渠道消息镜像；
 - `backend/data/*.enc`、`.secret_master_key`：加密密钥材料；
+- `backend/data/*.memory-key`：系统钥匙串不可用时的上下文记忆密钥降级文件；
 - `.env`、`.venv`、依赖和构建缓存。
 
 API Key 不写入浏览器 `localStorage`、响应体或 Agent 轨迹。后端优先使用系统钥匙串，
@@ -371,7 +415,7 @@ Use $team-git-workflow in English to prepare this change for review
 1. 使用真实飞书应用验收长连接、断线重连、权限和文本闭环；
 2. 从当前飞书实现抽象可复用的 `ChannelAdapter` 和统一消息数据模型；
 3. 增加审计、速率限制、审批过期和费用预算；
-4. 将已完成的 Web SQLite 会话模型扩展到统一渠道消息，并增加会话摘要；
+4. 将 Web/飞书分离的消息镜像迁移到统一事件模型，并补充跨渠道身份绑定验收；
 5. 实现空间照片缩略图、演示视频和签名预览链接；
 6. 建立 Capability Manifest、安装器和模型依赖隔离；
 7. 接入企业微信或微信公众号；

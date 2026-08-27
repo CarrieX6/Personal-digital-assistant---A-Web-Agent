@@ -68,6 +68,8 @@ from .models import (
     LLMSettingsUpdate,
     LLMRuntimePublic,
     MemoryCreateRequest,
+    MemoryEvidenceListResponse,
+    MemoryEvidencePublic,
     MemoryExportResponse,
     MemoryListResponse,
     MemoryPublic,
@@ -86,6 +88,7 @@ from .memory import (
     MemoryScope,
     MemoryStatus,
     MemoryType,
+    SESSION_SUMMARY_SCHEMA_VERSION,
 )
 from .settings import (
     LLMRuntimeManager,
@@ -127,6 +130,7 @@ def _conversation_public(summary: object) -> ConversationPublic:
     return ConversationPublic(
         id=_public_session_id(summary.thread_id),
         channel=summary.channel,
+        project_id=summary.project_id,
         title=summary.title,
         created_at=datetime.fromtimestamp(summary.created_at, tz=timezone.utc),
         updated_at=datetime.fromtimestamp(summary.updated_at, tz=timezone.utc),
@@ -155,6 +159,7 @@ def _memory_public(memory: MemoryRecord) -> MemoryPublic:
         confidence=memory.confidence,
         importance=memory.importance,
         sensitivity=memory.sensitivity,
+        retrieval_policy=memory.retrieval_policy,
         valid_from=datetime.fromtimestamp(memory.valid_from, tz=timezone.utc),
         valid_to=timestamp(memory.valid_to),
         status=memory.status,
@@ -166,6 +171,8 @@ def _memory_public(memory: MemoryRecord) -> MemoryPublic:
         utility_score=memory.utility_score,
         metadata=memory.metadata,
         relevance_score=memory.relevance_score,
+        evidence_count=memory.evidence_count,
+        evidence_refs=list(memory.evidence_refs),
     )
 
 
@@ -291,6 +298,17 @@ def create_app(
             llm_status=runtime_status.status,
             llm_provider=runtime_status.provider_id,
             model=current_runner.planner.model_name,
+            context_tokenizer=(
+                current_runner.context_builder.token_counter.identifier
+            ),
+            session_summary_provider=(
+                str(current_runner.planner.summary_provider_id)
+                if callable(
+                    getattr(current_runner.planner, "summarize_session", None)
+                )
+                else "fallback:extractive-v2"
+            ),
+            session_summary_schema=SESSION_SUMMARY_SCHEMA_VERSION,
             tool_count=len(current_registry.list_tools()),
             feishu_status=request.app.state.feishu_runtime.public_status().status,
         )
@@ -499,6 +517,7 @@ def create_app(
                 confidence=payload.confidence,
                 importance=payload.importance,
                 sensitivity=payload.sensitivity,
+                retrieval_policy=payload.retrieval_policy,
                 valid_from=(
                     payload.valid_from.timestamp()
                     if payload.valid_from is not None
@@ -519,6 +538,53 @@ def create_app(
         )
         assert created is not None
         return _memory_public(created)
+
+    @app.post(
+        "/api/memories/atomic",
+        response_model=MemoryListResponse,
+        status_code=201,
+    )
+    def create_atomic_memories(
+        payload: MemoryCreateRequest,
+        request: Request,
+    ) -> MemoryListResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            memory_ids = runner.memory_store.remember_many(
+                owner_id=WEB_OWNER_ID,
+                content=payload.content,
+                source="web:memory-center",
+                memory_type=payload.memory_type,
+                scope=payload.scope,
+                scope_id=payload.scope_id,
+                confidence=payload.confidence,
+                importance=payload.importance,
+                sensitivity=payload.sensitivity,
+                retrieval_policy=payload.retrieval_policy,
+                valid_from=(
+                    payload.valid_from.timestamp()
+                    if payload.valid_from is not None
+                    else None
+                ),
+                valid_to=(
+                    payload.valid_to.timestamp()
+                    if payload.valid_to is not None
+                    else None
+                ),
+                metadata=payload.metadata,
+            )
+        except (MemoryPolicyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        records = [
+            runner.memory_store.get_memory(
+                owner_id=WEB_OWNER_ID,
+                memory_id=memory_id,
+            )
+            for memory_id in memory_ids
+        ]
+        return MemoryListResponse(
+            memories=[_memory_public(record) for record in records if record is not None]
+        )
 
     @app.put("/api/memories/{memory_id}", response_model=MemoryPublic)
     def update_memory(
@@ -542,6 +608,52 @@ def create_app(
             status_code = 404 if "找不到" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return _memory_public(updated)
+
+    @app.get(
+        "/api/memories/{memory_id}/evidence",
+        response_model=MemoryEvidenceListResponse,
+    )
+    def list_memory_evidence(
+        memory_id: str,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> MemoryEvidenceListResponse:
+        runner: AgentRunner = request.app.state.runner
+        memory = runner.memory_store.get_memory(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+        )
+        if memory is None:
+            raise HTTPException(status_code=404, detail="找不到这条记忆。")
+        evidence = runner.memory_store.list_memory_evidence(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+            limit=limit,
+        )
+        return MemoryEvidenceListResponse(
+            evidence=[
+                MemoryEvidencePublic(
+                    evidence_id=item.evidence_id,
+                    memory_id=item.memory_id,
+                    source_type=item.source_type,
+                    source=item.source,
+                    excerpt=item.excerpt,
+                    content_hash=item.content_hash,
+                    source_message_id=item.source_message_id,
+                    source_run_id=item.source_run_id,
+                    confidence=item.confidence,
+                    observed_at=datetime.fromtimestamp(
+                        item.observed_at,
+                        tz=timezone.utc,
+                    ),
+                    created_at=datetime.fromtimestamp(
+                        item.created_at,
+                        tz=timezone.utc,
+                    ),
+                )
+                for item in evidence
+            ]
+        )
 
     @app.delete("/api/memories/{memory_id}", status_code=204)
     def delete_memory(memory_id: str, request: Request) -> Response:
@@ -938,6 +1050,7 @@ def create_app(
                 owner_id=WEB_OWNER_ID,
                 thread_id=_web_thread_id(payload.session_id or "default"),
                 channel="web",
+                project_id=payload.project_id,
             )
             release_ids = {
                 str(source_id)
@@ -1015,6 +1128,38 @@ def create_app(
                     answer=response.answer,
                 )
             return response
+        except AgentRunIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AgentRunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/agent/runs/{run_id}/resume",
+        response_model=AgentRunResponse,
+    )
+    def resume_interrupted_agent_run(
+        run_id: str,
+        request: Request,
+    ) -> AgentRunResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            return runner.continue_run(run_id, is_admin=True)
+        except AgentRunIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AgentRunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/agent/runs/{run_id}/abandon",
+        response_model=AgentRunResponse,
+    )
+    def abandon_interrupted_agent_run(
+        run_id: str,
+        request: Request,
+    ) -> AgentRunResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            return runner.abandon_interrupted_run(run_id, is_admin=True)
         except AgentRunIsolationError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except AgentRunError as exc:

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, HttpUrl, SecretStr
 class AgentRunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=100)
+    project_id: str | None = Field(default=None, max_length=160)
     attachment_image_ids: list[str] = Field(
         default_factory=list,
         max_length=4,
@@ -42,7 +43,13 @@ class TraceStep(BaseModel):
 
 class AgentRunResponse(BaseModel):
     run_id: str
-    status: Literal["waiting_approval", "completed", "failed"]
+    status: Literal[
+        "waiting_approval",
+        "recoverable",
+        "needs_attention",
+        "completed",
+        "failed",
+    ]
     mode: str
     answer: str
     steps: list[TraceStep]
@@ -70,6 +77,7 @@ class ConversationRenameRequest(BaseModel):
 class ConversationPublic(BaseModel):
     id: str
     channel: str
+    project_id: str | None = None
     title: str
     created_at: datetime
     updated_at: datetime
@@ -105,6 +113,7 @@ MemoryTypeName = Literal[
 MemoryScopeName = Literal["user", "channel", "thread", "project"]
 MemoryStatusName = Literal["candidate", "active", "superseded", "archived"]
 MemorySensitivityName = Literal["normal", "private", "sensitive"]
+MemoryRetrievalPolicyName = Literal["always", "explicit_only", "never"]
 
 
 class MemoryCreateRequest(BaseModel):
@@ -115,6 +124,7 @@ class MemoryCreateRequest(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
     importance: float = Field(default=0.65, ge=0, le=1)
     sensitivity: MemorySensitivityName | None = None
+    retrieval_policy: MemoryRetrievalPolicyName | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -128,6 +138,7 @@ class MemoryUpdateRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     importance: float | None = Field(default=None, ge=0, le=1)
     sensitivity: MemorySensitivityName | None = None
+    retrieval_policy: MemoryRetrievalPolicyName | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     status: MemoryStatusName | None = None
@@ -147,6 +158,7 @@ class MemoryPublic(BaseModel):
     confidence: float = Field(ge=0, le=1)
     importance: float = Field(ge=0, le=1)
     sensitivity: MemorySensitivityName
+    retrieval_policy: MemoryRetrievalPolicyName
     valid_from: datetime
     valid_to: datetime | None = None
     status: MemoryStatusName
@@ -158,6 +170,26 @@ class MemoryPublic(BaseModel):
     utility_score: float = Field(ge=0, le=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
     relevance_score: float = Field(default=0, ge=0)
+    evidence_count: int = Field(default=0, ge=0)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class MemoryEvidencePublic(BaseModel):
+    evidence_id: str
+    memory_id: str
+    source_type: str
+    source: str
+    excerpt: str
+    content_hash: str
+    source_message_id: int | None = None
+    source_run_id: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    observed_at: datetime
+    created_at: datetime
+
+
+class MemoryEvidenceListResponse(BaseModel):
+    evidence: list[MemoryEvidencePublic]
 
 
 class MemoryListResponse(BaseModel):
@@ -213,6 +245,9 @@ class HealthResponse(BaseModel):
     ] = "unconfigured"
     llm_provider: str | None = None
     model: str | None = None
+    context_tokenizer: str | None = None
+    session_summary_provider: str | None = None
+    session_summary_schema: str | None = None
     tool_count: int
     feishu_status: Literal[
         "disabled", "starting", "connected", "reconnecting", "error"

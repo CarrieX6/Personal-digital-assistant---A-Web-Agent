@@ -3328,6 +3328,25 @@ textarea:focus {
   opacity: 0.55;
 }
 
+.root-recovery-queue {
+  background: #edf7f4;
+  border-bottom-color: #bddbd2;
+}
+
+.root-recovery-queue > div:first-child strong,
+.root-recovery-queue .root-approval-item > span strong {
+  color: #245f51;
+}
+
+.root-recovery-queue > div:first-child span,
+.root-recovery-queue .root-approval-item > span small {
+  color: #577d73;
+}
+
+.root-recovery-queue .root-approval-item {
+  border-color: #bddbd2;
+}
+
 .chat-message-scroll {
   flex: 1;
   min-height: 0;

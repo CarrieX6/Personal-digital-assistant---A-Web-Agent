@@ -190,6 +190,43 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         spatial.close()
 
 
+def test_photo_style_service_reuses_real_idempotency_key(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    try:
+        content = spatial.stage_source_image(
+            _png("#b88d72"),
+            original_name="content.png",
+            owner_id="user-a",
+        )
+        reference = spatial.stage_source_image(
+            _png("#315a84"),
+            original_name="reference.png",
+            owner_id="user-a",
+        )
+        first = style.create_transfer_from_sources(
+            content.id,
+            [reference.id],
+            owner_id="user-a",
+            idempotency_key="run-9:call-2",
+        )
+        replay = style.create_transfer_from_sources(
+            content.id,
+            [reference.id],
+            owner_id="user-a",
+            idempotency_key="run-9:call-2",
+        )
+
+        assert replay.asset.id == first.asset.id
+        assert replay.job.id == first.job.id
+        assert [asset.id for asset in spatial.list_assets(owner_id="user-a")] == [
+            first.asset.id
+        ]
+    finally:
+        style.close()
+        spatial.close()
+
+
 def test_visual_question_bypasses_image_tools_and_supports_followup(
     tmp_path: Path,
 ) -> None:

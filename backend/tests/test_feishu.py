@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,7 @@ class FakeChannel:
         self.connected = False
         self.download_bytes: bytes | None = None
         self.download_by_key: dict[str, bytes] = {}
+        self.download_requests: list[tuple[str, str, str | None]] = []
 
     def on(self, name: str, handler: Any) -> None:
         self.handlers[name] = handler
@@ -102,6 +104,7 @@ class FakeChannel:
         resource_type: str = "image",
         message_id: str | None = None,
     ) -> bytes | None:
+        self.download_requests.append((file_key, resource_type, message_id))
         return self.download_by_key.get(file_key, self.download_bytes)
 
 
@@ -366,7 +369,11 @@ def test_sqlite_style_collection_is_persistent_and_user_scoped(
 ) -> None:
     path = tmp_path / "channel.sqlite3"
     first = SQLiteChannelStore(path)
-    assert first.start_style_collection("oc_chat", "ou_a") == []
+    assert first.start_style_collection(
+        "oc_chat",
+        "ou_a",
+        description="保留人物构图",
+    ) == []
     assert first.append_style_image(
         "oc_chat",
         "ou_a",
@@ -375,6 +382,16 @@ def test_sqlite_style_collection_is_persistent_and_user_scoped(
         max_age_seconds=1800,
     ) == [("source-content", "om_content")]
     first.start_style_collection("oc_chat", "ou_b")
+    assert first.update_style_description(
+        "oc_chat",
+        "ou_a",
+        description="增加水彩纸纹理",
+        append=True,
+        max_age_seconds=1800,
+    ) == (
+        [("source-content", "om_content")],
+        "保留人物构图\n增加水彩纸纹理",
+    )
 
     second = SQLiteChannelStore(path)
     assert second.style_collection(
@@ -382,6 +399,14 @@ def test_sqlite_style_collection_is_persistent_and_user_scoped(
         "ou_a",
         max_age_seconds=1800,
     ) == [("source-content", "om_content")]
+    assert second.style_collection_draft(
+        "oc_chat",
+        "ou_a",
+        max_age_seconds=1800,
+    ) == (
+        [("source-content", "om_content")],
+        "保留人物构图\n增加水彩纸纹理",
+    )
     assert second.style_collection(
         "oc_chat",
         "ou_b",
@@ -398,6 +423,37 @@ def test_sqlite_style_collection_is_persistent_and_user_scoped(
         )
         is None
     )
+
+
+def test_sqlite_style_collection_migrates_existing_drafts(tmp_path: Path) -> None:
+    path = tmp_path / "channel.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE channel_style_collections (
+                chat_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                images_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (chat_id, sender_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO channel_style_collections
+                (chat_id, sender_id, images_json, updated_at)
+            VALUES ('oc_chat', 'ou_user', '[]', 9999999999)
+            """
+        )
+
+    store = SQLiteChannelStore(path)
+
+    assert store.style_collection_draft(
+        "oc_chat",
+        "ou_user",
+        max_age_seconds=1800,
+    ) == ([], "")
 
 
 def test_runtime_authorizes_deduplicates_and_replies(tmp_path: Path) -> None:
@@ -743,12 +799,130 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
             item[1]["card"] for item in channel.sent if "card" in item[1]
         )
         assert "图片风格化" in json.dumps(card_payload, ensure_ascii=False)
-        assert any(
-            "先发送 1 张内容图" in item[1].get("text", "")
+        draft_card = next(
+            item[1]["card"]
             for item in channel.sent
+            if "card" in item[1]
+            and "图片风格化草稿" in json.dumps(item[1]["card"], ensure_ascii=False)
         )
+        draft_text = json.dumps(draft_card, ensure_ascii=False)
+        assert "支持逐张发送" in draft_text
+        assert "待上传" in draft_text
         assert runner.messages == []
         assert "图片风格化" in store.list_events()[-2].content
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_runtime_natural_style_request_auto_menu_and_single_image_routing(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    runner = FakeRunner()
+    channel = FakeChannel()
+    buffer = BytesIO()
+    Image.new("RGB", (160, 120), "#b88d72").save(buffer, "PNG")
+    channel.download_by_key = {"img_content": buffer.getvalue()}
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        runner,  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        style_service=style,
+    )
+
+    def text_message(message_id: str, text: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            message_id=message_id,
+            chat_id="oc_chat",
+            chat_type="p2p",
+            sender_id="ou_allowed",
+            sender_is_bot=False,
+            mentioned_bot=False,
+            raw_content_type="text",
+            body_text=text,
+            safe_content_text=text,
+            resources=[],
+            content=None,
+        )
+
+    image_message = SimpleNamespace(
+        id="om_style_content",
+        message_id="om_style_content",
+        chat_id="oc_chat",
+        chat_type="p2p",
+        sender_id="ou_allowed",
+        sender_is_bot=False,
+        mentioned_bot=False,
+        raw_content_type="image",
+        body_text="",
+        safe_content_text="",
+        resources=[
+            SimpleNamespace(
+                type="image",
+                file_key="img_content",
+                file_name="content.png",
+            )
+        ],
+        content=SimpleNamespace(image_key="img_content"),
+    )
+
+    async def drain_tasks() -> None:
+        await asyncio.sleep(0)
+        while runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["message"](
+            text_message("om_style_request", "我要进行图片风格化任务")
+        )
+        await drain_tasks()
+        await channel.handlers["message"](image_message)
+        await drain_tasks()
+        await channel.handlers["message"](
+            text_message("om_feature_card", "功能卡片")
+        )
+        await drain_tasks()
+        await channel.handlers["message"](text_message("om_hello", "你好"))
+        await drain_tasks()
+
+    try:
+        asyncio.run(scenario())
+
+        sent_payload = json.dumps([item[1] for item in channel.sent], ensure_ascii=False)
+        menu_cards = [
+            item[1]["card"]
+            for item in channel.sent
+            if "card" in item[1]
+            and "个人数字助手" in json.dumps(item[1]["card"], ensure_ascii=False)
+        ]
+        draft = store.style_collection_draft(
+            "oc_chat",
+            "ou_allowed",
+            max_age_seconds=runtime.style_collection_ttl_seconds,
+        )
+        assert len(menu_cards) == 3
+        assert draft is not None and len(draft[0]) == 1
+        assert runner.messages == []
+        assert spatial.list_assets(owner_id="feishu:cli_test:ou_allowed") == []
+        assert "图片风格化草稿" in sent_payload
+        assert "不预设固定风格" in sent_payload
+        assert "油画" not in sent_payload
+        assert "空间照片任务已创建" not in sent_payload
     finally:
         style.close()
         spatial.close()
@@ -819,19 +993,11 @@ def test_runtime_collects_style_images_and_returns_preview_and_download(
             content=SimpleNamespace(image_key=file_keys[-1]),
         )
 
-    start_message = SimpleNamespace(
-        id="om_style_start",
-        message_id="om_style_start",
+    start_event = SimpleNamespace(
         chat_id="oc_chat",
-        chat_type="p2p",
-        sender_id="ou_allowed",
-        sender_is_bot=False,
-        mentioned_bot=False,
-        raw_content_type="text",
-        body_text="开始风格化",
-        safe_content_text="开始风格化",
-        resources=[],
-        content=None,
+        message_id="om_style_start",
+        operator=SimpleNamespace(open_id="ou_allowed"),
+        action=SimpleNamespace(value={"command": "photo_style_start"}),
     )
 
     async def drain_tasks() -> None:
@@ -852,16 +1018,26 @@ def test_runtime_collects_style_images_and_returns_preview_and_download(
             )
         )
         await drain_tasks()
-        await channel.handlers["message"](start_message)
+        await channel.handlers["cardAction"](start_event)
         await drain_tasks()
 
     try:
         asyncio.run(scenario())
 
         replies = [item[1].get("text", "") for item in channel.sent]
-        assert any("已进入图片风格化模式" in text for text in replies)
-        assert any("保存为内容图" in text for text in replies)
-        assert any("保存为风格参考图 1" in text for text in replies)
+        assert any(
+            "图片风格化草稿" in json.dumps(item[1].get("card", {}), ensure_ascii=False)
+            for item in channel.sent
+        )
+        draft_cards = [
+            json.dumps(item[1]["card"], ensure_ascii=False)
+            for item in channel.sent
+            if "card" in item[1]
+            and "图片风格化草稿" in json.dumps(item[1]["card"], ensure_ascii=False)
+        ]
+        assert any("内容图" in card and "已上传 1 张" in card for card in draft_cards)
+        assert any("风格参考图" in card and "已上传 1 / 3 张" in card for card in draft_cards)
+        assert any("开始生成" in card for card in draft_cards)
         assert any("图片风格化任务已创建" in text for text in replies)
         assert any("已完成" in text for text in replies)
 
@@ -958,7 +1134,8 @@ def test_runtime_style_mode_never_falls_back_to_spatial_when_provider_missing(
         asyncio.run(scenario())
 
         replies = [item[1].get("text", "") for item in channel.sent]
-        assert any("图片不会转入空间照片" in text for text in replies)
+        sent_payload = json.dumps([item[1] for item in channel.sent], ensure_ascii=False)
+        assert "图片不会转入空间照片" in sent_payload
         assert any("图片风格化能力当前不可用" in text for text in replies)
         assert not any("空间照片任务已创建" in text for text in replies)
         assert spatial.list_assets(owner_id="feishu:cli_test:ou_allowed") == []
@@ -968,6 +1145,126 @@ def test_runtime_style_mode_never_falls_back_to_spatial_when_provider_missing(
             max_age_seconds=runtime.style_collection_ttl_seconds,
         ) == []
     finally:
+        spatial.close()
+
+
+def test_runtime_accepts_rich_post_file_and_incremental_style_description(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+
+    def png(color: str) -> bytes:
+        buffer = BytesIO()
+        Image.new("RGB", (160, 120), color).save(buffer, "PNG")
+        return buffer.getvalue()
+
+    channel.download_by_key = {
+        "img_content": png("#b88d72"),
+        "file_reference": png("#315a84"),
+    }
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        style_service=style,
+        job_poll_interval=0.01,
+        job_timeout_seconds=5,
+    )
+    rich_post = SimpleNamespace(
+        id="om_rich_style",
+        message_id="om_rich_style",
+        chat_id="oc_chat",
+        chat_type="p2p",
+        sender_id="ou_allowed",
+        sender_is_bot=False,
+        mentioned_bot=False,
+        raw_content_type="post",
+        body_text="保留人物构图，改成柔和水彩",
+        safe_content_text="保留人物构图，改成柔和水彩",
+        resources=[
+            SimpleNamespace(
+                type="image",
+                file_key="img_content",
+                file_name="content.png",
+            ),
+            SimpleNamespace(
+                type="file",
+                file_key="file_reference",
+                file_name="reference.webp",
+            ),
+        ],
+        content=None,
+    )
+
+    def text_message(message_id: str, text: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            message_id=message_id,
+            chat_id="oc_chat",
+            chat_type="p2p",
+            sender_id="ou_allowed",
+            sender_is_bot=False,
+            mentioned_bot=False,
+            raw_content_type="text",
+            body_text=text,
+            safe_content_text=text,
+            resources=[],
+            content=None,
+        )
+
+    async def drain_tasks() -> None:
+        await asyncio.sleep(0)
+        while runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["message"](rich_post)
+        await drain_tasks()
+        await channel.handlers["message"](
+            text_message("om_style_description", "补充描述：加强纸张纹理")
+        )
+        await drain_tasks()
+        await channel.handlers["message"](
+            text_message("om_style_generate", "开始风格化：不要添加文字")
+        )
+        await drain_tasks()
+
+    try:
+        asyncio.run(scenario())
+
+        assets = spatial.list_assets(owner_id="feishu:cli_test:ou_allowed")
+        assert len(assets) == 1
+        assert assets[0].kind == "photo_style_transfer"
+        assert assets[0].parameters["prompt"] == (
+            "保留人物构图，改成柔和水彩\n加强纸张纹理\n不要添加文字"
+        )
+        assert ("img_content", "image", "om_rich_style") in channel.download_requests
+        assert (
+            "file_reference",
+            "file",
+            "om_rich_style",
+        ) in channel.download_requests
+        sent_payload = json.dumps([item[1] for item in channel.sent], ensure_ascii=False)
+        assert "图片风格化草稿" in sent_payload
+        assert "开始生成" in sent_payload
+        assert "图片风格化任务已创建" in sent_payload
+        assert "空间照片任务已创建" not in sent_payload
+    finally:
+        style.close()
         spatial.close()
 
 
@@ -993,8 +1290,8 @@ def test_image_resource_entries_keep_batched_source_message_ids() -> None:
     )
 
     assert FeishuChannelRuntime._image_resource_entries(merged) == [
-        ("img_first", None, "om_first"),
-        ("img_second", None, "om_second"),
+        ("img_first", None, "om_first", "image"),
+        ("img_second", None, "om_second", "image"),
     ]
 
 

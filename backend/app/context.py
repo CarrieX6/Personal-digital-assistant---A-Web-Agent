@@ -7,35 +7,42 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Sequence
 
+from .tokenization import (
+    ContextWindowExceededError,
+    TokenCounter,
+    clip_text_to_tokens,
+    get_default_token_counter,
+)
+
 
 MessageRole = Literal["system", "user", "assistant"]
 TrustLevel = Literal["trusted_system", "untrusted_user"]
 
 
 def estimate_tokens(value: str) -> int:
-    """Return a deterministic, conservative token estimate without a tokenizer.
+    """Count with the configured real tokenizer, or its explicit fallback."""
 
-    UTF-8 bytes divided by three intentionally overestimates most English text
-    while remaining close to one token per CJK character. The fixed minimum
-    accounts for message framing used by OpenAI-compatible providers.
-    """
-
-    if not value:
-        return 0
-    return max(1, math.ceil(len(value.encode("utf-8")) / 3))
+    return get_default_token_counter().count(value)
 
 
-def estimate_json_tokens(value: Any) -> int:
-    return estimate_tokens(
+def estimate_json_tokens(
+    value: Any,
+    token_counter: TokenCounter | None = None,
+) -> int:
+    counter = token_counter or get_default_token_counter()
+    return counter.count(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
 
 @dataclass(frozen=True)
 class ContextBudgetConfig:
-    total_tokens: int = 16_384
-    reserved_output_tokens: int = 2_048
-    minimum_current_user_tokens: int = 256
+    total_tokens: int = 98_304
+    reserved_output_tokens: int = 16_384
+    minimum_current_user_tokens: int = 1_024
+    recent_history_tokens: int = 32_768
+    session_summary_tokens: int = 8_192
+    long_term_memory_tokens: int = 16_384
     small_registry_threshold: int = 8
     maximum_selected_tools: int = 16
 
@@ -43,13 +50,22 @@ class ContextBudgetConfig:
     def from_env(cls) -> "ContextBudgetConfig":
         return cls(
             total_tokens=_bounded_env_int(
-                "AGENT_CONTEXT_TOKEN_BUDGET", 16_384, 2_048, 131_072
+                "AGENT_CONTEXT_TOKEN_BUDGET", 98_304, 2_048, 131_072
             ),
             reserved_output_tokens=_bounded_env_int(
-                "AGENT_OUTPUT_TOKEN_RESERVE", 2_048, 256, 32_768
+                "AGENT_OUTPUT_TOKEN_RESERVE", 16_384, 256, 32_768
             ),
             minimum_current_user_tokens=_bounded_env_int(
-                "AGENT_MINIMUM_USER_TOKENS", 256, 64, 4_096
+                "AGENT_MINIMUM_USER_TOKENS", 1_024, 64, 4_096
+            ),
+            recent_history_tokens=_bounded_env_int(
+                "AGENT_RECENT_HISTORY_TOKENS", 32_768, 128, 32_768
+            ),
+            session_summary_tokens=_bounded_env_int(
+                "AGENT_SESSION_SUMMARY_TOKENS", 8_192, 128, 8_192
+            ),
+            long_term_memory_tokens=_bounded_env_int(
+                "AGENT_LONG_TERM_MEMORY_TOKENS", 16_384, 128, 16_384
             ),
             small_registry_threshold=_bounded_env_int(
                 "AGENT_SMALL_TOOL_REGISTRY", 8, 1, 32
@@ -69,10 +85,23 @@ class ContextBudgetConfig:
             max(int(self.minimum_current_user_tokens), 64),
             max(64, total - output - 256),
         )
+        input_capacity = max(256, total - output)
         return ContextBudgetConfig(
             total_tokens=total,
             reserved_output_tokens=output,
             minimum_current_user_tokens=minimum_user,
+            recent_history_tokens=min(
+                max(int(self.recent_history_tokens), 128),
+                input_capacity,
+            ),
+            session_summary_tokens=min(
+                max(int(self.session_summary_tokens), 128),
+                max(128, input_capacity // 3),
+            ),
+            long_term_memory_tokens=min(
+                max(int(self.long_term_memory_tokens), 128),
+                max(128, input_capacity // 3),
+            ),
             small_registry_threshold=min(
                 max(int(self.small_registry_threshold), 1), 32
             ),
@@ -138,14 +167,20 @@ class AttachmentMetadata:
 
 @dataclass(frozen=True)
 class ContextBudgetUsage:
+    tokenizer: str
     total_tokens: int
     reserved_output_tokens: int
     system_prompt_tokens: int
     tool_schema_tokens: int
     trusted_metadata_tokens: int
+    current_user_tokens: int
+    session_summary_tokens: int
+    long_term_memory_tokens: int
+    history_tokens: int
     message_tokens: int
     estimated_total_tokens: int
     dropped_history_messages: int
+    truncated_history_messages: int
     dropped_memories: int
     current_user_truncated: bool
 
@@ -197,8 +232,13 @@ class BuiltContext:
 class ToolSelector:
     """Deterministically narrows tool schemas before an LLM sees them."""
 
-    def __init__(self, config: ContextBudgetConfig) -> None:
+    def __init__(
+        self,
+        config: ContextBudgetConfig,
+        token_counter: TokenCounter,
+    ) -> None:
         self.config = config.normalized()
+        self.token_counter = token_counter
 
     def select(
         self,
@@ -213,7 +253,8 @@ class ToolSelector:
             return []
         if (
             len(schemas) <= self.config.small_registry_threshold
-            and estimate_json_tokens(schemas) <= schema_token_budget
+            and estimate_json_tokens(schemas, self.token_counter)
+            <= schema_token_budget
         ):
             return schemas
 
@@ -237,7 +278,14 @@ class ToolSelector:
                 score += 12
             if name == "list_capabilities":
                 score += 1
-            scored.append((score, -index, estimate_json_tokens(schema), schema))
+            scored.append(
+                (
+                    score,
+                    -index,
+                    estimate_json_tokens(schema, self.token_counter),
+                    schema,
+                )
+            )
 
         positive = [item for item in scored if item[0] > 1]
         if positive:
@@ -280,10 +328,12 @@ class ContextBuilder:
         config: ContextBudgetConfig | None = None,
         *,
         system_prompt: str = "",
+        token_counter: TokenCounter | None = None,
     ) -> None:
         self.config = (config or ContextBudgetConfig.from_env()).normalized()
         self.system_prompt = system_prompt
-        self.selector = ToolSelector(self.config)
+        self.token_counter = token_counter or get_default_token_counter()
+        self.selector = ToolSelector(self.config, self.token_counter)
 
     def select_tools(
         self,
@@ -292,14 +342,17 @@ class ContextBuilder:
         tool_schemas: Sequence[dict[str, Any]],
         attachment_present: bool = False,
     ) -> list[dict[str, Any]]:
-        available = max(
-            128,
+        available = (
             self.config.total_tokens
             - self.config.reserved_output_tokens
-            - estimate_tokens(self.system_prompt)
+            - self.token_counter.count(self.system_prompt)
             - self.config.minimum_current_user_tokens
-            - 128,
+            - 128
         )
+        if available < 0:
+            raise ContextWindowExceededError(
+                "系统提示与最小用户消息预留已超过模型上下文窗口。"
+            )
         return self.selector.select(
             user_message=user_message,
             tool_schemas=tool_schemas,
@@ -316,6 +369,11 @@ class ContextBuilder:
         session_summary: str = "",
         open_loops: Sequence[str] = (),
         decisions: Sequence[str] = (),
+        completed_actions: Sequence[str] = (),
+        active_assumptions: Sequence[str] = (),
+        artifact_refs: Sequence[str] = (),
+        blockers: Sequence[str] = (),
+        next_goal: str | None = None,
         attachments: Sequence[dict[str, Any]],
         selected_tool_schemas: Sequence[dict[str, Any]],
     ) -> BuiltContext:
@@ -331,58 +389,141 @@ class ContextBuilder:
             )
             if item.source_image_id
         )
-        system_tokens = estimate_tokens(self.system_prompt) + 8
-        tool_tokens = estimate_json_tokens(list(selected_tool_schemas)) + 16
+        system_tokens = self.token_counter.count(self.system_prompt) + 8
+        tool_tokens = (
+            estimate_json_tokens(list(selected_tool_schemas), self.token_counter)
+            + 16
+        )
         fixed_budget = (
             self.config.reserved_output_tokens + system_tokens + tool_tokens
         )
-        available = max(64, self.config.total_tokens - fixed_budget)
+        available = self.config.total_tokens - fixed_budget
+        if available < self.config.minimum_current_user_tokens + 8:
+            raise ContextWindowExceededError(
+                "系统提示、工具 Schema 与输出预留挤占了当前用户消息空间。"
+            )
 
         trusted_message = self._trusted_attachment_message(attachment_items)
         trusted_tokens = (
-            _message_tokens(trusted_message) if trusted_message else 0
+            _message_tokens(trusted_message, self.token_counter)
+            if trusted_message
+            else 0
         )
-        remaining = max(64, available - trusted_tokens)
+        remaining = available - trusted_tokens
+        if remaining < self.config.minimum_current_user_tokens + 8:
+            raise ContextWindowExceededError(
+                "可信附件元数据使完整请求无法保留最小用户消息空间。"
+            )
 
+        all_normalized_memories = [
+            self._coerce_memory(raw, index)
+            for index, raw in enumerate(memories)
+        ]
+        cross_layer_sources = [
+            current_user_message,
+            session_summary,
+            *open_loops,
+            *decisions,
+            *completed_actions,
+            *active_assumptions,
+            *blockers,
+            *(content for _, content in conversation_messages),
+        ]
+        normalized_memories = [
+            memory
+            for memory in all_normalized_memories
+            if not _duplicates_context_layer(memory.content, cross_layer_sources)
+        ]
+        has_session_state = bool(
+            session_summary.strip()
+            or open_loops
+            or decisions
+            or completed_actions
+            or active_assumptions
+            or artifact_refs
+            or blockers
+            or next_goal
+        )
+        knowledge_reserve = (
+            self.config.session_summary_tokens if has_session_state else 0
+        ) + (
+            self.config.long_term_memory_tokens if normalized_memories else 0
+        )
+        reserve_cap = max(
+            0,
+            remaining - self.config.minimum_current_user_tokens - 8,
+        )
+        knowledge_reserve = min(knowledge_reserve, reserve_cap)
         current, current_truncated = _clip_to_tokens(
-            current_user_message.strip(), max(1, remaining - 8)
+            current_user_message.strip(),
+            max(1, remaining - knowledge_reserve - 8),
+            preserve_tail=True,
+            token_counter=self.token_counter,
         )
         current_message = {
             "role": "user",
             "content": current or "（空消息）",
         }
-        current_cost = _message_tokens(current_message)
+        current_cost = _message_tokens(current_message, self.token_counter)
         remaining = max(0, remaining - current_cost)
 
         session_message = self._session_memory_message(
             summary=session_summary,
             open_loops=open_loops,
             decisions=decisions,
+            completed_actions=completed_actions,
+            active_assumptions=active_assumptions,
+            artifact_refs=artifact_refs,
+            blockers=blockers,
+            next_goal=next_goal,
         )
+        session_cost = 0
         if session_message:
-            session_budget = min(remaining, max(96, int(available * 0.18)))
+            session_budget = min(
+                remaining,
+                self.config.session_summary_tokens,
+            )
             clipped, _ = _clip_to_tokens(
-                session_message["content"], max(1, session_budget - 8)
+                session_message["content"],
+                max(1, session_budget - 8),
+                token_counter=self.token_counter,
             )
             session_message = {"role": "user", "content": clipped}
-            session_cost = _message_tokens(session_message)
+            session_cost = _message_tokens(session_message, self.token_counter)
             if session_cost <= remaining:
                 remaining -= session_cost
             else:
                 session_message = None
+                session_cost = 0
 
-        normalized_memories = [
-            self._coerce_memory(raw, index)
-            for index, raw in enumerate(memories)
-        ]
-        memory_budget = min(remaining, max(96, int(available * 0.30)))
+        memory_budget = min(
+            remaining,
+            self.config.long_term_memory_tokens,
+        )
         selected_memories: list[ExplicitMemory] = []
         memory_used = 0
-        for memory in normalized_memories:
+        memory_candidates = list(normalized_memories)
+        if any(memory.relevance_score > 0 for memory in memory_candidates):
+            memory_candidates.sort(
+                key=lambda memory: (
+                    memory.relevance_score
+                    / max(
+                        1.0,
+                        math.log2(self.token_counter.count(memory.content) + 2),
+                    ),
+                    memory.relevance_score,
+                    memory.importance,
+                ),
+                reverse=True,
+            )
+        for memory in memory_candidates:
             candidate = self._memory_message([*selected_memories, memory])
-            cost = _message_tokens(candidate)
+            cost = _message_tokens(candidate, self.token_counter)
             previous_cost = (
-                _message_tokens(self._memory_message(selected_memories))
+                _message_tokens(
+                    self._memory_message(selected_memories),
+                    self.token_counter,
+                )
                 if selected_memories
                 else 0
             )
@@ -403,12 +544,35 @@ class ContextBuilder:
             if str(content).strip()
         ]
         selected_history: list[ContextMessage] = []
+        truncated_history_messages = 0
+        history_remaining = min(
+            remaining,
+            self.config.recent_history_tokens,
+        )
         for item in reversed(safe_history):
             candidate = {"role": item.role, "content": item.content}
-            cost = _message_tokens(candidate)
-            if cost <= remaining:
+            cost = _message_tokens(candidate, self.token_counter)
+            if cost <= history_remaining:
                 selected_history.append(item)
-                remaining -= cost
+                history_remaining -= cost
+                continue
+            if history_remaining > 16:
+                clipped, was_truncated = _clip_to_tokens(
+                    item.content,
+                    history_remaining - 8,
+                    token_counter=self.token_counter,
+                )
+                if clipped:
+                    selected_history.append(
+                        ContextMessage(
+                            role=item.role,
+                            content=clipped,
+                            trust=item.trust,
+                            source=item.source,
+                        )
+                    )
+                    truncated_history_messages += int(was_truncated)
+                    history_remaining = 0
         selected_history.reverse()
 
         planner_messages: list[dict[str, str]] = []
@@ -424,25 +588,47 @@ class ContextBuilder:
         )
         planner_messages.append(current_message)
 
-        message_tokens = sum(_message_tokens(item) for item in planner_messages)
+        message_tokens = sum(
+            _message_tokens(item, self.token_counter)
+            for item in planner_messages
+        )
+        history_tokens = sum(
+            _message_tokens(
+                {"role": item.role, "content": item.content},
+                self.token_counter,
+            )
+            for item in selected_history
+        )
         estimated_total = (
             self.config.reserved_output_tokens
             + system_tokens
             + tool_tokens
             + message_tokens
         )
+        if estimated_total > self.config.total_tokens:
+            raise ContextWindowExceededError(
+                "上下文构建结果超过配置的模型窗口，已阻止发送。"
+            )
         usage = ContextBudgetUsage(
+            tokenizer=self.token_counter.identifier,
             total_tokens=self.config.total_tokens,
             reserved_output_tokens=self.config.reserved_output_tokens,
             system_prompt_tokens=system_tokens,
             tool_schema_tokens=tool_tokens,
             trusted_metadata_tokens=trusted_tokens,
+            current_user_tokens=current_cost,
+            session_summary_tokens=session_cost,
+            long_term_memory_tokens=memory_used,
+            history_tokens=history_tokens,
             message_tokens=message_tokens,
             estimated_total_tokens=estimated_total,
             dropped_history_messages=(
                 len(safe_history) - len(selected_history)
             ),
-            dropped_memories=len(normalized_memories) - len(selected_memories),
+            truncated_history_messages=truncated_history_messages,
+            dropped_memories=(
+                len(all_normalized_memories) - len(selected_memories)
+            ),
             current_user_truncated=current_truncated,
         )
         return BuiltContext(
@@ -494,13 +680,34 @@ class ContextBuilder:
         summary: str,
         open_loops: Sequence[str],
         decisions: Sequence[str],
+        completed_actions: Sequence[str],
+        active_assumptions: Sequence[str],
+        artifact_refs: Sequence[str],
+        blockers: Sequence[str],
+        next_goal: str | None,
     ) -> dict[str, str] | None:
-        if not summary.strip() and not open_loops and not decisions:
+        if not any(
+            (
+                summary.strip(),
+                open_loops,
+                decisions,
+                completed_actions,
+                active_assumptions,
+                artifact_refs,
+                blockers,
+                next_goal,
+            )
+        ):
             return None
         payload = {
             "summary": summary.strip(),
             "open_loops": [str(item) for item in open_loops],
             "decisions": [str(item) for item in decisions],
+            "completed_actions": [str(item) for item in completed_actions],
+            "active_assumptions": [str(item) for item in active_assumptions],
+            "artifact_refs": [str(item) for item in artifact_refs],
+            "blockers": [str(item) for item in blockers],
+            "next_goal": str(next_goal) if next_goal else None,
         }
         return {
             "role": "user",
@@ -573,6 +780,25 @@ class ContextBuilder:
         }
 
 
+def _duplicates_context_layer(content: str, sources: Sequence[str]) -> bool:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", content.casefold())
+    if not normalized:
+        return True
+    for source in sources:
+        source_normalized = re.sub(
+            r"[^a-z0-9\u4e00-\u9fff]+",
+            "",
+            str(source).casefold(),
+        )
+        if not source_normalized:
+            continue
+        if normalized == source_normalized:
+            return True
+        if len(normalized) >= 8 and normalized in source_normalized:
+            return True
+    return False
+
+
 def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
@@ -581,19 +807,27 @@ def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
     return min(max(value, lower), upper)
 
 
-def _message_tokens(message: dict[str, str]) -> int:
-    return estimate_tokens(message.get("content", "")) + 8
+def _message_tokens(
+    message: dict[str, str],
+    token_counter: TokenCounter | None = None,
+) -> int:
+    counter = token_counter or get_default_token_counter()
+    return counter.count(message.get("content", "")) + 8
 
 
-def _clip_to_tokens(value: str, token_budget: int) -> tuple[str, bool]:
-    if estimate_tokens(value) <= token_budget:
-        return value, False
-    if token_budget <= 1:
-        return "", bool(value)
-    encoded = value.encode("utf-8")
-    byte_budget = max(1, (token_budget - 1) * 3)
-    clipped = encoded[:byte_budget].decode("utf-8", errors="ignore").rstrip()
-    return clipped + "…", True
+def _clip_to_tokens(
+    value: str,
+    token_budget: int,
+    *,
+    preserve_tail: bool = False,
+    token_counter: TokenCounter | None = None,
+) -> tuple[str, bool]:
+    return clip_text_to_tokens(
+        value,
+        token_budget,
+        token_counter=token_counter or get_default_token_counter(),
+        preserve_tail=preserve_tail,
+    )
 
 
 def _routing_terms(value: str) -> set[str]:

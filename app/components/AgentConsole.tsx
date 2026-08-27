@@ -25,6 +25,9 @@ export type HealthInfo = {
     | "error";
   llm_provider?: string | null;
   model?: string | null;
+  context_tokenizer?: string | null;
+  session_summary_provider?: string | null;
+  session_summary_schema?: string | null;
   tool_count: number;
   feishu_status?:
     | "disabled"
@@ -51,7 +54,12 @@ type TraceStep = {
 
 type AgentRun = {
   run_id: string;
-  status: "waiting_approval" | "completed" | "failed";
+  status:
+    | "waiting_approval"
+    | "recoverable"
+    | "needs_attention"
+    | "completed"
+    | "failed";
   mode: string;
   answer: string;
   steps: TraceStep[];
@@ -240,11 +248,13 @@ export function AgentConsole({
   const [channelMessages, setChannelMessages] = useState<ChannelMessage[]>([]);
   const [channelLoading, setChannelLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<AgentRun[]>([]);
+  const [interruptedRuns, setInterruptedRuns] = useState<AgentRun[]>([]);
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [imagePreview, setImagePreview] = useState<MessageAttachment | null>(null);
   const [loading, setLoading] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState("");
+  const [recoveryBusy, setRecoveryBusy] = useState("");
   const [job, setJob] = useState<AgentJob | null>(null);
   const [retryingJob, setRetryingJob] = useState(false);
   const [error, setError] = useState("");
@@ -415,10 +425,32 @@ export function AgentConsole({
     }
   }, [apiBase]);
 
+  const loadInterruptedRuns = useCallback(async () => {
+    try {
+      const responses = await Promise.all(
+        ["recoverable", "needs_attention"].map((status) =>
+          fetch(`${apiBase}/api/agent/runs?status=${status}&limit=20`, {
+            cache: "no-store",
+          }),
+        ),
+      );
+      for (const response of responses) {
+        if (!response.ok) throw new Error(await responseError(response));
+      }
+      const bodies = (await Promise.all(
+        responses.map((response) => response.json()),
+      )) as { runs: AgentRun[] }[];
+      setInterruptedRuns(bodies.flatMap((body) => body.runs));
+    } catch {
+      // Recovery polling is advisory and must not block normal chat.
+    }
+  }, [apiBase]);
+
   useEffect(() => {
     const refresh = () => {
       void loadChannelMessages();
       void loadPendingApprovals();
+      void loadInterruptedRuns();
     };
     const initial = window.setTimeout(refresh, 0);
     const interval = window.setInterval(refresh, 3000);
@@ -426,7 +458,7 @@ export function AgentConsole({
       window.clearTimeout(initial);
       window.clearInterval(interval);
     };
-  }, [loadChannelMessages, loadPendingApprovals]);
+  }, [loadChannelMessages, loadInterruptedRuns, loadPendingApprovals]);
 
   const selectedMessageCount = selectedId.startsWith("local:")
     ? (localThreads.find((thread) => `local:${thread.id}` === selectedId)
@@ -931,6 +963,40 @@ export function AgentConsole({
     }
   }
 
+  async function resolveInterruptedRun(
+    runId: string,
+    action: "resume" | "abandon",
+  ) {
+    if (recoveryBusy) return;
+    setRecoveryBusy(runId);
+    setError("");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/agent/runs/${encodeURIComponent(runId)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      setInterruptedRuns((current) =>
+        current.filter((run) => run.run_id !== runId),
+      );
+      await loadLocalConversations();
+      await loadChannelMessages();
+      await loadPendingApprovals();
+      await loadInterruptedRuns();
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : action === "resume"
+            ? "无法恢复这个中断任务。"
+            : "无法终止这个中断任务。",
+      );
+    } finally {
+      setRecoveryBusy("");
+    }
+  }
+
   const modeLabel = health?.llm_configured
     ? health.model ?? "真实模型"
     : health?.llm_status === "configured_not_enabled"
@@ -1088,6 +1154,55 @@ export function AgentConsole({
                   >
                     {approvalBusy === run.run_id ? "处理中…" : "批准"}
                   </button>
+                </div>
+              </div>
+            ))}
+          </section>
+        ) : null}
+
+        {interruptedRuns.length ? (
+          <section
+            className="root-approval-queue root-recovery-queue"
+            aria-label="中断的 Agent Run"
+          >
+            <div>
+              <strong>中断任务</strong>
+              <span>
+                {interruptedRuns.length} 个任务需要恢复或明确终止
+              </span>
+            </div>
+            {interruptedRuns.slice(0, 3).map((run) => (
+              <div className="root-approval-item" key={run.run_id}>
+                <span title={run.answer}>
+                  <strong>
+                    {run.status === "recoverable"
+                      ? "Checkpoint 已验证"
+                      : "Checkpoint 不可验证"}
+                  </strong>
+                  <small>
+                    {run.status === "recoverable" ? "可安全继续" : "需人工处置"}
+                    {" · "}
+                    {shortId(run.run_id)}
+                  </small>
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    disabled={Boolean(recoveryBusy)}
+                    onClick={() => resolveInterruptedRun(run.run_id, "abandon")}
+                  >
+                    {recoveryBusy === run.run_id ? "处理中…" : "终止"}
+                  </button>
+                  {run.status === "recoverable" ? (
+                    <button
+                      className="approve"
+                      type="button"
+                      disabled={Boolean(recoveryBusy)}
+                      onClick={() => resolveInterruptedRun(run.run_id, "resume")}
+                    >
+                      {recoveryBusy === run.run_id ? "恢复中…" : "继续"}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ))}
@@ -1596,7 +1711,18 @@ function ChannelMessageBubble({
             </div>
           )
         ) : null}
-        {card?.variant === "menu" ? (
+        {card?.variant === "style-draft" ? (
+          <div className="channel-function-card">
+            <span className="function-card-icon" aria-hidden="true">
+              <AppIcon name="image" width="19" height="19" />
+            </span>
+            <div>
+              <small>图片风格化</small>
+              <strong>草稿状态已更新</strong>
+              <p>{card.text}</p>
+            </div>
+          </div>
+        ) : card?.variant === "menu" ? (
           <div className="channel-function-card">
             <span className="function-card-icon" aria-hidden="true">
               <AppIcon name="tools" width="19" height="19" />
@@ -1647,6 +1773,18 @@ function ChannelMessageBubble({
 
 function parseFunctionCard(item: ChannelMessage) {
   const cleaned = cleanMessageText(item.content);
+  if (
+    item.direction === "outbound" &&
+    cleaned.startsWith("[图片风格化草稿]")
+  ) {
+    return {
+      variant: "style-draft" as const,
+      items: [] as string[],
+      text:
+        cleaned.replace(/^\[图片风格化草稿\]\s*/, "") ||
+        "正在等待内容图、风格参考图或补充描述。",
+    };
+  }
   if (item.direction === "outbound" && cleaned.startsWith("[重试卡片]")) {
     return {
       variant: "retry" as const,

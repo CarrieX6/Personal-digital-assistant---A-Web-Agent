@@ -12,7 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urljoin
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 import numpy as np
@@ -424,7 +424,14 @@ class PhotoStyleService:
         title: str | None = None,
         parameters: StyleParameters | None = None,
         owner_id: str = "local",
+        idempotency_key: str | None = None,
     ) -> PhotoStyleCreateResponse:
+        existing = self._existing_idempotent_transfer(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return existing
         provider_status = self.provider_status()
         if provider_status["ready"] is False:
             raise AssetError(
@@ -440,19 +447,34 @@ class PhotoStyleService:
             raise AssetError("每张图片不能超过 20MB。")
         selected_parameters = (parameters or StyleParameters()).validated()
         if selected_parameters.seed is None:
+            generated_seed = (
+                uuid5(
+                    NAMESPACE_URL,
+                    f"agent-photo-style:{owner_id}:{idempotency_key}:seed",
+                ).int
+                & ((1 << 63) - 1)
+                if idempotency_key
+                else secrets.randbits(63)
+            )
             selected_parameters = StyleParameters(
                 **{
                     **selected_parameters.public_dict(),
-                    "seed": secrets.randbits(63),
+                    "seed": generated_seed,
                 }
             )
 
         content = SpatialSceneService._decode_image(content_bytes)
         styles = [SpatialSceneService._decode_image(item) for item in style_bytes]
-        asset_id = str(uuid4())
-        job_id = str(uuid4())
+        if idempotency_key:
+            asset_id, job_id = self._idempotent_transfer_ids(
+                owner_id,
+                idempotency_key,
+            )
+        else:
+            asset_id = str(uuid4())
+            job_id = str(uuid4())
         directory = self.asset_dir / asset_id
-        directory.mkdir(parents=True, exist_ok=False)
+        directory.mkdir(parents=True, exist_ok=bool(idempotency_key))
         os.chmod(directory, 0o700)
         try:
             content = SpatialSceneService._resize_for_output(content)
@@ -523,7 +545,14 @@ class PhotoStyleService:
         title: str | None = None,
         parameters: StyleParameters | None = None,
         owner_id: str = "local",
+        idempotency_key: str | None = None,
     ) -> PhotoStyleCreateResponse:
+        existing = self._existing_idempotent_transfer(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return existing
         if content_image_id in style_image_ids or len(set(style_image_ids)) != len(
             style_image_ids
         ):
@@ -551,6 +580,7 @@ class PhotoStyleService:
                 title=title,
                 parameters=parameters,
                 owner_id=owner_id,
+                idempotency_key=idempotency_key,
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
@@ -564,6 +594,38 @@ class PhotoStyleService:
                 owner_id=owner_id,
             )
         return created
+
+    @staticmethod
+    def _idempotent_transfer_ids(
+        owner_id: str,
+        idempotency_key: str,
+    ) -> tuple[str, str]:
+        namespace = f"agent-photo-style:{owner_id}:{idempotency_key}"
+        return (
+            str(uuid5(NAMESPACE_URL, namespace + ":asset")),
+            str(uuid5(NAMESPACE_URL, namespace + ":job")),
+        )
+
+    def _existing_idempotent_transfer(
+        self,
+        *,
+        owner_id: str,
+        idempotency_key: str | None,
+    ) -> PhotoStyleCreateResponse | None:
+        if not idempotency_key:
+            return None
+        asset_id, job_id = self._idempotent_transfer_ids(
+            owner_id,
+            idempotency_key,
+        )
+        asset_row = self.repository.get_asset_row(asset_id, owner_id)
+        job_row = self.repository.get_job_row(job_id, owner_id)
+        if asset_row is None or job_row is None:
+            return None
+        return PhotoStyleCreateResponse(
+            asset=self.asset_library.get_asset(asset_id, owner_id=owner_id),
+            job=self.asset_library.get_job(job_id, owner_id=owner_id),
+        )
 
     def _forget_future(self, future: Future[None]) -> None:
         with self._future_lock:
@@ -693,12 +755,14 @@ def register_style_tools(
                 prompt=str(arguments.get("prompt", "")),
                 seed=arguments.get("seed"),
             ).validated()
+            execution_context = current_tool_context()
             created = service.create_transfer_from_sources(
                 content_image_id.strip(),
                 [item.strip() for item in style_image_ids],
                 title=(str(arguments["title"]).strip() if arguments.get("title") else None),
                 parameters=parameters,
-                owner_id=current_tool_context().owner_id,
+                owner_id=execution_context.owner_id,
+                idempotency_key=execution_context.idempotency_key,
             )
         except (AssetError, TypeError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
@@ -755,6 +819,7 @@ def register_style_tools(
             input_schema,
             create_photo_style_transfer,
             risk_level="local_write",
+            idempotent=True,
             capability=CapabilityInfo(
                 id="photo-style-transfer",
                 name="图片风格化",

@@ -12,6 +12,7 @@ type MemoryType =
   | "asset_relation";
 
 type MemoryStatus = "candidate" | "active" | "superseded" | "archived";
+type MemoryRetrievalPolicy = "always" | "explicit_only" | "never";
 
 type MemoryItem = {
   id: string;
@@ -23,6 +24,7 @@ type MemoryItem = {
   confidence: number;
   importance: number;
   sensitivity: "normal" | "private" | "sensitive";
+  retrieval_policy: MemoryRetrievalPolicy;
   valid_from: string;
   valid_to?: string | null;
   status: MemoryStatus;
@@ -33,6 +35,8 @@ type MemoryItem = {
   access_count: number;
   utility_score: number;
   metadata: Record<string, unknown>;
+  evidence_count: number;
+  evidence_refs: string[];
 };
 
 type Feedback = { tone: "success" | "error" | "neutral"; message: string };
@@ -58,6 +62,12 @@ const STATUS_LABELS: Record<MemoryStatus, string> = {
   active: "有效",
   superseded: "已被取代",
   archived: "已归档",
+};
+
+const RETRIEVAL_POLICY_LABELS: Record<MemoryRetrievalPolicy, string> = {
+  always: "自动召回",
+  explicit_only: "仅明确询问",
+  never: "不进入上下文",
 };
 
 async function responseError(response: Response): Promise<string> {
@@ -93,9 +103,14 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
   const [newContent, setNewContent] = useState("");
   const [newType, setNewType] = useState<MemoryType>("preference");
   const [newImportance, setNewImportance] = useState(0.65);
+  const [newRetrievalPolicy, setNewRetrievalPolicy] = useState<
+    MemoryRetrievalPolicy | "auto"
+  >("auto");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [editingImportance, setEditingImportance] = useState(0.65);
+  const [editingRetrievalPolicy, setEditingRetrievalPolicy] =
+    useState<MemoryRetrievalPolicy>("always");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
@@ -149,7 +164,7 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
     if (!newContent.trim()) return;
     setSaving(true);
     try {
-      const response = await fetch(`${apiBase}/api/memories`, {
+      const response = await fetch(`${apiBase}/api/memories/atomic`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -157,11 +172,21 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
           memory_type: newType,
           importance: newImportance,
           scope: "user",
+          ...(newRetrievalPolicy === "auto"
+            ? {}
+            : { retrieval_policy: newRetrievalPolicy }),
         }),
       });
       if (!response.ok) throw new Error(await responseError(response));
+      const body = (await response.json()) as { memories: MemoryItem[] };
       setNewContent("");
-      setFeedback({ tone: "success", message: "记忆已保存并建立来源记录。" });
+      setFeedback({
+        tone: "success",
+        message:
+          body.memories.length > 1
+            ? `已拆分并保存为 ${body.memories.length} 条独立记忆。`
+            : "记忆已保存并建立来源记录。",
+      });
       await loadMemories();
     } catch (error) {
       setFeedback({
@@ -177,6 +202,7 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
     setEditingId(memory.id);
     setEditingContent(memory.content);
     setEditingImportance(memory.importance);
+    setEditingRetrievalPolicy(memory.retrieval_policy);
     setConfirmDeleteId(null);
     setFeedback(null);
   }
@@ -191,6 +217,7 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
         body: JSON.stringify({
           content: editingContent.trim(),
           importance: editingImportance,
+          retrieval_policy: editingRetrievalPolicy,
         }),
       });
       if (!response.ok) throw new Error(await responseError(response));
@@ -289,8 +316,8 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
             <p className="eyebrow">Evidence-aware memory</p>
             <h2 id="memory-manager-title">记忆中心</h2>
             <p>
-              管理本机长期记忆。每条记忆都有类型、来源、有效状态和使用反馈；
-              归档后不会进入 Agent 上下文。
+              管理本机长期记忆。正文与扩展元数据加密保存；每条记忆都有类型、来源、
+              有效状态和使用反馈，归档后不会进入 Agent 上下文。
             </p>
           </div>
           <button
@@ -328,6 +355,22 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
                     </option>
                   ),
                 )}
+              </select>
+            </label>
+            <label>
+              <span>召回方式</span>
+              <select
+                value={newRetrievalPolicy}
+                onChange={(event) =>
+                  setNewRetrievalPolicy(
+                    event.target.value as MemoryRetrievalPolicy | "auto",
+                  )
+                }
+              >
+                <option value="auto">按敏感度自动</option>
+                <option value="always">自动召回</option>
+                <option value="explicit_only">仅明确询问</option>
+                <option value="never">不进入上下文</option>
               </select>
             </label>
             <label>
@@ -415,6 +458,21 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
                       maxLength={2000}
                     />
                     <label>
+                      召回方式
+                      <select
+                        value={editingRetrievalPolicy}
+                        onChange={(event) =>
+                          setEditingRetrievalPolicy(
+                            event.target.value as MemoryRetrievalPolicy,
+                          )
+                        }
+                      >
+                        <option value="always">自动召回</option>
+                        <option value="explicit_only">仅明确询问</option>
+                        <option value="never">不进入上下文</option>
+                      </select>
+                    </label>
+                    <label>
                       重要度 {Math.round(editingImportance * 100)}%
                       <input
                         type="range"
@@ -436,6 +494,16 @@ export function MemoryManagerDialog({ open, apiBase, onClose }: Props) {
                   <div>
                     <dt>来源</dt>
                     <dd>{memory.source}</dd>
+                  </div>
+                  <div>
+                    <dt>证据</dt>
+                    <dd title={memory.evidence_refs.join("、")}>
+                      {memory.evidence_count} 条
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>召回</dt>
+                    <dd>{RETRIEVAL_POLICY_LABELS[memory.retrieval_policy]}</dd>
                   </div>
                   <div>
                     <dt>使用</dt>
