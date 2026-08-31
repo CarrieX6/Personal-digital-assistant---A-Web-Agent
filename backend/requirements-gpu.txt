@@ -4,6 +4,5 @@
 # Install a CUDA-compatible torch build for the target NVIDIA driver first.
 accelerate>=1.2,<2.0
 diffusers>=0.35.2,<0.36
-huggingface-hub>=0.34,<1.0
 peft>=0.14,<0.20
 safetensors>=0.5,<1.0

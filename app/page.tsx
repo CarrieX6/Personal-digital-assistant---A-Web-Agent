@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AgentConsole, HealthInfo } from "./components/AgentConsole";
 import { AppIcon } from "./components/AppIcon";
 import { FeishuSettingsDialog } from "./components/FeishuSettingsDialog";
+import { MemoryManagerDialog } from "./components/MemoryManagerDialog";
 import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
 import { PhotoStyleStudio } from "./components/PhotoStyleStudio";
 import { SpatialStudio } from "./components/SpatialStudio";
@@ -14,12 +15,23 @@ type View = "agent" | "tools" | "spatial" | "style";
 const API_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8000";
 
+function modelStatusLabel(health: HealthInfo | null) {
+  if (!health) return "本地服务";
+  if (health.llm_configured) return health.model ?? "真实模型";
+  if (health.llm_status === "configured_not_enabled") {
+    return "模型已配置 · 未启用";
+  }
+  if (health.llm_status === "error") return "模型配置异常";
+  return "Demo 模式";
+}
+
 export default function Home() {
   const [activeView, setActiveView] = useState<View>("agent");
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [backendReady, setBackendReady] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [externalSettingsOpen, setExternalSettingsOpen] = useState(false);
+  const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [requestedSpatialAssetId, setRequestedSpatialAssetId] = useState<
     string | null
   >(null);
@@ -78,9 +90,7 @@ export default function Home() {
             <span className="connection-dot" aria-hidden="true" />
             <span className="connection-copy">
               {backendReady
-                ? health?.llm_configured
-                  ? health.model
-                  : "本地服务"
+                ? modelStatusLabel(health)
                 : "连接中"}
             </span>
           </div>
@@ -100,6 +110,15 @@ export default function Home() {
             <span>
               {health?.feishu_status === "connected" ? "飞书已连接" : "外部接入"}
             </span>
+          </button>
+          <button
+            className="settings-trigger icon-settings"
+            type="button"
+            aria-label="打开记忆中心"
+            onClick={() => setMemoryManagerOpen(true)}
+          >
+            <AppIcon name="memory" width="17" height="17" />
+            <span>记忆</span>
           </button>
           <button
             className="settings-trigger icon-settings"
@@ -145,7 +164,10 @@ export default function Home() {
           </div>
         </aside>
 
-        <div className="assistant-main" id="primary-content">
+        <div
+          className={`assistant-main ${activeView === "agent" ? "is-chat" : ""}`}
+          id="primary-content"
+        >
           {activeView === "agent" ? (
             <AgentConsole
               apiBase={API_BASE}
@@ -209,6 +231,11 @@ export default function Home() {
         apiBase={API_BASE}
         onClose={() => setExternalSettingsOpen(false)}
         onSettingsChanged={() => void refreshStatus()}
+      />
+      <MemoryManagerDialog
+        open={memoryManagerOpen}
+        apiBase={API_BASE}
+        onClose={() => setMemoryManagerOpen(false)}
       />
     </main>
   );

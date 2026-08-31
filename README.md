@@ -31,10 +31,10 @@ Demo。
 | 本地工具注册表 | MVP | 文本、资产、任务、空间照片和图片个性化工具；支持 Schema、Capability Manifest、风险等级、审批与幂等声明 |
 | 本地资产与异步任务 | 局部实现 | SQLite 索引、文件资产、任务进度；空间照片和图片风格化已接入，通用恢复/通知仍待抽象 |
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
-| 飞书聊天入口 | 文本与 Fake Channel 媒体闭环已完成，待真实租户回归 | 长连接、白名单、持久去重、功能卡片、双路径图片下载、owner/chat 隔离多图收集 |
+| 飞书聊天入口 | 文本已实测、富媒体自动化闭环已完成，待真实租户回归 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载、owner/chat 隔离多图收集 |
 | 身份与工作区绑定 | P0 基础已实现 | 一个飞书 Open ID 一个独立工作区，绑定当前本机节点；Root 可查看和启停，OAuth 用户门户与多电脑路由待实现 |
-| 结果回传适配 | 局部实现 | 2.5D 封面 + Viewer 卡片、风格化结果图 + 参数卡片、两类失败重试；Outbox 与固定公网域名待实现 |
-| 会话与长期记忆 | MVP | SQLite 按用户/渠道/会话隔离；Web 会话列表与消息 API 已完成，支持显式记住、查看、忘记与清空当前对话 |
+| 结果回传适配 | 局部实现 | 富文本、状态、2.5D 封面 + Viewer 卡片、风格化预览与下载文件、两类失败重试；Outbox 与固定公网域名待实现 |
+| 会话与长期记忆 | 增强 MVP | SQLite 按用户/渠道/会话隔离；Run 与用户事件原子落库，崩溃后按 Run 独立 Checkpoint 对账恢复；上下文使用真实本地 Tokenizer 和强制 Schema 的结构化滚动摘要，正则抽取仅作可观测兜底；长期 claim 与 evidence 分表、时态化、加密并支持审计；已加入敏感召回硬门禁、词法/槽位/语义 RRF+MMR 混合召回、离线评测和效用反馈 |
 | 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
@@ -55,7 +55,8 @@ flowchart LR
 ```
 
 完整的模块边界、数据流和安全边界见
-[系统架构文档](docs/architecture/system-architecture.md)。
+[系统架构文档](docs/architecture/system-architecture.md)，上下文记忆链路见
+[分层长短期记忆设计](docs/architecture/layered-memory.md)。
 
 ## 当前可运行能力
 
@@ -66,7 +67,9 @@ LangGraph 和 SQLite Checkpointer 执行受控循环：每次工具调用前进�
 Schema 校验，执行后观察结果，模型可以继续规划或完成；代码限制工具步数、重规划、
 连续错误、总运行时间和图递归次数。高风险 Tool 可通过 LangGraph Interrupt 暂停，
 在 Web Root 控制台或飞书批准/拒绝后从 SQLite Checkpoint 恢复；执行账本避免重放
-造成重复副作用。会话历史按渠道、用户和聊天隔离，显式长期记忆按用户隔离。当前
+造成重复副作用。每个 Run 拥有独立 Checkpoint 标识；启动时会把遗留运行分类为可恢复、
+待审批、已终态或需人工处置，Root 可继续或明确终止，不会盲目重放。会话历史按渠道、
+用户和聊天隔离，显式长期记忆按用户隔离。当前
 工具包括：
 
 - 文本统计与关键词提取；
@@ -75,9 +78,19 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 - 查询异步任务状态；
 - 接收本地图片资产 ID，创建空间照片任务。
 - 使用内容图与一至三张参考图创建图片个性化任务（默认连接独立 SDXL + IP-Adapter 服务）。
+- 使用兼容 Chat Completions `image_url` 的多模态模型进行图片识别、描述、OCR 与连续追问。
 
-图片原始字节不会发给 DeepSeek、Qwen 或 GLM。上传图片先暂存在本机，LLM 只看到
-随机资产 ID、文件名和尺寸；任务创建后临时附件会被删除。
+上传图片先在本机校验并转换为受限尺寸的 WebP。仅当用户进行普通看图问答时，图片
+才会作为当前请求的多模态输入发送给已配置模型；视觉输入不会写入 LangGraph
+Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍只看到随机资产 ID、
+角色和尺寸，由本地工具读取原图。视觉问答附件会短期保留用于对话预览和连续追问，
+同一会话后续明确要求空间照片或风格化时也会复用最近一轮仍有效的图片；默认在启动
+清理时删除超过 24 小时的暂存文件，其他会话不能引用这些图片。
+
+对于少数把函数调用写成 `<tool_call>{...}` 普通文本的 OpenAI 兼容模型，Planner
+只会在调用名属于当前轮已授权工具时将其规范化为真实 Tool Call。空间照片和图片
+风格化属于异步任务：创建成功后 Agent 立即把任务移交给 Web/渠道任务监控，不会在
+同一工具循环中反复查询状态并耗尽重规划次数。
 
 ### 2. 空间照片
 
@@ -108,10 +121,16 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 - 真实飞书应用的长连接和文本消息已经接通；媒体闭环已通过 Fake Channel 自动化测试，
   仍需在已发布权限的真实租户回归。
 
-图片消息已接入本地空间照片和图片风格化能力：空间照片完成后返回静态封面和带短时
-Viewer URL 按钮的 2.5D 卡片；图片风格化通过持久化会话依次收集 1 张内容图与 1–3 张
-参考图，完成后直接返回结果图片和参数卡片。两类失败任务都可复用本机规范化输入进行
-幂等重试。Agent 最终回答使用飞书
+单张图片消息已接入本地空间照片能力：机器人下载原消息中的图片资源，复用本地图片
+安全校验并创建空间照片任务；完成后回复任务状态、封面图和同局域网短时 Viewer
+链接。图片风格化也已形成手机闭环：从“菜单”进入后，机器人会持续显示风格化草稿
+卡片。可以逐张发送或一次多选两至四张，也可以使用富文本图文，或把 JPG、PNG、
+WebP 作为文件发送；直接发送多张图片时也会自动创建风格化草稿，不再落入空间照片
+任务。图片随附文字、随后单独发送的文字，以及“开始风格化：……”中的文字都会合并
+为模型的补充描述。草稿按飞书会话和用户隔离、保存 30 分钟，可点击“开始生成”或
+发送“开始风格化”；完成后机器人同时返回预览图和可下载的 WebP 原始结果文件。
+发送“取消风格化”会清理临时图片。空间照片与图片风格化失败时均可复用本机规范化
+输入进行幂等重试。Agent 最终回答使用飞书
 富文本消息，首次对话或发送“菜单”会返回功能卡片，Web 控制台也会同步最近的渠道
 收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；若飞书内置浏览器
 阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
@@ -242,6 +261,8 @@ API 文档：`http://127.0.0.1:8000/docs`
 
 首次生成空间照片会下载约 100MB 的深度模型，之后可以离线推理。
 
+### 跨平台主体分割
+
 如果要在 Windows 或非 macOS 14+ 设备上保持人物、宠物等主体完整，建议额外安装
 BiRefNet 分割依赖：
 
@@ -252,6 +273,45 @@ python -m pip install -r backend/requirements-segmentation.txt
 默认 `SPATIAL_FOREGROUND_SEGMENTER=auto` 会按 Apple Vision → BiRefNet → 深度蒙版
 降级顺序执行。离线部署时先预下载 `ZhengPeng7/BiRefNet` 权重，再设置
 `SPATIAL_BIREFNET_LOCAL_FILES_ONLY=true`。
+
+### 本地长期记忆 Embedding
+
+混合召回默认保留零下载 Hash Provider。若要启用真实的本地 Transformer，先显式准备
+固定版本的 IBM Granite Embedding 97M Multilingual R2：
+
+```powershell
+python backend/scripts/prepare_memory_embedding_model.py --download --smoke-test
+```
+
+随后在 `.env` 中设置：
+
+```dotenv
+AGENT_MEMORY_SEMANTIC_ENABLED=true
+AGENT_MEMORY_EMBEDDING_PROVIDER=transformer
+AGENT_MEMORY_EMBEDDING_MODEL_PATH=backend/models/embeddings/granite-embedding-97m-multilingual-r2
+```
+
+应用运行时强制 `local_files_only=True`、`trust_remote_code=False`，不会联网下载模型；
+向量使用长期记忆密钥加密。历史记忆可在服务停止或低流量时分批回填：
+
+```powershell
+python backend/scripts/backfill_memory_embeddings.py `
+  --model-path backend/models/embeddings/granite-embedding-97m-multilingual-r2 `
+  --all-owners
+```
+
+回填只处理允许自动召回的 `always` 记忆，不会为 `never` 记忆生成向量。模型准备需要
+联网一次；服务运行、查询和回填均只读取已准备的本地文件。
+
+上下文预算默认复用同一模型目录中的真实 Tokenizer，仅加载 tokenizer 文件：
+
+```dotenv
+AGENT_TOKENIZER_BACKEND=auto
+AGENT_TOKENIZER_PATH=
+```
+
+`AGENT_TOKENIZER_PATH` 留空时复用 `AGENT_MEMORY_EMBEDDING_MODEL_PATH`。`auto` 在本地
+Tokenizer 缺失时记录并回退保守估算；生产环境可设为 `transformers`，使配置错误快速失败。
 
 ### 前端
 
@@ -266,7 +326,11 @@ pnpm run dev
 
 ## 模型配置
 
-在页面右上角“模型设置”中选择供应商、填写 API Key、测试连接并保存。当前预置：
+在页面右上角“模型设置”中选择供应商并填写 API Key。“测试连接”会分别验证普通
+问答与 Tool Calling，但不会改变当前运行模型；“保存并启用”会在相同验证通过后
+原子切换当前 Planner。配置已保存但尚未启用、问答可用但工具不兼容、配置错误和
+Demo 模式会分别显示，不会再静默混用。连接测试目前不验证视觉能力；看图问答需要
+模型和 Base URL 额外兼容 Chat Completions 的 `image_url` 内容格式。当前预置：
 
 | 供应商 | 默认 Base URL | 默认模型 |
 | --- | --- | --- |
@@ -295,8 +359,9 @@ pnpm run dev
 7. 把该 Open ID 加入白名单，再次保存。状态显示“已连接”后即可发送文本指令。
 
 如使用国际版 Lark，在 UI 中把服务区域切换为 Lark。群聊默认不接收；启用后也只有
-白名单用户通过 `@机器人` 才能触发。当前 `CHANNEL-002` 支持空间照片单图和风格化
-多轮图片收集；普通文件、演示视频、持久化 Outbox 和固定公网 Viewer 尚未实现。
+白名单用户通过 `@机器人` 才能触发。当前 `CHANNEL-002` 支持单图自动生成空间照片，
+也支持会话式收集一张内容图和一至三张参考图完成图片风格化，并返回预览与下载文件；
+普通文件输入、演示视频、持久化 Outbox 和固定公网 Viewer 尚未实现。
 
 Web 控制台是运行电脑上的 Root 管理员视图，可以查看本机记录的全部 Web 与飞书
 会话；普通飞书用户只应使用自己所在的聊天，不应获得 Web 控制台访问权。
@@ -318,6 +383,7 @@ Web 控制台是运行电脑上的 Root 管理员视图，可以查看本机记�
 - `backend/data/feishu_settings.json`：飞书非敏感配置和 Open ID 白名单；
 - `backend/data/channel.sqlite3`：飞书事件去重、执行状态和最近 500 条已授权渠道消息镜像；
 - `backend/data/*.enc`、`.secret_master_key`：加密密钥材料；
+- `backend/data/*.memory-key`：系统钥匙串不可用时的上下文记忆密钥降级文件；
 - `.env`、`.venv`、依赖和构建缓存。
 
 API Key 不写入浏览器 `localStorage`、响应体或 Agent 轨迹。后端优先使用系统钥匙串，
@@ -366,7 +432,7 @@ Use $team-git-workflow in English to prepare this change for review
 1. 使用真实飞书应用验收图片下载、风格化多图收集、结果图片、Viewer 卡片和断线重连；
 2. 从当前飞书实现抽象可复用的 `ChannelAdapter` 和统一消息数据模型；
 3. 增加审计、速率限制、审批过期和费用预算；
-4. 将已完成的 Web SQLite 会话模型扩展到统一渠道消息，并增加会话摘要；
+4. 将 Web/飞书消息镜像迁移到统一事件模型，并补充跨渠道身份绑定验收；
 5. 增加空间照片 MP4 降级预览、Viewer audience/撤销和固定 HTTPS 域名；
 6. 建立 Capability Manifest、安装器和模型依赖隔离；
 7. 接入企业微信或微信公众号；
@@ -380,6 +446,7 @@ Use $team-git-workflow in English to prepare this change for review
 - [调研证据与文档维护方法](docs/learning/research-quality.md)
 - [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)
 - [系统架构](docs/architecture/system-architecture.md)
+- [分层长短期记忆设计](docs/architecture/layered-memory.md)
 - [外部聊天控制调研](docs/research/external-chat-control.md)
 - [Apple 空间场景技术路线核对](docs/apple-spatial-scene-research.md)
 - [空间照片端侧部署与资产格式](docs/spatial-scene-device-deployment.md)

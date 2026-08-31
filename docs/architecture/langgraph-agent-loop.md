@@ -170,10 +170,17 @@ interrupt({
 })
 ```
 
-当前实现将 Run 元数据保存在 `agent_runs`，批准或拒绝必须映射回同一个
-`run_id + thread_id`。Web Root 提供全渠道待审批队列；飞书用户可回复
+当前实现先在一个 SQLite 事务中创建 `agent_runs` 并写入带 `run_id` 的用户消息，然后才
+进入图执行。每个 Run 使用由 `owner_id + thread_id + run_id` 派生的独立 Checkpointer
+thread，批准、拒绝或普通崩溃恢复都必须验证 checkpoint 内身份与 Run 一致。Web Root
+提供全渠道待审批队列；飞书用户可回复
 `批准 <run_id>` 或 `拒绝 <run_id>`。重启后使用同一 Checkpointer 恢复，重复批准
 返回已保存结果，不会再次执行工具。
+
+启动对账会检查遗留 `running/resuming` Run：存在合法后继节点时转为 `recoverable`；
+存在 interrupt 时恢复 `waiting_approval`；checkpoint 已终态则补写最终结果；缺失或身份
+不一致则转为 `needs_attention`，系统不会猜测并重放可能有副作用的步骤。Root 可继续
+`recoverable` Run，或明确终止任一中断 Run 解除线程阻塞；两种操作都使用原子状态抢占。
 
 ## 6. 实施状态与下一步
 
@@ -184,9 +191,12 @@ interrupt({
 3. 新增确定性的 `policy` 和 `observe`；
 4. 新增 `decide`，建立 `observe → decide → policy/finalize` 循环；
 5. 将策略、观察和决策写入 Web 可恢复的 Trace；
-6. 增加 `interrupt`、持久化 Run、Web/飞书审批和跨重启恢复；
+6. 增加 `interrupt`、原子持久化 Run/用户事件、Web/飞书审批和跨重启恢复；
 7. 增加工具风险/幂等声明与 SQLite 执行账本；
-8. 增加重规划、预算耗尽、参数拒绝、审批隔离、重复批准和 checkpoint 重载测试。
+8. 增加重规划、预算耗尽、参数拒绝、审批隔离、重复批准、进程崩溃恢复、checkpoint
+   身份校验和缺失 checkpoint 人工处置测试；
+9. 八个节点全部具备 before/after 进程 failpoint；当前空间照片和图片风格化写适配器均
+   透传稳定幂等键并确定性派生任务 ID，不能安全重试的工具在 ambiguous 状态转人工核对。
 
 下一步：
 
@@ -194,7 +204,8 @@ interrupt({
 2. 增加审批过期、一次性 nonce 和更完整的审计字段；
 3. 增加 Outbox、失败队列和跨渠道可靠通知；
 4. 增加真正可中断的工具超时、Token/费用和并发预算；
-5. 增加进程在工具执行中崩溃和越权资产攻击测试。
+5. 每新增一个外部写适配器，都补“请求已发出但账本未提交”窗口的幂等键/Outbox 集成
+   测试；没有下游幂等能力时不得标记为 retry-safe。
 
 第一版不应直接实现开放式无限 Agent。建议默认：
 

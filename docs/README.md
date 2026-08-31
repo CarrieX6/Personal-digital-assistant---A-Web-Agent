@@ -27,6 +27,8 @@
   节点与代码硬边界，以及待完成的人工确认、异步恢复和幂等控制。
 - [飞书身份、个人工作区与电脑节点绑定](architecture/identity-workspace-device-binding.md)：
   一个外部账号一个隔离工作区、Root 管理、本机节点绑定与多电脑 Control Plane 演进。
+- [分层长短期记忆设计](architecture/layered-memory.md)：工作记忆、滚动摘要、
+  类型化长期记忆、混合检索、时间有效性、证据追踪与结果反馈闭环。
 
 ### 配置指南
 
