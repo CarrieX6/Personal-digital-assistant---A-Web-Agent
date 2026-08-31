@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,18 +13,22 @@ import httpx
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from backend.app.assets import SpatialSceneService
 from backend.app.channel_settings import (
     FeishuSettingsRepository,
     FeishuSettingsService,
     StoredFeishuSettings,
 )
 from backend.app.feishu import FeishuChannelRuntime, SQLiteChannelStore
+from backend.app.identity import IdentityBindingRegistry
 from backend.app.main import create_app
 from backend.app.models import (
     FeishuRuntimePublic,
     FeishuSettingsUpdate,
 )
+from backend.app.style_transfer import LocalColorStyleProvider, PhotoStyleService
 from backend.tests.test_api import (
+    FakeForegroundSegmenter,
     MemorySecretStore,
     build_test_settings,
     build_test_spatial,
@@ -121,6 +126,34 @@ class ResourceDeniedChannel(FakeChannel):
     ) -> bytes | None:
         self.download_calls.append(message_id)
         return None
+
+
+class ImageUploadDeniedChannel(FakeChannel):
+    async def send(
+        self,
+        to: str,
+        message: dict[str, Any],
+        opts: dict[str, Any] | None = None,
+    ) -> Any:
+        self.sent.append((to, message, opts or {}))
+        if "image" in message:
+            return SimpleNamespace(
+                success=False,
+                error=SimpleNamespace(
+                    raw_code=99991672,
+                    hint="im:resource:upload required",
+                ),
+            )
+        return SimpleNamespace(success=True)
+
+
+class SlowDepthEstimator:
+    model_name = "Slow Test Depth"
+
+    def estimate(self, image: Image.Image, progress: Any) -> Image.Image:
+        progress(24, "loading_model", "测试慢模型加载")
+        time.sleep(0.08)
+        return Image.linear_gradient("L").resize(image.size)
 
 
 class FakeRuntime:
@@ -302,6 +335,59 @@ def test_runtime_authorizes_deduplicates_and_replies(tmp_path: Path) -> None:
     assert events[-1].kind == "markdown"
 
 
+def test_runtime_provisions_workspace_and_rejects_suspended_binding(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    runner = FakeRunner()
+    channel = FakeChannel()
+    identities = IdentityBindingRegistry(tmp_path / "identity.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        runner,  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+        identity_registry=identities,
+    )
+    message = SimpleNamespace(
+        id="om_suspended",
+        message_id="om_suspended",
+        chat_id="oc_chat",
+        chat_type="p2p",
+        sender_id="ou_allowed",
+        sender_is_bot=False,
+        mentioned_bot=False,
+        raw_content_type="text",
+        body_text="查看资产",
+        safe_content_text="查看资产",
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        binding = identities.list_bindings()[0]
+        assert binding.owner_key == "feishu:cli_test:ou_allowed"
+        identities.set_binding_status(binding.id, "suspended")
+        await channel.handlers["message"](message)
+        await asyncio.sleep(0)
+        if runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    asyncio.run(scenario())
+
+    assert runner.messages == []
+    assert any(
+        "个人工作区已停用" in item[1].get("text", "")
+        for item in channel.sent
+    )
+
+
 def test_runtime_denies_unknown_user_and_returns_bootstrap_open_id(
     tmp_path: Path,
 ) -> None:
@@ -372,6 +458,9 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
         store,
         channel_factory=lambda **_: channel,
         spatial_service=spatial,
+        viewer_link_factory=(
+            lambda asset_id: f"https://viewer.example.test/v/{asset_id}"
+        ),
         job_poll_interval=0.01,
         job_timeout_seconds=5,
     )
@@ -411,9 +500,21 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
     image_replies = [item[1]["image"] for item in channel.sent if "image" in item[1]]
     assert text_replies[0].startswith("已收到图片")
     assert any("空间照片任务已创建" in text for text in text_replies)
-    assert any("已生成完成" in text for text in text_replies)
     assert len(image_replies) == 1
     assert Path(image_replies[0]["source"]).is_file()
+    result_card = next(
+        item[1]["card"]
+        for item in channel.sent
+        if "card" in item[1]
+        and "2.5D 空间照片已生成"
+        in json.dumps(item[1]["card"], ensure_ascii=False)
+    )
+    result_card_json = json.dumps(result_card, ensure_ascii=False)
+    assert "打开可动预览" in result_card_json
+    assert "刷新预览链接" in result_card_json
+    assert "refresh_spatial_viewer" in result_card_json
+    assert spatial.list_assets()[0].id in result_card_json
+    assert "https://viewer.example.test/v/" in result_card_json
     assert spatial.list_assets()[0].status == "ready"
     image_events = [event for event in store.list_events() if event.kind == "image"]
     assert len(image_events) == 2
@@ -423,6 +524,210 @@ def test_runtime_downloads_image_creates_spatial_scene_and_returns_preview(
         for event in image_events
         if event.media_url
     )
+
+
+def test_runtime_refreshes_spatial_viewer_link_from_card(tmp_path: Path) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+    spatial = build_test_spatial(tmp_path)
+    image = Image.new("RGB", (160, 120), "#7fae98")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    created = spatial.create_scene(
+        image_buffer.getvalue(),
+        original_name="refresh.png",
+        owner_id="feishu:cli_test:ou_allowed",
+    )
+    spatial.wait_for_idle()
+    link_calls: list[str] = []
+
+    def viewer_link(asset_id: str) -> str:
+        link_calls.append(asset_id)
+        return f"https://fresh-viewer.example.test/v/{asset_id}"
+
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        viewer_link_factory=viewer_link,
+    )
+    event = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_refresh_viewer",
+        operator=SimpleNamespace(open_id="ou_allowed"),
+        action=SimpleNamespace(
+            value={
+                "command": "refresh_spatial_viewer",
+                "asset_id": created.asset.id,
+            }
+        ),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["cardAction"](event)
+        await asyncio.sleep(0)
+        if runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+
+    asyncio.run(scenario())
+
+    assert link_calls == [created.asset.id]
+    refreshed_card = next(
+        item[1]["card"]
+        for item in channel.sent
+        if "card" in item[1]
+        and "空间照片预览链接已刷新"
+        in json.dumps(item[1]["card"], ensure_ascii=False)
+    )
+    refreshed_json = json.dumps(refreshed_card, ensure_ascii=False)
+    assert "打开最新预览" in refreshed_json
+    assert "https://fresh-viewer.example.test/v/" in refreshed_json
+    assert "refresh_spatial_viewer" in refreshed_json
+    spatial.close()
+
+
+def test_runtime_keeps_delivering_after_initial_spatial_timeout(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+    image = Image.new("RGB", (160, 120), "#7fae98")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    channel.download_bytes = image_buffer.getvalue()
+    spatial = SpatialSceneService(
+        tmp_path / "slow-personal-assets",
+        estimator=SlowDepthEstimator(),
+        segmenter=FakeForegroundSegmenter(),
+    )
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        viewer_link_factory=lambda asset_id: f"https://viewer.test/{asset_id}",
+        job_poll_interval=0.005,
+        job_timeout_seconds=0.02,
+        background_job_timeout_seconds=1,
+    )
+    message = SimpleNamespace(
+        id="om_slow_image",
+        message_id="om_slow_image",
+        chat_id="oc_chat",
+        chat_type="p2p",
+        sender_id="ou_allowed",
+        sender_is_bot=False,
+        mentioned_bot=False,
+        raw_content_type="image",
+        body_text="",
+        safe_content_text="",
+        resources=[SimpleNamespace(type="image", file_key="img_slow")],
+        content=SimpleNamespace(image_key="img_slow"),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["message"](message)
+        await asyncio.sleep(0)
+
+        async def drain_runtime_tasks() -> None:
+            while runtime._tasks:
+                await asyncio.gather(*list(runtime._tasks))
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(drain_runtime_tasks(), timeout=2)
+
+    asyncio.run(scenario())
+
+    replies = [item[1] for item in channel.sent]
+    assert any(
+        "任务仍在本机后台运行" in item.get("text", "") for item in replies
+    )
+    assert any("image" in item for item in replies)
+    assert any(
+        "2.5D 空间照片已生成" in json.dumps(item.get("card", {}), ensure_ascii=False)
+        for item in replies
+    )
+    spatial.close()
+
+
+def test_runtime_returns_card_when_result_image_upload_scope_is_missing(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = ImageUploadDeniedChannel()
+    spatial = build_test_spatial(tmp_path)
+    image = Image.new("RGB", (160, 120), "#7fae98")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    owner_id = "feishu:cli_test:ou_allowed"
+    created = spatial.create_scene(
+        image_buffer.getvalue(),
+        original_name="result.png",
+        owner_id=owner_id,
+    )
+    spatial.wait_for_idle()
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        viewer_link_factory=lambda asset_id: f"https://viewer.test/{asset_id}",
+        job_poll_interval=0.01,
+        job_timeout_seconds=5,
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await runtime._deliver_spatial_job_result(
+            chat_id="oc_chat",
+            message_id="om_result",
+            job_id=created.job.id,
+            tracked_message_id=None,
+            owner_id=owner_id,
+        )
+
+    asyncio.run(scenario())
+
+    replies = [item[1] for item in channel.sent]
+    assert any(
+        "im:resource:upload" in json.dumps(item, ensure_ascii=False)
+        and "开通图片上传权限" in json.dumps(item, ensure_ascii=False)
+        for item in replies
+    )
+    assert any(
+        "2.5D 空间照片已生成" in json.dumps(item.get("card", {}), ensure_ascii=False)
+        for item in replies
+    )
+    assert runtime.public_status().status == "connected"
+    spatial.close()
 
 
 def test_runtime_image_permission_error_is_actionable(tmp_path: Path) -> None:
@@ -547,11 +852,15 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
     runner = FakeRunner()
     channel = FakeChannel()
     store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
     runtime = FeishuChannelRuntime(
         service,
         runner,  # type: ignore[arg-type]
         store,
         channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        style_service=style,
     )
     event = SimpleNamespace(
         chat_id="oc_chat",
@@ -573,11 +882,141 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
     card_payload = next(item[1]["card"] for item in channel.sent if "card" in item[1])
     assert "图片风格化" in json.dumps(card_payload, ensure_ascii=False)
     assert any(
-        "1 张内容图和 1–3 张风格参考图" in item[1].get("text", "")
+        "先发送 1 张内容图" in item[1].get("text", "")
+        and "1–3 张风格参考图" in item[1].get("text", "")
         for item in channel.sent
     )
     assert runner.messages == []
     assert "图片风格化" in store.list_events()[-2].content
+    style.close()
+    spatial.close()
+
+
+def test_runtime_collects_style_images_and_returns_result_image_and_card(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+    image = Image.new("RGB", (160, 120), "#7fae98")
+    image_buffer = BytesIO()
+    image.save(image_buffer, "PNG")
+    channel.download_bytes = image_buffer.getvalue()
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    store = SQLiteChannelStore(tmp_path / "channel.sqlite3")
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        store,
+        channel_factory=lambda **_: channel,
+        spatial_service=spatial,
+        style_service=style,
+        job_poll_interval=0.01,
+        job_timeout_seconds=5,
+    )
+
+    def image_message(message_id: str, image_key: str) -> Any:
+        return SimpleNamespace(
+            id=message_id,
+            message_id=message_id,
+            chat_id="oc_chat",
+            chat_type="p2p",
+            sender_id="ou_allowed",
+            sender_is_bot=False,
+            mentioned_bot=False,
+            raw_content_type="image",
+            body_text="",
+            safe_content_text="",
+            resources=[SimpleNamespace(type="image", file_key=image_key)],
+            content=SimpleNamespace(image_key=image_key),
+        )
+
+    async def wait_for_runtime_tasks() -> None:
+        await asyncio.sleep(0)
+        while runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+            await asyncio.sleep(0)
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["cardAction"](
+            SimpleNamespace(
+                chat_id="oc_chat",
+                message_id="om_style_start",
+                operator=SimpleNamespace(open_id="ou_allowed"),
+                action=SimpleNamespace(
+                    value={"command": "photo_style_transfer"}
+                ),
+            )
+        )
+        await wait_for_runtime_tasks()
+        await channel.handlers["message"](
+            image_message("om_style_content", "img_content")
+        )
+        await wait_for_runtime_tasks()
+        await channel.handlers["message"](
+            image_message("om_style_reference", "img_reference")
+        )
+        await wait_for_runtime_tasks()
+        session = store.get_media_session(
+            owner_id="feishu:cli_test:ou_allowed",
+            chat_id="oc_chat",
+        )
+        assert session is not None
+        assert session.state == "ready"
+        assert session.content_image_id is not None
+        assert len(session.style_image_ids) == 1
+        submit_event = SimpleNamespace(
+            chat_id="oc_chat",
+            message_id="om_style_submit",
+            operator=SimpleNamespace(open_id="ou_allowed"),
+            action=SimpleNamespace(
+                value={
+                    "command": "submit_photo_style_session",
+                    "session_id": session.id,
+                }
+            ),
+        )
+        await channel.handlers["cardAction"](submit_event)
+        await wait_for_runtime_tasks()
+        await channel.handlers["cardAction"](submit_event)
+        await wait_for_runtime_tasks()
+
+    asyncio.run(scenario())
+
+    result_images = [
+        item[1]["image"]
+        for item in channel.sent
+        if "image" in item[1]
+    ]
+    assert len(result_images) == 1
+    assert Path(result_images[0]["source"]).is_file()
+    cards = [
+        json.dumps(item[1]["card"], ensure_ascii=False)
+        for item in channel.sent
+        if "card" in item[1]
+    ]
+    assert any("图片风格化素材已就绪" in card for card in cards)
+    assert any("图片风格化已完成" in card for card in cards)
+    assert any("再次创作" in card for card in cards)
+    owner_assets = spatial.list_assets(owner_id="feishu:cli_test:ou_allowed")
+    assert len(owner_assets) == 1
+    assert owner_assets[0].kind == "photo_style_transfer"
+    assert owner_assets[0].result_url is not None
+    session = store.get_media_session(
+        owner_id="feishu:cli_test:ou_allowed",
+        chat_id="oc_chat",
+    )
+    assert session is None
+    style.close()
+    spatial.close()
 
 
 def test_runtime_retry_card_reuses_failed_spatial_job(tmp_path: Path) -> None:
@@ -657,7 +1096,9 @@ def test_runtime_retry_card_reuses_failed_spatial_job(tmp_path: Path) -> None:
         for item in channel.sent
     )
     assert any(
-        "已生成完成" in item[1].get("text", "") for item in channel.sent
+        "2.5D 空间照片已生成"
+        in json.dumps(item[1].get("card", {}), ensure_ascii=False)
+        for item in channel.sent
     )
     assert spatial.get_job(created.job.id, owner_id=owner_id).status == "completed"
     assert any(

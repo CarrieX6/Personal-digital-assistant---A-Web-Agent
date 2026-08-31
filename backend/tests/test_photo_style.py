@@ -7,7 +7,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import httpx
 from PIL import Image
+import pytest
 
+from backend.app.assets import AssetError
 from backend.app.main import create_app
 from backend.app.style_transfer import (
     LocalColorStyleProvider,
@@ -82,6 +84,69 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         assert tool_output["kind"] == "photo_style_transfer"
         assert not (spatial.source_image_dir / content.id).exists()
         assert not (spatial.source_image_dir / reference.id).exists()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_photo_style_source_owner_isolation_and_failed_job_retry(
+    tmp_path: Path,
+) -> None:
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    content = spatial.stage_source_image(
+        _png("#b88d72"),
+        original_name="content.png",
+        owner_id="user-a",
+    )
+    reference = spatial.stage_source_image(
+        _png("#315a84"),
+        original_name="reference.png",
+        owner_id="user-a",
+    )
+    try:
+        with pytest.raises(AssetError, match="不属于当前用户"):
+            style.create_transfer_from_sources(
+                content.id,
+                [reference.id],
+                owner_id="user-b",
+            )
+        assert (spatial.source_image_dir / content.id).is_dir()
+        assert (spatial.source_image_dir / reference.id).is_dir()
+
+        created = style.create_transfer_from_sources(
+            content.id,
+            [reference.id],
+            owner_id="user-a",
+        )
+        style.wait_for_idle()
+        assert spatial.get_job(
+            created.job.id,
+            owner_id="user-a",
+        ).status == "completed"
+
+        spatial.repository.update_job(
+            created.job.id,
+            status="failed",
+            progress=100,
+            stage="interrupted",
+            message="任务因本地服务重启而中断，可以重新生成。",
+            error="本地服务重启中断任务。",
+        )
+        spatial.repository.fail_asset(created.asset.id)
+        retried, started = style.retry_job(
+            created.job.id,
+            owner_id="user-a",
+        )
+        assert started is True
+        assert retried.status == "queued"
+        style.wait_for_idle()
+        assert spatial.get_job(
+            created.job.id,
+            owner_id="user-a",
+        ).status == "completed"
+        with pytest.raises(AssetError, match="找不到这个任务"):
+            style.retry_job(created.job.id, owner_id="user-b")
     finally:
         style.close()
         spatial.close()

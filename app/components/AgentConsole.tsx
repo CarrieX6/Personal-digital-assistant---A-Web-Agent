@@ -55,6 +55,17 @@ type AgentRun = {
   } | null;
 };
 
+type AssetSummary = {
+  id: string;
+  name: string;
+  kind: "spatial_scene" | "photo_style_transfer";
+  status: "processing" | "ready" | "failed";
+  thumbnailUrl?: string;
+  width?: number;
+  height?: number;
+  createdAt: string;
+};
+
 type SourceImage = {
   id: string;
   original_name: string;
@@ -980,6 +991,7 @@ export function AgentConsole({
                 <LocalMessageBubble
                   key={item.id}
                   item={item}
+                  apiBase={apiBase}
                   onOpenAsset={onSpatialSceneReady}
                   onOpenStyle={onPhotoStyleReady}
                   onApprovalDecision={decideApproval}
@@ -1254,17 +1266,20 @@ function ChatWelcome({ onExample }: { onExample: (text: string) => void }) {
 
 function LocalMessageBubble({
   item,
+  apiBase,
   onOpenAsset,
   onOpenStyle,
   onApprovalDecision,
   approvalBusy,
 }: {
   item: LocalMessage;
+  apiBase: string;
   onOpenAsset: (assetId: string) => void;
   onOpenStyle: (assetId: string) => void;
   onApprovalDecision: (runId: string, approved: boolean) => void;
   approvalBusy: boolean;
 }) {
+  const listedAssets = extractAssetSummaries(item.run);
   return (
     <div className={`message-row ${item.role}`}>
       {item.role === "assistant" ? <div className="assistant-avatar">A</div> : null}
@@ -1283,6 +1298,66 @@ function LocalMessageBubble({
           </div>
         ) : null}
         <p>{cleanMessageText(item.content)}</p>
+        {listedAssets.length ? (
+          <div className="message-asset-grid" aria-label="个人图片资产">
+            {listedAssets.map((asset) => {
+              const ready = asset.status === "ready";
+              const kindLabel =
+                asset.kind === "photo_style_transfer" ? "风格化图片" : "空间照片";
+              return (
+                <button
+                  className="message-asset-card"
+                  type="button"
+                  key={asset.id}
+                  disabled={!ready}
+                  aria-label={`${ready ? "打开" : "暂不可打开"}${asset.name}${kindLabel}`}
+                  onClick={() =>
+                    asset.kind === "photo_style_transfer"
+                      ? onOpenStyle(asset.id)
+                      : onOpenAsset(asset.id)
+                  }
+                >
+                  <span className="message-asset-thumb">
+                    {asset.thumbnailUrl ? (
+                      // The trusted URL is owner-scoped and served by local FastAPI.
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={`${apiBase}${asset.thumbnailUrl}`}
+                        alt={`${asset.name}缩略图`}
+                        width={asset.width ?? 320}
+                        height={asset.height ?? 240}
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ) : (
+                      <span className="message-asset-placeholder" aria-hidden="true">
+                        <AppIcon
+                          name={asset.kind === "photo_style_transfer" ? "image" : "cube"}
+                          width="24"
+                          height="24"
+                        />
+                      </span>
+                    )}
+                    <span className={`message-asset-status ${asset.status}`}>
+                      {ready ? "可查看" : asset.status === "processing" ? "生成中" : "失败"}
+                    </span>
+                  </span>
+                  <span className="message-asset-copy">
+                    <strong title={asset.name}>{asset.name}</strong>
+                    <small>
+                      {kindLabel}
+                      {asset.width && asset.height
+                        ? ` · ${asset.width} × ${asset.height}`
+                        : ""}
+                    </small>
+                    <time>{formatRelative(asset.createdAt)}</time>
+                  </span>
+                  <AppIcon name="chevron" width="15" height="15" />
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
         {item.assetId ? (
           <button
             className="asset-result-button"
@@ -1533,6 +1608,58 @@ function cleanMessageText(value: string) {
     )
     .join("\n")
     .trim();
+}
+
+function extractAssetSummaries(run?: AgentRun): AssetSummary[] {
+  if (!run) return [];
+  const assets = run.steps
+    .flatMap((step) => {
+      const value = step.output?.assets;
+      return Array.isArray(value) ? value : [];
+    })
+    .slice(0, 20);
+  return assets.flatMap((value): AssetSummary[] => {
+    if (!value || typeof value !== "object") return [];
+    const candidate = value as Record<string, unknown>;
+    const id = typeof candidate.id === "string" ? candidate.id : "";
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    const kind = candidate.kind;
+    const status = candidate.status;
+    const thumbnailUrl =
+      typeof candidate.thumbnail_url === "string" &&
+      candidate.thumbnail_url.startsWith(`/api/assets/${encodeURIComponent(id)}/files/`)
+        ? candidate.thumbnail_url
+        : undefined;
+    const createdAt =
+      typeof candidate.created_at === "string" ? candidate.created_at : "";
+    if (
+      !id ||
+      !name ||
+      (kind !== "spatial_scene" && kind !== "photo_style_transfer") ||
+      (status !== "processing" && status !== "ready" && status !== "failed") ||
+      !createdAt
+    ) {
+      return [];
+    }
+    return [
+      {
+        id,
+        name,
+        kind,
+        status,
+        thumbnailUrl,
+        width:
+          typeof candidate.width === "number" && candidate.width > 0
+            ? candidate.width
+            : undefined,
+        height:
+          typeof candidate.height === "number" && candidate.height > 0
+            ? candidate.height
+            : undefined,
+        createdAt,
+      },
+    ];
+  });
 }
 
 function formatTime(value: string) {

@@ -36,8 +36,13 @@ type Asset = {
   depth_url: string | null;
   background_url: string | null;
   foreground_url: string | null;
+  foreground_mask_url: string | null;
   manifest_url: string | null;
   model_name: string | null;
+  segmentation_model: string | null;
+  segmentation_quality: number | null;
+  segmentation_warnings: string[];
+  recommended_strength: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -322,7 +327,7 @@ export function SpatialStudio({
           <p className="eyebrow">Spatial photo · local AI</p>
           <h1>让一张平面照片拥有空间视角</h1>
           <p>
-            本地深度模型分离前景并补全遮挡背景，再用小范围相机平移呈现自然运动视差。
+            本地深度模型解析远近，语义主体蒙版保留完整前景并补全遮挡背景，再用小范围相机平移呈现自然运动视差。
             图片、空间分层和生成记录只保存在这台电脑。
           </p>
         </div>
@@ -425,13 +430,24 @@ export function SpatialStudio({
               <p className="eyebrow">02 · Explore</p>
               <h2>{selectedAsset?.name ?? "空间预览"}</h2>
             </div>
-            {selectedAsset?.model_name ? (
-              <span className="model-chip">{selectedAsset.model_name}</span>
-            ) : null}
+            <div className="model-chip-row">
+              {selectedAsset?.model_name ? (
+                <span className="model-chip">{selectedAsset.model_name}</span>
+              ) : null}
+              {selectedAsset?.segmentation_model ? (
+                <span
+                  className="model-chip"
+                  title={`主体蒙版质量 ${Math.round((selectedAsset.segmentation_quality ?? 0) * 100)}%`}
+                >
+                  {selectedAsset.segmentation_model}
+                </span>
+              ) : null}
+            </div>
           </div>
 
           {selectedAsset?.status === "ready" && selectedAsset.depth_url ? (
             <SpatialViewer
+              key={selectedAsset.id}
               sourceUrl={resolveUrl(apiBase, selectedAsset.source_url)}
               depthUrl={resolveUrl(apiBase, selectedAsset.depth_url)}
               backgroundUrl={resolveUrl(
@@ -443,6 +459,7 @@ export function SpatialStudio({
                 selectedAsset.foreground_url,
               )}
               title={selectedAsset.name}
+              recommendedStrength={selectedAsset.recommended_strength}
             />
           ) : (
             <div className="viewer-empty">

@@ -50,6 +50,12 @@ docs/experiments/<id>.md
    长连接回调内同步跑模型。
 9. 更新 `docs/project-board.md`、功能文档、实验记录和 README；标明事实、未验证项和
    硬件基线，不能把预览 Provider 写成真实模型效果。
+10. 在第二台干净电脑验证依赖、模型/Provider、密钥、网络、渠道和回滚；安装步骤不得
+    依赖开发机缓存、权重或系统钥匙串。
+
+图片、2.5D、视频或 3D 能力接入飞书时，继续执行
+[飞书图片与 2.5D 能力接入 SOP](feishu-media-capability-sop.md)，不要在渠道 Handler
+内增加新的模型分支或依赖图片顺序猜测角色。
 
 ## 必须通过的验收
 

@@ -1,0 +1,12 @@
+-r requirements.txt
+
+# Optional local semantic segmentation backend for spatial photos.
+# BiRefNet uses Hugging Face custom model code and is loaded only when
+# SPATIAL_FOREGROUND_SEGMENTER=auto/birefnet reaches that backend.
+accelerate>=1.2,<2.0
+einops>=0.8,<1.0
+kornia>=0.8,<1.0
+opencv-python>=4.10,<5.0
+scikit-image>=0.24,<1.0
+scipy>=1.14,<2.0
+timm>=1.0,<2.0

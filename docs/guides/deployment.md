@@ -2,6 +2,10 @@
 
 作者：**Zhuofan Xie**
 
+如果是在新电脑安装某个媒体能力，而不只是启动基础服务，请同时按
+[飞书图片与 2.5D 能力接入 SOP](feishu-media-capability-sop.md#5-新电脑安装与配置)
+完成拓扑选择、模型/Provider 配置、数据迁移和安装后验收。
+
 ## 推荐拓扑
 
 默认采用原生部署：Web 控制台和 API 只监听本机回环地址，飞书通过出站长连接收发
@@ -80,6 +84,28 @@ Quick Tunnel 仅用于开发测试：随机域名会随进程重启变化，没�
 [Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)，
 正式上线应使用账号、固定域名和命名 Tunnel，并增加用户登录、资产授权、撤销、限流
 与审计。
+
+### 开发期自动重连与链接刷新
+
+如果已经明确接受带签名的私人图片经 Cloudflare 公网转发，可以在本机 `.env` 中启用：
+
+```text
+LAN_VIEWER_TTL_SECONDS=604800
+PUBLIC_VIEWER_AUTO_START=true
+PUBLIC_VIEWER_ACKNOWLEDGE_PUBLIC_MEDIA=true
+```
+
+此后 `scripts/start.sh` 和 `scripts/start.ps1` 会随 Web Agent 启动公网 Viewer，并在
+Quick Tunnel 异常退出后使用最长 30 秒的退避自动重连。隧道进程退出时，本地状态文件
+会被删除，后端不会继续把已失效域名回传给用户。
+
+Quick Tunnel 重连后仍会得到新随机域名，因此旧飞书卡片里的“打开可动预览”可能失效。
+用户可以点击同一卡片中的“刷新预览链接”，机器人会先按 Open ID 校验资产归属，再返回
+使用当前公网域名的新卡片。Token 最长有效 7 天，但电脑关机或公网隧道断开期间仍不能
+访问。关闭自动公网转发时，把两个 `PUBLIC_VIEWER_*` 开关改回 `false` 并重启服务。
+
+该方案解决开发阶段的自动恢复，不替代固定域名。购买域名后应关闭 Quick Tunnel，配置
+Named Tunnel，并将 `LAN_VIEWER_PUBLIC_BASE_URL` 设置为固定 HTTPS Viewer 域名。
 
 ## 为什么当前不把 Docker 作为默认方案
 

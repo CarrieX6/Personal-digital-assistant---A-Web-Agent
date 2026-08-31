@@ -1,8 +1,27 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
-type RuntimeStatus = "disabled" | "starting" | "connected" | "error";
+type RuntimeStatus =
+  | "disabled"
+  | "starting"
+  | "connected"
+  | "reconnecting"
+  | "error";
+
+type IdentityBinding = {
+  id: string;
+  provider: "feishu";
+  app_id: string;
+  external_id: string;
+  workspace_id: string;
+  workspace_name: string;
+  device_id: string;
+  device_name: string;
+  status: "active" | "suspended" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
 
 export type FeishuSettingsPublic = {
   enabled: boolean;
@@ -54,6 +73,10 @@ const statusCopy: Record<
   connected: {
     label: "已连接",
     detail: "现在可从已授权的飞书账号发送文本指令。",
+  },
+  reconnecting: {
+    label: "正在重连",
+    detail: "连接暂时中断，电脑端正在自动恢复飞书长连接。",
   },
   error: {
     label: "连接异常",
@@ -110,6 +133,26 @@ export function FeishuSettingsDialog({
   const [clearing, setClearing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [bindings, setBindings] = useState<IdentityBinding[]>([]);
+  const [bindingsLoading, setBindingsLoading] = useState(false);
+  const [bindingActionId, setBindingActionId] = useState<string | null>(null);
+
+  const loadBindings = useCallback(
+    async (signal?: AbortSignal) => {
+      setBindingsLoading(true);
+      try {
+        const response = await fetch(`${apiBase}/api/admin/identity-bindings`, {
+          signal,
+        });
+        if (!response.ok) throw new Error(await responseError(response));
+        const body = (await response.json()) as { bindings: IdentityBinding[] };
+        setBindings(body.bindings);
+      } finally {
+        setBindingsLoading(false);
+      }
+    },
+    [apiBase],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -159,6 +202,7 @@ export function FeishuSettingsDialog({
         setDraft(toDraft(settings));
         setAppSecret("");
         setShowSecret(false);
+        return loadBindings(controller.signal);
       })
       .catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
@@ -170,7 +214,7 @@ export function FeishuSettingsDialog({
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [apiBase, open]);
+  }, [apiBase, loadBindings, open]);
 
   if (!open) return null;
 
@@ -249,6 +293,14 @@ export function FeishuSettingsDialog({
           `配置已保存。长连接状态：${runtime.label}。`,
       });
       onSettingsChanged(settings);
+      try {
+        await loadBindings();
+      } catch {
+        setFeedback({
+          tone: "neutral",
+          message: "飞书配置已保存，但账号绑定列表刷新失败，请关闭弹窗后重试。",
+        });
+      }
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -256,6 +308,44 @@ export function FeishuSettingsDialog({
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function updateBindingStatus(binding: IdentityBinding) {
+    const nextStatus = binding.status === "active" ? "suspended" : "active";
+    setBindingActionId(binding.id);
+    setFeedback({
+      tone: "neutral",
+      message: nextStatus === "active" ? "正在启用个人工作区…" : "正在停用个人工作区…",
+    });
+    try {
+      const response = await fetch(
+        `${apiBase}/api/admin/identity-bindings/${binding.id}/status`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      const updated = (await response.json()) as IdentityBinding;
+      setBindings((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setFeedback({
+        tone: "success",
+        message:
+          nextStatus === "active"
+            ? `${updated.workspace_name} 已启用。`
+            : `${updated.workspace_name} 已停用，新的飞书指令将被拒绝。`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message: error instanceof Error ? error.message : "工作区状态更新失败。",
+      });
+    } finally {
+      setBindingActionId(null);
     }
   }
 
@@ -458,6 +548,67 @@ export function FeishuSettingsDialog({
                 <span>允许群聊中已授权用户通过 @机器人 发出指令</span>
               </label>
             </div>
+
+            <section className="identity-binding-section" aria-labelledby="identity-binding-title">
+              <div className="identity-binding-heading">
+                <div>
+                  <h3 id="identity-binding-title">账号与个人工作区</h3>
+                  <p>
+                    白名单中的每个飞书账号拥有独立的记忆和资产命名空间，当前都绑定到这台电脑。
+                  </p>
+                </div>
+                <span>{bindings.length} 个绑定</span>
+              </div>
+              {bindingsLoading ? (
+                <p className="identity-binding-empty" role="status">
+                  正在读取账号绑定…
+                </p>
+              ) : bindings.length ? (
+                <ul className="identity-binding-list">
+                  {bindings.map((binding) => {
+                    const isUpdating = bindingActionId === binding.id;
+                    return (
+                      <li key={binding.id}>
+                        <div className="identity-binding-main">
+                          <div>
+                            <strong>{binding.workspace_name}</strong>
+                            <span title={binding.external_id}>
+                              Open ID · {binding.external_id.slice(0, 10)}…{binding.external_id.slice(-4)}
+                            </span>
+                          </div>
+                          <span className={`binding-status ${binding.status}`}>
+                            {binding.status === "active"
+                              ? "已启用"
+                              : binding.status === "suspended"
+                                ? "已停用"
+                                : "已撤销"}
+                          </span>
+                        </div>
+                        <div className="identity-binding-device">
+                          <span>{binding.device_name}</span>
+                          <button
+                            type="button"
+                            onClick={() => updateBindingStatus(binding)}
+                            disabled={isUpdating}
+                            aria-label={`${binding.status === "active" ? "停用" : "启用"}${binding.workspace_name}`}
+                          >
+                            {isUpdating
+                              ? "处理中…"
+                              : binding.status === "active"
+                                ? "停用"
+                                : "启用"}
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="identity-binding-empty">
+                  保存包含 Open ID 的白名单后，系统会自动创建个人工作区绑定。
+                </p>
+              )}
+            </section>
 
             <div className="settings-meta">
               <span className="settings-guide-links">

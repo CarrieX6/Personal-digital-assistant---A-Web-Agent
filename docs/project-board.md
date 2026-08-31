@@ -69,7 +69,9 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 - [ ] `SEC-001`：建立外部聊天控制的身份、权限与威胁模型。
 - [ ] `MEMORY-001`：确定记忆分层、写入策略和 SQLite 首版 Schema。
 - [ ] `MESSAGE-001`：统一 Web、飞书和未来微信的 Conversation、Message、Attachment 数据模型。
-- [ ] `AUTH-001`：为 Web API、资产和配置接口增加身份认证与 owner 授权。
+- [ ] `AUTH-001`：为 Web API、资产和配置接口增加身份认证与 owner 授权；已完成
+  飞书身份 → 独立工作区 → 本机节点绑定及 Root 启停管理，待用户门户 OAuth、资产接口
+  workspace 授权和跨电脑中心路由。
 - [ ] `JOB-001`：把空间照片专用任务队列抽象为通用可恢复任务系统。
 - [ ] `CAP-001`：确定 Capability Manifest、注册和调用边界。
 - [ ] `LLM-001`：完成云端 LLM Tool Calling 与视觉能力横向评测。
@@ -121,10 +123,10 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态、出站重试和任务回收；待真实断网/休眠/恢复实验与指标 |
-| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并图片预览关联、图片风格化菜单和空间任务失败后的飞书“重新生成”卡片；待真实飞书新图片与卡片点击回归、多图角色收集，文件/视频仍未做 |
+| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并单图双路径资源下载、空间任务、封面、功能卡片和 Viewer 链接；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并图片预览关联与空间失败重试；本分支按[飞书图片与 2.5D 能力接入 SOP](guides/feishu-media-capability-sop.md)实现 owner/chat 隔离的风格化多图收集、结果图片/卡片、2.5D 封面/Viewer 卡片及两类幂等重试，并通过 Fake Channel 测试；待通用 Presenter、Outbox、真实飞书回归和视频降级 |
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书图片预览、卡片语义化展示和按 `chat_id` 删除只读镜像；待真机验收、群聊 sender 边界、隐私保留策略和统一 Message 迁移 |
-| `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并独立 `8766` 只读 Viewer、HMAC 短时链接、文件白名单、触控/陀螺仪视差与安全响应头；待 iOS/Android 真机、弱网和链接撤销测试，GLB/3DGS 未接入 |
+| `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已实现独立 `8766` 只读 Viewer、HMAC 链接、文件白名单、触控/陀螺仪、手机尺寸适配、TryCloudflare 自动重连与飞书“刷新预览链接”；开发期 Token 最长 7 天。上线前仍需固定域名 Named Tunnel、可撤销分享记录、访问审计、弱网与 iOS/Android 真机测试，GLB/3DGS 未接入 |
 | `REMOTE-001` | P1 | 局域网、隧道、中继和远程唤醒如何选择 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并显式 opt-in 的 TryCloudflare HTTPS 测试隧道，仅转发签名 Viewer 并动态回传公网地址；待用户确认私人媒体外发后真机验证，固定域名仍需认证、撤销、限流、审计与中继 |
 | `OUTBOX-001` | P1 | 渠道回复如何持久化、重试、去重和进入失败队列 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | Outbox Schema、退避策略、死信与断网恢复实验 |
 
@@ -137,7 +139,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 检索基准、召回质量、延迟与隐私对比 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
 | `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟡 调研中` | `🧱 局部实现` | Zhuofan Xie | 图片个性化已有固定模型清单、许可/哈希门禁与独立 GPU 依赖；尚无统一下载、升级、卸载和跨能力沙箱 |
-| `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟡 调研中` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 为会话、记忆和空间资产加入 owner 隔离与增量迁移；会话增加 channel/title，消息增加 run_id/metadata，26 项后端测试通过；待补 ER 图、正式迁移工具、生命周期及备份恢复 |
+| `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 2026-08-26 新增外部身份、个人工作区、设备节点和审计表，沿用既有 owner key 保持数据兼容；见[身份、工作区与节点绑定](architecture/identity-workspace-device-binding.md)。待正式迁移工具、生命周期、备份恢复和多设备路由 |
 
 ## 7. LLM 与模型路由
 
@@ -151,11 +153,11 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `SPATIAL-001` | P1 | 深度、主体分割和背景补全模型如何选择 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 统一图集、质量、延迟、内存、功耗与许可矩阵 |
+| `SPATIAL-001` | P1 | 深度、主体分割和背景补全模型如何选择 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已接入 Apple Vision → BiRefNet → 深度蒙版的跨平台主体分割链路、质量门控和降级告警；待 Windows 真机权重推理、统一图集、延迟、内存、功耗与许可矩阵 |
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
-| `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 质量评分、失败检测与 2D 回退机制 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并旧功能迁移，并把产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书功能菜单和真实能力边界提示；待目标 Windows GPU 服务联调及飞书内容图/参考图多轮收集 |
+| `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已记录蒙版面积、连通性、质量分和降级告警，并按质量降低推荐视差；待失败样本集和人工标注评测 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并旧功能迁移，并把产品默认改为独立 `pic-style-http` SDXL + IP-Adapter；本分支完成飞书内容图/1–3 张参考图收集、原子提交、owner 全链路隔离、结果图片/参数卡片与失败重试；待目标 Windows GPU 服务真实联调和质量验收 |
 
 ## 9. 虚拟试衣与数字人
 
@@ -177,8 +179,8 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `SEC-001` | P0 | 外部消息控制本地电脑的威胁模型与权限层 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已有 Open ID 白名单、Tool 风险等级、调用前 Schema、Interrupt 审批、owner 隔离和非幂等重放保护；待正式威胁模型、权限矩阵、审批过期、Root 认证与攻击测试 |
-| `AUTH-001` | P0 | Web API、配置和资产如何认证并执行 owner 授权 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | Web 产品角色已定义为本机 Root 管理端，可查看全部本机渠道会话；待实现管理员认证、API Token、资源级授权、限流和局域网暴露测试 |
+| `SEC-001` | P0 | 外部消息控制本地电脑的威胁模型与权限层 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已有 Open ID 白名单、飞书身份绑定状态硬检查、Tool 风险等级、调用前 Schema、Interrupt 审批、owner 隔离和非幂等重放保护；Root 绑定 API 目前仅限本机来源。待正式威胁模型、用户门户与 Root 认证、资产 workspace 授权、审批过期和攻击测试 |
+| `AUTH-001` | P0 | Web API、配置和资产如何认证并执行 owner 授权 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已实现飞书外部身份、独立工作区、本机设备绑定、状态硬拦截与本机 Root 管理 UI/API；当前 Web 仍是全局 Root 视图。待飞书 OAuth 用户门户、Session、资源级授权、限流和跨电脑 Control Plane |
 | `SEC-002` | P1 | Prompt Injection、恶意附件和能力安装如何防护 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 攻击样本、隔离策略、审计与应急流程 |
 | `PERF-001` | P1 | 如何统一测量延迟、吞吐、内存、显存、功耗和温度 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准设备、采样方法、报告模板和基线数据 |
 | `PERF-002` | P1 | 量化、缓存、按需加载和自适应降级如何落地 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 对照实验、质量损失和设备分级 |

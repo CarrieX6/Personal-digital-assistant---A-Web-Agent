@@ -22,7 +22,7 @@ const catalog = [
     description: "用单张图片生成具有拖动视差的 2.5D 空间场景。",
     status: "installed" as const,
     icon: "cube" as const,
-    meta: "Depth Anything V2 · 本地运行",
+    meta: "Depth Anything V2 · 语义主体分割 · 本地运行",
   },
   {
     id: "photo-style-transfer",

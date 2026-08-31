@@ -22,6 +22,7 @@ from .assets import AssetError, MAX_UPLOAD_BYTES, SpatialSceneService
 from .models import (
     CapabilityInfo,
     CapabilityRequirements,
+    JobPublic,
     PhotoStyleCreateResponse,
 )
 from .tools import ToolError, ToolRegistry, ToolSpec, current_tool_context
@@ -528,9 +529,12 @@ class PhotoStyleService:
             style_image_ids
         ):
             raise AssetError("内容图和风格参考图必须使用不同的附件。")
-        content = self.asset_library.get_source_image(content_image_id)
+        content = self.asset_library.get_source_image(
+            content_image_id,
+            owner_id=owner_id,
+        )
         styles = [
-            self.asset_library.get_source_image(source_id)
+            self.asset_library.get_source_image(source_id, owner_id=owner_id)
             for source_id in style_image_ids
         ]
         content_path = self.source_image_dir / content_image_id / "source.webp"
@@ -548,10 +552,63 @@ class PhotoStyleService:
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
-        self.asset_library.delete_source_image(content_image_id)
-        for source_id in style_image_ids:
-            self.asset_library.delete_source_image(source_id)
+        for source_id in (content_image_id, *style_image_ids):
+            try:
+                self.asset_library.delete_source_image(
+                    source_id,
+                    owner_id=owner_id,
+                )
+            except AssetError:
+                LOGGER.warning(
+                    "Unable to remove consumed source image %s",
+                    source_id,
+                )
         return created
+
+    def retry_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> tuple[JobPublic, bool]:
+        """Retry one failed style job using its persisted sanitized inputs."""
+        job = self.asset_library.get_job(job_id, owner_id=owner_id)
+        if job.kind != "photo_style_transfer":
+            raise AssetError("这个任务不支持图片风格化重试。")
+        if job.status in {"queued", "running", "completed"}:
+            return job, False
+
+        asset_row = self.repository.get_asset_row(job.asset_id, owner_id)
+        if asset_row is None:
+            raise AssetError("找不到这个任务对应的风格化资产。")
+        metadata = json.loads(asset_row["metadata_json"])
+        filenames = [metadata.get("source_file")]
+        style_files = metadata.get("style_files")
+        if not isinstance(style_files, list) or not style_files:
+            raise AssetError("风格参考图已经丢失，请重新上传。")
+        filenames.extend(style_files)
+        directory = self.asset_dir / job.asset_id
+        if any(
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or not (directory / filename).is_file()
+            for filename in filenames
+        ):
+            raise AssetError("原始图片已经丢失，请重新上传。")
+
+        started = self.repository.claim_failed_job_retry(
+            job_id,
+            owner_id=owner_id,
+        )
+        refreshed = self.asset_library.get_job(job_id, owner_id=owner_id)
+        if not started:
+            return refreshed, False
+
+        future = self.executor.submit(self._process, job.asset_id, job_id)
+        with self._future_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
+        return refreshed, True
 
     def _forget_future(self, future: Future[None]) -> None:
         with self._future_lock:
