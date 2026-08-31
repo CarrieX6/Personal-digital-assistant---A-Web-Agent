@@ -25,6 +25,8 @@
   数据模型、安全边界和分阶段路线图。
 - [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)：已实现的循环
   节点与代码硬边界，以及待完成的人工确认、异步恢复和幂等控制。
+- [飞书身份、个人工作区与电脑节点绑定](architecture/identity-workspace-device-binding.md)：
+  一个外部账号一个隔离工作区、Root 管理、本机节点绑定与多电脑 Control Plane 演进。
 
 ### 配置指南
 
@@ -34,6 +36,8 @@
   局域网签名 Viewer。
 - [新功能 / Capability 接入指南](guides/capability-integration.md)：服务、Provider、
   Tool Manifest、渠道适配、测试和旧分支迁移约定。
+- [飞书图片与 2.5D 能力接入 SOP](guides/feishu-media-capability-sop.md)：多图角色
+  收集、异步 Job、空间 Viewer、风格化结果图、Outbox、新电脑安装和发布验收流程。
 
 ### 平台与技术调研
 

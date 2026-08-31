@@ -12,6 +12,9 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 $Backend = Start-Process -FilePath $Python -ArgumentList @(
   "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8000"
 ) -WorkingDirectory $Root -NoNewWindow -PassThru
+$PublicViewer = Start-Process -FilePath $Python -ArgumentList @(
+  "scripts/start_public_viewer.py", "--from-env", "--reconnect"
+) -WorkingDirectory $Root -NoNewWindow -PassThru
 
 try {
   Write-Host "控制台: http://localhost:3000" -ForegroundColor Cyan
@@ -19,4 +22,5 @@ try {
   & pnpm run dev
 } finally {
   if (-not $Backend.HasExited) { Stop-Process -Id $Backend.Id }
+  if (-not $PublicViewer.HasExited) { Stop-Process -Id $PublicViewer.Id }
 }

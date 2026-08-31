@@ -96,8 +96,11 @@ class LanViewerService:
             payload = json.loads(path.read_text(encoding="utf-8"))
             url = str(payload["url"]).rstrip("/")
             created_at = float(payload["created_at"])
+            status = str(payload.get("status", "connected"))
             parsed = urlsplit(url)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if status != "connected":
             return None
         if time.time() - created_at > 24 * 60 * 60:
             return None
@@ -149,9 +152,16 @@ class LanViewerService:
         try:
             encoded_payload, encoded_signature = token.split(".", maxsplit=1)
             payload = _b64decode(encoded_payload)
-            signature = _b64decode(encoded_signature)
-            expected = hmac.new(self._secret, payload, hashlib.sha256).digest()
-            if not hmac.compare_digest(signature, expected):
+            if _b64encode(payload) != encoded_payload:
+                raise ViewerLinkError("预览链接编码无效。")
+            expected_signature = _b64encode(
+                hmac.new(self._secret, payload, hashlib.sha256).digest()
+            )
+            # Compare the canonical Base64URL text rather than decoded bytes.
+            # Otherwise multiple final characters can decode to the same bytes
+            # because of unused padding bits, making a visibly modified token
+            # appear valid.
+            if not hmac.compare_digest(encoded_signature, expected_signature):
                 raise ViewerLinkError("预览链接签名无效。")
             claims = json.loads(payload.decode("utf-8"))
             asset_id = claims["asset_id"]
@@ -281,27 +291,66 @@ class LanViewerService:
         background = quote(_url_filename(asset.background_url), safe="")
         foreground = quote(_url_filename(asset.foreground_url), safe="")
         title = html.escape(asset.name)
+        width = max(1, int(asset.width))
+        height = max(1, int(asset.height))
         file_base = f"/v/{quote(token, safe='')}/files"
         return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <meta name="theme-color" content="#05070b" /><title>{title} · 空间照片</title>
 <style>
-*{{box-sizing:border-box}}html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:system-ui,-apple-system,sans-serif}}
-#scene{{position:fixed;inset:0;overflow:hidden;touch-action:none;perspective:1000px}}
-.layer{{position:absolute;inset:-5%;width:110%;height:110%;object-fit:cover;will-change:transform;transition:transform .12s ease-out}}
-#bg{{transform:translate3d(var(--bx,0),var(--by,0),-20px) scale(1.08)}}#fg{{transform:translate3d(var(--fx,0),var(--fy,0),35px) scale(1.06)}}
-.shade{{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.18),transparent 28%,rgba(0,0,0,.35));pointer-events:none}}
-.hint{{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);padding:9px 14px;border:1px solid rgba(255,255,255,.25);border-radius:999px;background:rgba(10,12,18,.48);backdrop-filter:blur(14px);font-size:13px;white-space:nowrap}}
-</style></head><body><main id="scene" aria-label="{title} 可动视角预览">
-<img id="bg" class="layer" src="{file_base}/{background}" alt="" />
-<img id="fg" class="layer" src="{file_base}/{foreground}" alt="{title}" />
-<div class="shade"></div><div class="hint">拖动或轻微转动手机查看空间视差</div></main>
+*{{box-sizing:border-box}}
+:root{{--asset-width:{width};--asset-height:{height};--glass:rgba(10,12,18,.62)}}
+html,body{{margin:0;width:100%;height:100%;min-height:100%;overflow:hidden;overscroll-behavior:none;background:#05070b;color:#fff;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+body{{position:fixed;inset:0;min-height:100dvh}}
+#viewer{{position:fixed;inset:0;display:grid;place-items:center;min-height:100vh;min-height:100dvh;overflow:hidden;isolation:isolate}}
+.ambient{{position:absolute;inset:-8vmax;width:calc(100% + 16vmax);height:calc(100% + 16vmax);object-fit:cover;filter:blur(clamp(22px,6vw,48px)) brightness(.42) saturate(.82);transform:scale(1.05);opacity:.92}}
+.ambient-shade{{position:absolute;inset:0;background:radial-gradient(circle at 50% 42%,rgba(5,7,11,.08),rgba(5,7,11,.64) 82%);pointer-events:none}}
+.frame{{position:relative;z-index:1;width:min(calc(100vw - 24px),calc((100dvh - 24px) * {width} / {height}));max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);aspect-ratio:{width}/{height};overflow:hidden;border:1px solid rgba(255,255,255,.2);border-radius:clamp(14px,3vw,24px);background:#080b10;box-shadow:0 22px 70px rgba(0,0,0,.42);transition:width .24s ease,height .24s ease,border-radius .24s ease}}
+.frame[data-mode="fill"]{{width:100vw;max-width:none;height:100vh;height:100dvh;max-height:none;aspect-ratio:auto;border:0;border-radius:0}}
+#scene{{position:absolute;inset:0;overflow:hidden;touch-action:none;perspective:1000px;cursor:grab}}
+#scene:active{{cursor:grabbing}}
+.layer{{position:absolute;inset:-4%;width:108%;height:108%;object-fit:cover;image-rendering:auto;will-change:transform;transition:transform .12s ease-out}}
+#bg{{transform:translate3d(var(--bx,0),var(--by,0),-20px) scale(1.065)}}#fg{{transform:translate3d(var(--fx,0),var(--fy,0),35px) scale(1.045)}}
+.shade{{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.2),transparent 26%,rgba(0,0,0,.32));pointer-events:none}}
+.toolbar{{position:fixed;z-index:3;top:max(12px,env(safe-area-inset-top));left:12px;right:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;pointer-events:none}}
+.badge,.modes{{min-height:44px;border:1px solid rgba(255,255,255,.2);border-radius:999px;background:var(--glass);box-shadow:0 8px 24px rgba(0,0,0,.22);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}}
+.badge{{display:flex;align-items:center;padding:0 14px;color:rgba(255,255,255,.9);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}}
+.modes{{display:flex;align-items:center;padding:3px;pointer-events:auto}}
+.mode,.motion{{min-width:58px;min-height:44px;padding:0 12px;border:0;border-radius:999px;background:transparent;color:rgba(255,255,255,.74);font:600 13px/1 system-ui,-apple-system,sans-serif;cursor:pointer;touch-action:manipulation;transition:background .18s ease,color .18s ease}}
+.mode[aria-pressed="true"],.motion[aria-pressed="true"]{{background:rgba(255,255,255,.94);color:#111820}}
+.mode:focus-visible,.motion:focus-visible{{outline:3px solid #8ed9c3;outline-offset:2px}}
+.hint{{position:fixed;z-index:3;left:50%;bottom:max(12px,env(safe-area-inset-bottom));max-width:calc(100vw - 24px);min-height:44px;transform:translateX(-50%);display:flex;align-items:center;justify-content:center;padding:9px 14px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:var(--glass);box-shadow:0 8px 24px rgba(0,0,0,.2);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:13px;line-height:1.35;text-align:center}}
+@media (max-width:390px){{.badge{{padding:0 10px;font-size:11px}}.mode,.motion{{min-width:48px;padding:0 8px;font-size:12px}}}}
+@media (orientation:landscape) and (max-height:500px){{.toolbar{{top:max(8px,env(safe-area-inset-top));left:max(8px,env(safe-area-inset-left));right:max(8px,env(safe-area-inset-right))}}.hint{{bottom:max(8px,env(safe-area-inset-bottom));font-size:12px}}}}
+@media (prefers-reduced-motion:reduce){{.frame,.layer,.mode{{transition:none!important}}}}
+</style></head><body><main id="viewer" aria-label="{title} 可动视角预览">
+<img class="ambient" src="{file_base}/{background}" width="{width}" height="{height}" alt="" aria-hidden="true" decoding="async" />
+<div class="ambient-shade"></div>
+<section id="frame" class="frame" data-mode="fit" aria-label="完整空间照片画面">
+<div id="scene">
+<img id="bg" class="layer" src="{file_base}/{background}" width="{width}" height="{height}" alt="" fetchpriority="high" decoding="async" />
+<img id="fg" class="layer" src="{file_base}/{foreground}" width="{width}" height="{height}" alt="{title}" fetchpriority="high" decoding="async" />
+<div class="shade"></div></div></section>
+<div class="toolbar"><div id="badge" class="badge">{width} × {height} · 完整画面</div><div class="modes" role="group" aria-label="画面与体感控制"><button class="mode" type="button" data-mode="fit" aria-pressed="true">完整</button><button class="mode" type="button" data-mode="fill" aria-pressed="false">铺满</button><button id="motion" class="motion" type="button" aria-pressed="false">体感</button></div></div>
+<div id="hint" class="hint">拖动画面，或点击“体感”后轻微转动手机</div></main>
 <script>
-const root=document.documentElement,scene=document.getElementById('scene');let tx=0,ty=0;
-function move(x,y){{tx=Math.max(-1,Math.min(1,x));ty=Math.max(-1,Math.min(1,y));root.style.setProperty('--bx',`${{tx*-10}}px`);root.style.setProperty('--by',`${{ty*-7}}px`);root.style.setProperty('--fx',`${{tx*22}}px`);root.style.setProperty('--fy',`${{ty*15}}px`)}}
-scene.addEventListener('pointermove',e=>{{const r=scene.getBoundingClientRect();move((e.clientX/r.width-.5)*2,(e.clientY/r.height-.5)*2)}});
-scene.addEventListener('pointerleave',()=>move(0,0));window.addEventListener('deviceorientation',e=>{{if(e.gamma==null||e.beta==null)return;move(e.gamma/28,(e.beta-45)/35)}},true);
+const root=document.documentElement,scene=document.getElementById('scene'),frame=document.getElementById('frame'),badge=document.getElementById('badge'),motion=document.getElementById('motion'),hint=document.getElementById('hint'),reduced=window.matchMedia('(prefers-reduced-motion: reduce)');let tx=0,ty=0,raf=0,nextX=0,nextY=0,motionEnabled=false,baseGamma=null,baseBeta=null,sensorX=0,sensorY=0;
+function paint(){{raf=0;tx=Math.max(-1,Math.min(1,nextX));ty=Math.max(-1,Math.min(1,nextY));const compact=frame.dataset.mode==='fit';const bgX=compact?-7:-10,bgY=compact?-5:-7,fgX=compact?15:22,fgY=compact?10:15;root.style.setProperty('--bx',`${{tx*bgX}}px`);root.style.setProperty('--by',`${{ty*bgY}}px`);root.style.setProperty('--fx',`${{tx*fgX}}px`);root.style.setProperty('--fy',`${{ty*fgY}}px`)}}
+function move(x,y){{if(reduced.matches)return;nextX=x;nextY=y;if(!raf)raf=requestAnimationFrame(paint)}}
+function fromPointer(e){{const r=scene.getBoundingClientRect();move((e.clientX/r.width-.5)*2,(e.clientY/r.height-.5)*2)}}
+function screenAngle(){{const raw=screen.orientation?.angle??window.orientation??0;return ((Number(raw)%360)+360)%360}}
+function deadzone(value,size=1.4){{return Math.abs(value)<size?0:value-Math.sign(value)*size}}
+function setMotionState(enabled,message){{motionEnabled=enabled;motion.setAttribute('aria-pressed',String(enabled));motion.textContent=enabled?'体感开':'体感';hint.textContent=message}}
+async function enableOrientation(){{const eventType=window.DeviceOrientationEvent;if(!eventType){{setMotionState(false,'当前浏览器不支持体感，可继续拖动画面');return}}if(typeof eventType.requestPermission==='function'){{try{{if((await eventType.requestPermission())!=='granted'){{setMotionState(false,'未获得体感权限，可继续拖动画面');return}}}}catch(_error){{setMotionState(false,'体感权限开启失败，可继续拖动画面');return}}}}baseGamma=null;baseBeta=null;sensorX=0;sensorY=0;setMotionState(true,'体感已开启；当前姿态已校准，可轻微转动手机')}}
+motion.addEventListener('click',()=>{{if(motionEnabled){{setMotionState(false,'体感已关闭，可拖动画面查看空间视差');move(0,0)}}else enableOrientation()}});
+scene.addEventListener('pointerdown',e=>{{scene.setPointerCapture?.(e.pointerId);fromPointer(e)}});
+scene.addEventListener('pointermove',e=>{{if(e.pointerType==='mouse'||scene.hasPointerCapture?.(e.pointerId))fromPointer(e)}});
+scene.addEventListener('pointerup',e=>{{scene.releasePointerCapture?.(e.pointerId)}});scene.addEventListener('pointercancel',()=>move(0,0));scene.addEventListener('pointerleave',e=>{{if(e.pointerType==='mouse')move(0,0)}});
+window.addEventListener('deviceorientation',e=>{{if(!motionEnabled||e.gamma==null||e.beta==null||document.hidden)return;if(baseGamma===null||baseBeta===null){{baseGamma=e.gamma;baseBeta=e.beta;return}}let x=deadzone(e.gamma-baseGamma),y=deadzone(e.beta-baseBeta);const angle=screenAngle();if(angle===90){{[x,y]=[-y,x]}}else if(angle===270){{[x,y]=[y,-x]}}else if(angle===180){{x=-x;y=-y}}const desiredX=Math.max(-1,Math.min(1,x/18)),desiredY=Math.max(-1,Math.min(1,y/18));sensorX=sensorX*.82+desiredX*.18;sensorY=sensorY*.82+desiredY*.18;move(sensorX,sensorY)}},true);
+screen.orientation?.addEventListener?.('change',()=>{{baseGamma=null;baseBeta=null;sensorX=0;sensorY=0;move(0,0)}});
+document.querySelectorAll('.mode').forEach(button=>button.addEventListener('click',()=>{{const mode=button.dataset.mode;frame.dataset.mode=mode;frame.setAttribute('aria-label',mode==='fit'?'完整空间照片画面':'铺满屏幕空间照片画面');badge.textContent=`{width} × {height} · ${{mode==='fit'?'完整画面':'铺满屏幕'}}`;document.querySelectorAll('.mode').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));move(0,0)}}));
+reduced.addEventListener?.('change',()=>{{if(reduced.matches){{setMotionState(false,'系统已开启“减少动态效果”');nextX=0;nextY=0;paint()}}}});
 </script></body></html>"""
 
     @staticmethod

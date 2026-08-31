@@ -13,6 +13,7 @@ from PIL import Image
 from backend.app.assets import AssetError, SpatialSceneService
 from backend.app.llm import OpenAICompatiblePlanner
 from backend.app.main import create_app
+from backend.app.identity import IdentityBindingRegistry
 from backend.app.memory import MemoryIsolationError
 from backend.app.settings import (
     EncryptedFileSecretStore,
@@ -20,6 +21,7 @@ from backend.app.settings import (
     SettingsService,
     StoredLLMSettings,
 )
+from backend.app.spatial_segmentation import ForegroundMaskResult
 
 
 class MemorySecretStore:
@@ -44,10 +46,25 @@ class FakeDepthEstimator:
         return Image.linear_gradient("L").resize(image.size)
 
 
+class FakeForegroundSegmenter:
+    def segment(self, image: Image.Image, depth: Image.Image, progress):
+        del depth
+        progress(68, "segmenting", "测试主体分割")
+        mask = Image.new("L", image.size, 0)
+        inset = max(4, min(image.size) // 8)
+        mask.paste(255, (inset, inset, image.width - inset, image.height - inset))
+        return ForegroundMaskResult(
+            mask=mask,
+            model_name="Test Semantic Mask",
+            quality_score=0.95,
+        )
+
+
 def build_test_spatial(tmp_path: Path) -> SpatialSceneService:
     return SpatialSceneService(
         tmp_path / "personal-assets",
         estimator=FakeDepthEstimator(),
+        segmenter=FakeForegroundSegmenter(),
     )
 
 
@@ -467,6 +484,7 @@ def test_spatial_scene_pipeline_and_personal_asset_library(tmp_path: Path) -> No
         "depth_url",
         "background_url",
         "foreground_url",
+        "foreground_mask_url",
         "manifest_url",
     ):
         response = client.get(asset.json()[url_key])
@@ -476,6 +494,11 @@ def test_spatial_scene_pipeline_and_personal_asset_library(tmp_path: Path) -> No
     manifest = client.get(asset.json()["manifest_url"]).json()
     assert manifest["version"] == 2
     assert manifest["representation"] == "layered-depth-image"
+    assert manifest["segmentation_model"] == "Test Semantic Mask"
+    assert manifest["segmentation_quality"] == 0.95
+    assert manifest["foreground_mask"] == "foreground-mask.png"
+    assert manifest["recommended_strength"] == 0.26
+    assert asset.json()["recommended_strength"] == 0.26
 
     library = client.get("/api/assets")
     assert library.status_code == 200
@@ -487,6 +510,19 @@ def test_spatial_scene_pipeline_and_personal_asset_library(tmp_path: Path) -> No
     )
     assert agent_response.status_code == 200
     assert "窗边的猫" in agent_response.json()["answer"]
+    asset_tool_output = next(
+        step["output"]
+        for step in agent_response.json()["steps"]
+        if step["stage"] == "tool"
+        and isinstance(step.get("output", {}).get("assets"), list)
+    )
+    listed_asset = asset_tool_output["assets"][0]
+    assert listed_asset["id"] == asset_id
+    # The lightweight test pipeline has no dedicated preview file, so the
+    # asset list intentionally falls back to the owner-scoped source image.
+    assert listed_asset["thumbnail_url"].endswith("/source.webp")
+    assert listed_asset["width"] == 360
+    assert listed_asset["height"] == 240
 
     deleted = client.delete(f"/api/assets/{asset_id}")
     assert deleted.status_code == 204
@@ -536,7 +572,9 @@ def test_failed_spatial_job_can_retry_without_creating_duplicate(
     assert second_retry.json()["id"] == job_id
     assert len(client.get("/api/jobs").json()["jobs"]) == 1
     spatial.wait_for_idle()
-    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "completed"
+    completed_job = client.get(f"/api/jobs/{job_id}").json()
+    assert completed_job["status"] == "completed"
+    assert completed_job["error"] is None
     assert client.get(f"/api/assets/{asset_id}").json()["status"] == "ready"
     spatial.close()
 
@@ -784,4 +822,54 @@ def test_spatial_assets_are_isolated_by_owner(tmp_path: Path) -> None:
     ).id == created.asset.id
     with pytest.raises(AssetError, match="找不到"):
         spatial.get_asset(created.asset.id, owner_id="user-b")
+    spatial.close()
+
+
+def test_root_can_manage_feishu_identity_bindings(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    identity_registry = IdentityBindingRegistry(tmp_path / "identity.sqlite3")
+    app = create_app(
+        tmp_path / "runs.jsonl",
+        settings_service=settings,
+        spatial_service=spatial,
+        identity_registry=identity_registry,
+    )
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/admin/identity-bindings",
+        json={
+            "app_id": "cli_test",
+            "open_id": "ou_user_a",
+            "workspace_name": "成员 A 工作区",
+        },
+    )
+    assert created.status_code == 201
+    binding = created.json()
+    assert binding["workspace_name"] == "成员 A 工作区"
+    assert binding["status"] == "active"
+
+    listed = client.get("/api/admin/identity-bindings")
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["bindings"]] == [binding["id"]]
+
+    suspended = client.put(
+        f"/api/admin/identity-bindings/{binding['id']}/status",
+        json={"status": "suspended"},
+    )
+    assert suspended.status_code == 200
+    assert suspended.json()["status"] == "suspended"
+
+    renamed = client.put(
+        f"/api/admin/identity-bindings/{binding['id']}/workspace",
+        json={"name": "新的成员 A 工作区"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["workspace_name"] == "新的成员 A 工作区"
+
+    remote_client = TestClient(app, client=("198.51.100.10", 50000))
+    denied = remote_client.get("/api/admin/identity-bindings")
+    assert denied.status_code == 403
+    assert "仅允许从本机" in denied.json()["detail"]
     spatial.close()

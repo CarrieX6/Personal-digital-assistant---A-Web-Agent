@@ -41,6 +41,7 @@ from .channel_settings import (
     create_default_feishu_settings_service,
 )
 from .feishu import FeishuChannelRuntime, SQLiteChannelStore
+from .identity import IdentityBinding, IdentityBindingError, IdentityBindingRegistry
 from .lan_viewer import LanViewerService, ViewerLinkError
 from .models import (
     AgentRunRequest,
@@ -62,6 +63,11 @@ from .models import (
     FeishuSettingsPublic,
     FeishuSettingsUpdate,
     HealthResponse,
+    IdentityBindingCreateRequest,
+    IdentityBindingListResponse,
+    IdentityBindingPublic,
+    IdentityBindingStatusUpdate,
+    IdentityWorkspaceRenameRequest,
     JobListResponse,
     JobPublic,
     LLMSettingsPublic,
@@ -93,6 +99,9 @@ DEFAULT_FEISHU_SETTINGS_PATH = (
 DEFAULT_CHANNEL_STORE_PATH = (
     Path(__file__).resolve().parents[1] / "data" / "channel.sqlite3"
 )
+DEFAULT_IDENTITY_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "identity.sqlite3"
+)
 DEFAULT_ASSET_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 WEB_OWNER_ID = "local"
 WEB_SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
@@ -120,6 +129,31 @@ def _conversation_public(summary: object) -> ConversationPublic:
     )
 
 
+def _identity_binding_public(binding: IdentityBinding) -> IdentityBindingPublic:
+    return IdentityBindingPublic(
+        id=binding.id,
+        provider="feishu",
+        app_id=binding.app_id,
+        external_id=binding.external_id,
+        workspace_id=binding.workspace_id,
+        workspace_name=binding.workspace_name,
+        device_id=binding.device_id,
+        device_name=binding.device_name,
+        status=binding.status,
+        created_at=datetime.fromtimestamp(binding.created_at, tz=timezone.utc),
+        updated_at=datetime.fromtimestamp(binding.updated_at, tz=timezone.utc),
+    )
+
+
+def _require_local_root(request: Request) -> None:
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(
+            status_code=403,
+            detail="账号绑定管理仅允许从本机 Root 控制台访问。",
+        )
+
+
 def create_app(
     trace_path: Path = DEFAULT_TRACE_PATH,
     planner: Planner | None = None,
@@ -129,6 +163,7 @@ def create_app(
     feishu_settings_service: FeishuSettingsService | None = None,
     feishu_runtime: FeishuChannelRuntime | None = None,
     viewer_service: LanViewerService | None = None,
+    identity_registry: IdentityBindingRegistry | None = None,
 ) -> FastAPI:
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
@@ -157,6 +192,9 @@ def create_app(
     selected_channel_store = SQLiteChannelStore(
         channel_data_path / DEFAULT_CHANNEL_STORE_PATH.name
     )
+    selected_identity_registry = identity_registry or IdentityBindingRegistry(
+        channel_data_path / DEFAULT_IDENTITY_REGISTRY_PATH.name
+    )
     selected_viewer_service = viewer_service or LanViewerService.from_env(
         selected_spatial_service,
         data_path=channel_data_path,
@@ -166,7 +204,9 @@ def create_app(
         runner,
         selected_channel_store,
         spatial_service=selected_spatial_service,
+        style_service=selected_style_service,
         viewer_link_factory=selected_viewer_service.create_link,
+        identity_registry=selected_identity_registry,
     )
     selected_channel_store = getattr(
         selected_feishu_runtime,
@@ -214,6 +254,7 @@ def create_app(
     app.state.feishu_runtime = selected_feishu_runtime
     app.state.channel_store = selected_channel_store
     app.state.viewer_service = selected_viewer_service
+    app.state.identity_registry = selected_identity_registry
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
@@ -700,6 +741,88 @@ def create_app(
         stored = service.clear_secret()
         await runtime.apply_settings(stored)
         return service.public_settings(runtime.public_status())
+
+    @app.get(
+        "/api/admin/identity-bindings",
+        response_model=IdentityBindingListResponse,
+    )
+    def list_identity_bindings(
+        request: Request,
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> IdentityBindingListResponse:
+        _require_local_root(request)
+        bindings: IdentityBindingRegistry = request.app.state.identity_registry
+        return IdentityBindingListResponse(
+            bindings=[
+                _identity_binding_public(binding)
+                for binding in bindings.list_bindings(limit)
+            ]
+        )
+
+    @app.post(
+        "/api/admin/identity-bindings",
+        response_model=IdentityBindingPublic,
+        status_code=201,
+    )
+    def create_identity_binding(
+        payload: IdentityBindingCreateRequest,
+        request: Request,
+    ) -> IdentityBindingPublic:
+        _require_local_root(request)
+        registry: IdentityBindingRegistry = request.app.state.identity_registry
+        service: FeishuSettingsService = request.app.state.feishu_settings_service
+        app_id = (payload.app_id or service.load().app_id).strip()
+        if not app_id:
+            raise HTTPException(
+                status_code=422,
+                detail="请先配置飞书 App ID，或在请求中明确提供 App ID。",
+            )
+        try:
+            return _identity_binding_public(
+                registry.ensure_feishu_binding(
+                    app_id=app_id,
+                    open_id=payload.open_id,
+                    workspace_name=payload.workspace_name,
+                )
+            )
+        except IdentityBindingError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put(
+        "/api/admin/identity-bindings/{binding_id}/status",
+        response_model=IdentityBindingPublic,
+    )
+    def update_identity_binding_status(
+        binding_id: str,
+        payload: IdentityBindingStatusUpdate,
+        request: Request,
+    ) -> IdentityBindingPublic:
+        _require_local_root(request)
+        registry: IdentityBindingRegistry = request.app.state.identity_registry
+        try:
+            return _identity_binding_public(
+                registry.set_binding_status(binding_id, payload.status)
+            )
+        except IdentityBindingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put(
+        "/api/admin/identity-bindings/{binding_id}/workspace",
+        response_model=IdentityBindingPublic,
+    )
+    def rename_identity_workspace(
+        binding_id: str,
+        payload: IdentityWorkspaceRenameRequest,
+        request: Request,
+    ) -> IdentityBindingPublic:
+        _require_local_root(request)
+        registry: IdentityBindingRegistry = request.app.state.identity_registry
+        try:
+            return _identity_binding_public(
+                registry.rename_workspace(binding_id, payload.name)
+            )
+        except IdentityBindingError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/agent/run", response_model=AgentRunResponse)
     def run_agent(payload: AgentRunRequest, request: Request) -> AgentRunResponse:
