@@ -36,6 +36,10 @@
   Open ID、私聊、群聊、图片、卡片回调、Root 可见性与故障排查。
 - [macOS / Windows 本地部署](guides/deployment.md)：原生一键安装、启动、GPU 边界与
   局域网签名 Viewer。
+- [图片风格化独立服务部署与迁移](guides/photo-style-deployment.md)：跨平台部署管理器、
+  Fake 链路测试、macOS MPS、Windows NVIDIA、远程 GPU、自动启动、迁移和验收。
+- [macOS MPS 真实风格化验收模板](experiments/style-004-macos-mps-validation.md)：固定样本、
+  十次稳定性、统一内存、功耗、fallback 和质量门禁。
 - [新功能 / Capability 接入指南](guides/capability-integration.md)：服务、Provider、
   Tool Manifest、渠道适配、测试和旧分支迁移约定。
 - [飞书图片与 2.5D 能力接入 SOP](guides/feishu-media-capability-sop.md)：多图角色

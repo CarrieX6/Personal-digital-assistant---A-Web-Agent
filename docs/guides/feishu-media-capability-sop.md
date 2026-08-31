@@ -412,11 +412,13 @@ Web 只使用 `/api/assets/...` 等受控路由加载图片。飞书图片消息
 | 拓扑 | 适用场景 | 空间照片 | 图片风格化 | 主要限制 |
 | --- | --- | --- | --- | --- |
 | 基础单机 | macOS / Windows 日常开发 | 本机 Depth Anything V2 | 仅显式 `local-preview` | 预览调色不能用于质量验收 |
+| Apple Silicon MPS | Mac 本机工程验证 | 本机 Depth Anything V2 + Apple Vision/BiRefNet | 本机 `sdxl-local` MPS | 风格化尚需统一内存、功耗、稳定性和质量门禁 |
 | Windows NVIDIA 单机 | 个人产品完整体验 | 本机运行 | 独立 `pic-style` 服务运行在同机 | 需要 CUDA；权重约 9.84 GiB，另需至少 2 GiB 余量和环境空间 |
 | Agent 与 GPU 分机 | Mac 运行 Agent，Windows 运行模型 | Agent 机运行 | 通过专用网络调用 GPU 机 | 需要鉴权、网络隔离和故障监控 |
 | 公网产品 | 非同一局域网的真实用户 | HTTPS Viewer | 私有模型服务 | 还需身份、对象存储、域名、审计与 SLO，当前未完成 |
 
-推荐先完成“Windows NVIDIA 单机”，再验证分机部署。不要把 `3000`、`8000` 或未鉴权的
+推荐先完成“Windows NVIDIA 单机”，再验证分机部署；Apple Silicon MPS 可用于本机工程
+试验，但不能继承 CUDA 质量结论。不要把 `3000`、`8000` 或未鉴权的
 `18000` 直接映射到公网；手机只访问带签名的 Viewer。
 
 ### 5.2 获取代码与检查环境
@@ -547,6 +549,21 @@ PHOTO_STYLE_TIMEOUT_SECONDS=900
 产品推荐把 SDXL + IP-Adapter 作为独立服务部署，Agent 仅通过稳定 HTTP 契约调用它。
 这能隔离 CUDA 崩溃、显存释放、依赖版本和模型升级，也方便以后把 GPU Worker 移到另一
 台 Windows 电脑。
+
+优先使用项目内的跨平台管理器完成预检、固定版本、隔离环境和配置，不要在每台电脑
+手工拼接命令：
+
+```text
+macOS / Linux  ./scripts/photo-style.sh doctor
+Windows        .\scripts\photo-style.ps1 doctor
+```
+
+`deploy-test` 可一键部署 Fake 契约服务，用于先验收 Web/飞书上传、Job、回传和重试；
+它不是 SDXL。真实 Windows NVIDIA 准备、许可证确认、自动启动、迁移和回滚见
+[图片风格化独立服务部署与迁移](photo-style-deployment.md)。Apple Silicon 使用
+`prepare-macos-mps`；远程服务使用 `configure-remote --url https://...`，API Key 另行
+安全注入。以下手工步骤保留用于理解和
+排查上游服务内部组件。
 
 #### 方案 A：Agent 与 GPU 服务在同一台 Windows NVIDIA 电脑
 

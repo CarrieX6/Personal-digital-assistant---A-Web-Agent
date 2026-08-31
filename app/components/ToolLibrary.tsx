@@ -1,13 +1,21 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppIcon } from "./AppIcon";
 import { HealthInfo } from "./AgentConsole";
 
-type ToolStatus = "installed" | "available" | "coming";
+type ToolStatus = "installed" | "testing" | "available" | "coming";
 type Filter = "all" | ToolStatus;
 
+type PhotoStyleProviderStatus = {
+  name: string;
+  model_name: string;
+  ready: boolean | null;
+  details: Record<string, unknown>;
+};
+
 type ToolLibraryProps = {
+  apiBase: string;
   health: HealthInfo | null;
   onOpenSpatial: () => void;
   onOpenStyle: () => void;
@@ -85,17 +93,20 @@ const catalog = [
 const filterLabels: Record<Filter, string> = {
   all: "全部",
   installed: "已安装",
+  testing: "测试模式",
   available: "未安装",
   coming: "待上线",
 };
 
 const statusLabels: Record<ToolStatus, string> = {
   installed: "已安装",
+  testing: "测试模式",
   available: "未安装",
   coming: "待上线",
 };
 
 export function ToolLibrary({
+  apiBase,
   health,
   onOpenSpatial,
   onOpenStyle,
@@ -103,9 +114,71 @@ export function ToolLibrary({
   onOpenChannelSettings,
 }: ToolLibraryProps) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [photoStyleProvider, setPhotoStyleProvider] =
+    useState<PhotoStyleProviderStatus | null>(null);
+  const [photoStyleChecked, setPhotoStyleChecked] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`${apiBase}/api/photo-style-transfers/provider`, {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error("provider status unavailable");
+        return response.json() as Promise<PhotoStyleProviderStatus>;
+      })
+      .then((status) => setPhotoStyleProvider(status))
+      .catch(() => setPhotoStyleProvider(null))
+      .finally(() => setPhotoStyleChecked(true));
+    return () => controller.abort();
+  }, [apiBase]);
+
+  const resolvedCatalog = useMemo(() => {
+    const details = photoStyleProvider?.details ?? {};
+    const productionQuality = details.production_quality === true;
+    const upstreamProvider =
+      typeof details.upstream_provider === "string"
+        ? details.upstream_provider
+        : null;
+    return catalog.map((tool) => {
+      if (tool.id !== "photo-style-transfer") return tool;
+      if (!photoStyleChecked) {
+        return {
+          ...tool,
+          status: "available" as const,
+          statusLabel: "检测中",
+          meta: "正在检查独立图片风格化服务",
+        };
+      }
+      if (photoStyleProvider?.ready !== true) {
+        return {
+          ...tool,
+          status: "available" as const,
+          statusLabel: "未部署",
+          meta: "独立 SDXL + IP-Adapter 服务未连接",
+        };
+      }
+      if (!productionQuality) {
+        return {
+          ...tool,
+          status: "testing" as const,
+          statusLabel: "测试模式",
+          meta: `${upstreamProvider ?? "Fake Provider"} · 仅验证调用链路`,
+        };
+      }
+      return {
+        ...tool,
+        status: "installed" as const,
+        statusLabel: "SDXL 已就绪",
+        meta: `${upstreamProvider ?? "SDXL + IP-Adapter"} · 独立服务`,
+      };
+    });
+  }, [photoStyleChecked, photoStyleProvider]);
   const visible = useMemo(
-    () => catalog.filter((tool) => filter === "all" || tool.status === filter),
-    [filter],
+    () =>
+      resolvedCatalog.filter(
+        (tool) => filter === "all" || tool.status === filter,
+      ),
+    [filter, resolvedCatalog],
   );
 
   return (
@@ -119,8 +192,10 @@ export function ToolLibrary({
           </p>
         </div>
         <div className="library-summary" aria-label="工具状态概览">
-          <strong>{catalog.filter((item) => item.status === "installed").length}</strong>
-          <span>项已安装</span>
+          <strong>
+            {resolvedCatalog.filter((item) => item.status === "installed").length}
+          </strong>
+          <span>项生产就绪</span>
         </div>
       </header>
 
@@ -138,7 +213,7 @@ export function ToolLibrary({
             <span>
               {item === "all"
                 ? catalog.length
-                : catalog.filter((tool) => tool.status === item).length}
+                : resolvedCatalog.filter((tool) => tool.status === item).length}
             </span>
           </button>
         ))}
@@ -162,7 +237,9 @@ export function ToolLibrary({
                   ) : (
                     <AppIcon name="clock" width="13" height="13" />
                   )}
-                  {statusLabels[tool.status]}
+                  {"statusLabel" in tool
+                    ? tool.statusLabel
+                    : statusLabels[tool.status]}
                 </span>
               </div>
               <h2>{tool.name}</h2>
@@ -179,7 +256,11 @@ export function ToolLibrary({
                   </button>
                 ) : tool.id === "photo-style-transfer" ? (
                   <button type="button" onClick={onOpenStyle}>
-                    打开工具
+                    {tool.status === "installed"
+                      ? "打开工具"
+                      : tool.status === "testing"
+                        ? "打开链路测试"
+                        : "查看部署状态"}
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>
                 ) : tool.id === "feishu" ? (
@@ -208,10 +289,10 @@ export function ToolLibrary({
       <aside className="library-notice">
         <AppIcon name="download" width="20" height="20" />
         <div>
-          <strong>“未安装”不等于现在可以下载</strong>
+          <strong>模型能力按真实运行状态展示</strong>
           <p>
-            当前还没有通用安装器。工具卡会明确显示真实状态；模型下载、依赖隔离、
-            许可校验和卸载能力完成后，才会开放安装按钮。
+            图片风格化可用部署管理器完成环境隔离、固定版本、健康检查和迁移配置。
+            真实模型仍要求审阅许可证和执行 GPU 质量门禁，不会被普通聊天静默下载。
           </p>
         </div>
       </aside>

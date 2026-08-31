@@ -4743,6 +4743,11 @@ textarea:focus {
   border-style: dashed;
 }
 
+.tool-catalog-card.testing {
+  border-color: #e0c98d;
+  background: #fffcf3;
+}
+
 .tool-catalog-card.coming {
   background: rgba(246, 248, 247, 0.82);
 }
@@ -4766,6 +4771,11 @@ textarea:focus {
 .tool-catalog-card.available .tool-card-icon {
   color: #436e8e;
   background: #e8f0f7;
+}
+
+.tool-catalog-card.testing .tool-card-icon {
+  color: #8a650d;
+  background: #f8eccb;
 }
 
 .tool-catalog-card.coming .tool-card-icon {
@@ -4792,6 +4802,11 @@ textarea:focus {
 .tool-status.available {
   color: #436b89;
   background: #e9f0f7;
+}
+
+.tool-status.testing {
+  color: #7d5a0a;
+  background: #f8ebc5;
 }
 
 .tool-status.coming {

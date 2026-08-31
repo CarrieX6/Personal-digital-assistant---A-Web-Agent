@@ -10,10 +10,12 @@ from PIL import Image
 
 from backend.app.sdxl_style_provider import (
     NativeSDXLStyleProvider,
+    accelerator_memory_mib,
     content_dimensions,
     lcm_scheduler_config,
     map_native_parameters,
     provider_gate_local_validation_status,
+    resolve_torch_accelerator,
     scheduler_steps_for_effective_steps,
     style_layer_scale,
 )
@@ -51,6 +53,43 @@ def test_native_model_manifest_and_upstream_gate_are_pinned() -> None:
     assert provider_gate_local_validation_status(GATE_PATH) == (
         "engineering_smoke_passed"
     )
+    assert provider_gate_local_validation_status(GATE_PATH, "cuda") == (
+        "engineering_smoke_passed"
+    )
+    assert provider_gate_local_validation_status(GATE_PATH, "mps") == "pending"
+
+
+def test_accelerator_resolution_keeps_cuda_and_mps_explicit() -> None:
+    class Availability:
+        def __init__(self, available: bool) -> None:
+            self.available = available
+
+        def is_available(self) -> bool:
+            return self.available
+
+    torch = SimpleNamespace(
+        cuda=Availability(True),
+        backends=SimpleNamespace(mps=Availability(True)),
+    )
+
+    assert resolve_torch_accelerator(torch, "auto") == "cuda"
+    assert resolve_torch_accelerator(torch, "cuda") == "cuda"
+    assert resolve_torch_accelerator(torch, "mps") == "mps"
+    assert resolve_torch_accelerator(torch, "cpu") is None
+
+    torch.cuda.available = False
+    assert resolve_torch_accelerator(torch, "auto") == "mps"
+    assert resolve_torch_accelerator(torch, "cuda") is None
+
+
+def test_mps_memory_diagnostics_use_driver_allocation() -> None:
+    torch = SimpleNamespace(
+        mps=SimpleNamespace(
+            driver_allocated_memory=lambda: 768 * 1024**2,
+        )
+    )
+
+    assert accelerator_memory_mib(torch, "mps") == 768
 
 
 def test_native_parameter_mapping_matches_accepted_8gb_path() -> None:
@@ -106,6 +145,102 @@ def test_native_provider_preflight_does_not_load_or_download(tmp_path: Path) -> 
     provider.close()
 
 
+def test_native_provider_loads_mps_without_cuda_cpu_offload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class Availability:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeMPS:
+        empty_calls = 0
+
+        @classmethod
+        def empty_cache(cls) -> None:
+            cls.empty_calls += 1
+
+    torch = ModuleType("torch")
+    torch.float16 = "float16"
+    torch.cuda = FakeCuda()
+    torch.backends = SimpleNamespace(mps=Availability())
+    torch.mps = FakeMPS()
+
+    class FakePipeline:
+        def __init__(self) -> None:
+            self.scheduler = SimpleNamespace(config={"name": "base"})
+            self.to_device = None
+            self.attention_slicing = False
+            self.cpu_offload = False
+
+        def load_ip_adapter(self, *_args, **_kwargs) -> None:
+            return None
+
+        def set_ip_adapter_scale(self, _scale) -> None:
+            return None
+
+        def enable_vae_tiling(self) -> None:
+            return None
+
+        def enable_model_cpu_offload(self) -> None:
+            self.cpu_offload = True
+
+        def to(self, device: str):
+            self.to_device = device
+            return self
+
+        def enable_attention_slicing(self) -> None:
+            self.attention_slicing = True
+
+        def maybe_free_model_hooks(self) -> None:
+            return None
+
+    pipeline = FakePipeline()
+
+    class FakeAutoPipeline:
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            assert kwargs["local_files_only"] is True
+            assert kwargs["torch_dtype"] == "float16"
+            return pipeline
+
+    diffusers = ModuleType("diffusers")
+    diffusers.AutoPipelineForImage2Image = FakeAutoPipeline
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
+    monkeypatch.setattr(
+        "backend.app.sdxl_style_provider.verify_provider_gate",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "backend.app.sdxl_style_provider.verify_prepared_models",
+        lambda *_args, **_kwargs: [],
+    )
+
+    provider = NativeSDXLStyleProvider(
+        model_root=tmp_path,
+        manifest_path=MANIFEST_PATH,
+        gate_path=GATE_PATH,
+        lock_path=tmp_path / "model-lock.json",
+        unload_after_generation=False,
+        accelerator="mps",
+    )
+    provider._load(lambda *_args: None)
+
+    assert provider._resolved_accelerator == "mps"
+    assert pipeline.to_device == "mps"
+    assert pipeline.attention_slicing is True
+    assert pipeline.cpu_offload is False
+    provider.close()
+    assert FakeMPS.empty_calls == 1
+
+
 def test_environment_can_select_native_provider(
     tmp_path: Path,
     monkeypatch,
@@ -119,12 +254,14 @@ def test_environment_can_select_native_provider(
         str(tmp_path / "models" / "model-lock.json"),
     )
     monkeypatch.setenv("PHOTO_STYLE_UNLOAD_AFTER_GENERATION", "true")
+    monkeypatch.setenv("PHOTO_STYLE_ACCELERATOR", "mps")
 
     provider = build_style_provider_from_env()
 
     assert isinstance(provider, NativeSDXLStyleProvider)
     assert provider.name == "sdxl_ip_adapter_8gb_v1"
     assert provider.unload_after_generation is True
+    assert provider.accelerator == "mps"
     assert provider.status()["loaded"] is False
     provider.close()
 
@@ -252,6 +389,7 @@ def test_native_provider_executes_diffusers_contract_without_weights(
     provider._torch = FakeTorch()
     provider._manifest = load_model_manifest(MANIFEST_PATH)
     provider._base_scheduler_config = {"name": "fake"}
+    provider._resolved_accelerator = "cuda"
     progress: list[int] = []
 
     result = provider.stylize(
@@ -270,6 +408,7 @@ def test_native_provider_executes_diffusers_contract_without_weights(
     assert inference["actual_steps"] == 16
     assert inference["style_reference_count"] == 2
     assert result.metadata["runtime"]["peak_reserved_vram_mib"] == 512
+    assert result.metadata["runtime"]["accelerator"] == "cuda"
     assert result.metadata["runtime"]["unload_after_generation"] is False
     assert result.metadata["production_quality"] is False
     assert result.metadata["local_quality_validation"] == (
