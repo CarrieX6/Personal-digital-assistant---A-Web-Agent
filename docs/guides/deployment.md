@@ -27,6 +27,12 @@ Viewer 的 Python 进程访问“专用网络”，不要开放公用网络。NV
 应先按 PyTorch 官方 CUDA 安装器替换 `torch/torchvision`，再安装
 `backend/requirements-gpu.txt`；CPU 预览 Provider 不要求 CUDA。
 
+空间照片可在 Windows NVIDIA 本机运行：Depth Anything V2 与 BiRefNet 都会选择 CUDA。
+基础安装后还需执行
+`.\.venv\Scripts\python.exe -m pip install -r backend\requirements-segmentation.txt`，并用
+固定图集完成深度、完整主体、显存和十次稳定性验收。当前尚未提供远程空间照片 Provider，
+不能把图片风格化的 `PHOTO_STYLE_SERVICE_URL` 误用于空间照片。
+
 图片风格化的产品路径不是在 Agent 进程内加载模型，而是单独部署
 [`frogi-m/pic-style`](https://github.com/frogi-m/pic-style)：Windows 推荐使用其
 Docker API/Redis/PostgreSQL/MinIO，加宿主机单并发 NVIDIA Worker 的混合方式。本项目
@@ -35,6 +41,11 @@ Docker API/Redis/PostgreSQL/MinIO，加宿主机单并发 NVIDIA Worker 的混�
 电脑，应使用受保护的专用网络或 SSH Tunnel，不要把未加鉴权的 `18000` 端口直接暴露
 到公网。
 
+本项目已提供固定版本、隔离环境、健康检查和自动启动管理器。先运行
+`.\scripts\photo-style.ps1 doctor`；无论是否有 GPU，都可用 `deploy-test` 验证完整
+服务契约。真实 Windows NVIDIA 路径、许可证门禁和迁移步骤见
+[图片风格化独立服务部署与迁移](photo-style-deployment.md)。
+
 ## macOS / Linux
 
 ```bash
@@ -42,6 +53,18 @@ chmod +x scripts/setup.sh scripts/start.sh
 ./scripts/setup.sh
 ./scripts/start.sh
 ```
+
+Apple Silicon 如需真实 SDXL + IP-Adapter，可先执行：
+
+```bash
+./scripts/photo-style.sh doctor
+./scripts/photo-style.sh prepare-macos-mps
+```
+
+第二条默认只准备依赖并展示许可证计划；显式接受后才允许追加
+`--accept-model-licenses` 下载固定权重。MPS 路径已具备代码兼容，但尚未在当前 M4 完成
+真实生成、统一内存、功耗和质量门禁，不能标为生产就绪。详见
+[图片风格化独立服务部署与迁移](photo-style-deployment.md)。
 
 ## 局域网空间照片
 

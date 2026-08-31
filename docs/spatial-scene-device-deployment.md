@@ -238,6 +238,51 @@ Windows 本地部署推荐顺序：
 3. 后续优化：将 BiRefNet 导出 ONNX，并通过 ONNX Runtime DirectML / Windows ML 接
    通用 GPU/NPU 加速。
 
+#### Windows + NVIDIA 当前兼容状态
+
+当前代码可以在 Windows + NVIDIA 上本机运行，不需要改动 Viewer 或资产格式：
+
+- `DepthAnythingV2Estimator` 在 MPS 不可用时自动选择 `torch.cuda`；
+- `BiRefNetForegroundSegmenter` 同样优先 CUDA，再回退 MPS/CPU；
+- 深度、mask、前景、补全背景和 `manifest.json` 都是平台无关文件；
+- Three.js Viewer 在浏览器运行，不依赖生成端是 macOS 还是 Windows。
+
+Windows 新机需要先安装与驱动匹配的官方 CUDA PyTorch，再安装主体分割依赖：
+
+```powershell
+.\scripts\setup.ps1
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-segmentation.txt
+$env:SPATIAL_FOREGROUND_SEGMENTER = "birefnet"
+.\scripts\start.ps1
+```
+
+这只是代码兼容结论，尚不能替代 Windows 真机验收。必须至少验证 CUDA 可见、Depth
+Anything V2 Small、BiRefNet 完整主体、同一固定图集的耗时/显存/系统内存、十次稳定性和
+CPU 降级行为。当前 `SPATIAL-001` 看板仍保留 Windows 真机任务。
+
+#### 远程 GPU 当前边界
+
+空间照片**目前还不能像图片风格化一样只改一个 URL 就调用远程 GPU**。原因不是模型
+不能在远端运行，而是当前 `SpatialSceneService` 把深度、分割、背景补全、资产落盘和 Job
+状态放在同一进程里，尚无稳定的远程 Provider 契约。
+
+产品化远程方案应新增 `SpatialSceneProvider`，而不是让 Agent 通过 SSH 执行脚本：
+
+```text
+Web / 飞书
+  → Agent 上传并清洗源图
+  → POST /v1/spatial-scenes（tenant + owner + idempotency key）
+  → GPU Worker：Depth Anything V2 + BiRefNet
+  → 返回 depth / mask / background / foreground / manifest / cover
+  → Agent 校验哈希和 owner 后写入本地资产库
+  → 现有签名 Viewer 继续提供手机预览
+```
+
+远程服务必须具备：API 鉴权、租户/owner 隔离、幂等、异步 Job、取消/超时、文件哈希、
+结果契约版本、重试对账、保留期、审计和 HTTPS。输入输出都属于私人媒体；不能把未鉴权
+的模型端口直接暴露公网。完成这一 Provider 边界后，Windows NVIDIA、局域网 GPU 主机和
+云 GPU 才能共用同一 Agent 工具契约。
+
 ### 3.6 背景补全做了什么
 
 为了防止前景移动后立刻露出原图中被遮挡的区域，代码会对硬蒙版再执行

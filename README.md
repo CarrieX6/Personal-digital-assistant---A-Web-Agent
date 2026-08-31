@@ -235,6 +235,23 @@ Worker。模型许可、约 9.84 GiB 权重准备和 Docker API + Windows Host G
 步骤以该仓库 README 与 `docs/docker.md` 为准；服务健康检查未通过时，本项目不会
 静默降级为 CPU 调色。
 
+先用部署管理器查看本机能力。普通一键部署只安装固定版本的 Fake 契约服务，不下载
+模型，也不会冒充真实效果：
+
+```bash
+./scripts/photo-style.sh doctor
+./scripts/photo-style.sh deploy-test
+./scripts/photo-style.sh status --json
+```
+
+Windows 使用对应的 `.\scripts\photo-style.ps1`。真实模型准备必须先运行 `plan-real`
+审阅约 9.84 GiB 固定权重及许可证，再在 Windows NVIDIA 电脑显式执行
+`prepare-windows-gpu --accept-model-licenses`，或在 Apple Silicon Mac 执行
+`prepare-macos-mps --accept-model-licenses`。MPS 当前属于工程验证路径，必须继续完成固定
+样本、稳定性、统一内存、功耗和人工质量门禁，不能继承 Windows CUDA 的验证结论。
+远程 GPU 可用 `configure-remote --url https://...` 写入不含密钥的 Provider 配置。
+完整步骤见[图片风格化独立服务部署与迁移](docs/guides/photo-style-deployment.md)。
+
 ### 手机临时公网 HTTPS 预览
 
 安装 `cloudflared` 后，确认允许带签名的私人空间照片经 Cloudflare 转发，再另开终端：

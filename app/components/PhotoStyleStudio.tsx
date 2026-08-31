@@ -315,15 +315,25 @@ export function PhotoStyleStudio({
   }
 
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
+  const upstreamProvider =
+    typeof providerStatus?.details.upstream_provider === "string"
+      ? providerStatus.details.upstream_provider
+      : null;
+  const productionQuality =
+    providerStatus?.details.production_quality === true;
   const providerLabel = providerStatus === null
     ? "正在检测 SDXL 服务"
     : providerStatus.name === "sdxl_ip_adapter_8gb_v1"
       ? providerStatus.ready
-        ? "本机 SDXL 就绪"
+        ? productionQuality
+          ? "本机 SDXL 生产就绪"
+          : "本机 SDXL 工程就绪 · 待验收"
         : "本机 SDXL 待准备"
       : providerStatus.name === "pic-style-http"
         ? providerStatus.ready
-          ? "SDXL 服务已连接"
+          ? productionQuality
+            ? "SDXL 服务已连接"
+            : "测试服务已连接"
           : "SDXL 服务未连接"
         : "开发预览 · 非生成模型";
 
@@ -501,11 +511,15 @@ export function PhotoStyleStudio({
               ? "正在检查独立 SDXL + IP-Adapter 服务。"
               : providerStatus.name === "sdxl_ip_adapter_8gb_v1"
               ? providerStatus.ready
-                ? "真实模型只读取本机固定版本权重，运行时不会联网下载。"
+                ? productionQuality
+                  ? "真实模型只读取本机固定版本权重，且已通过当前设备质量门禁。"
+                  : "固定权重与加速器预检已通过，但当前设备质量门禁仍未完成，不代表生产效果。"
                 : "已选择真实模型；请先安装 GPU 依赖并完成模型许可与完整性准备。"
               : providerStatus.name === "pic-style-http"
                 ? providerStatus.ready
-                  ? "独立 SDXL + IP-Adapter 服务健康检查已通过。"
+                  ? productionQuality
+                    ? `独立 ${upstreamProvider ?? "SDXL + IP-Adapter"} 服务已通过健康检查。`
+                    : `当前连接 ${upstreamProvider ?? "Fake Provider"}，只验证上传、任务、回传和重试链路，不代表真实风格化效果。`
                   : "独立 GPU 服务未就绪；请启动 frogi-m/pic-style API 与单并发 Worker。"
                 : "当前是显式开发预览模式，不代表真实生成式风格迁移效果。"}
           </p>

@@ -28,6 +28,7 @@ def run(request_path: Path) -> int:
         verify_hashes=bool(payload["verify_hashes"]),
         embedding_cache_entries=int(payload["embedding_cache_entries"]),
         unload_after_generation=False,
+        accelerator=str(payload.get("accelerator") or "auto"),
     )
     try:
         with Image.open(payload["content_path"]) as source:

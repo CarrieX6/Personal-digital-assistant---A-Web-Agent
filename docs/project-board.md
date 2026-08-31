@@ -138,7 +138,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
 | `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `✅ 已决策` | `✅ 已完成` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 整合结构化/词法/本地向量混合召回、证据加权、真实模型结构化滚动摘要、完整请求 Token 硬门禁和 old/new shadow 自动切换；[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 覆盖 500/1000/2000 轮与 128-owner 隔离 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
-| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟡 调研中` | `🧱 局部实现` | Zhuofan Xie | 图片个性化已有固定模型清单、许可/哈希门禁与独立 GPU 依赖；尚无统一下载、升级、卸载和跨能力沙箱 |
+| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已增加图片风格化跨平台管理器、固定源码/API 归档回退、隔离环境、Fake 链路部署、自动启动、Windows NVIDIA 许可门禁、macOS MPS 工程准备、安全远程 Provider 配置与[迁移文档](guides/photo-style-deployment.md)；待 MPS/第二台 Windows 实机验收、可恢复卸载、签名制品、SBOM 与通用 Capability Installer |
 | `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 2026-08-26 新增外部身份、个人工作区、设备节点和审计表，沿用既有 owner key 保持数据兼容；见[身份、工作区与节点绑定](architecture/identity-workspace-device-binding.md)。待正式迁移工具、生命周期、备份恢复和多设备路由 |
 
 ## 7. LLM 与模型路由
@@ -154,10 +154,11 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `SPATIAL-001` | P1 | 深度、主体分割和背景补全模型如何选择 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已接入 Apple Vision → BiRefNet → 深度蒙版的跨平台主体分割链路、质量门控和降级告警；待 Windows 真机权重推理、统一图集、延迟、内存、功耗与许可矩阵 |
+| `SPATIAL-REMOTE-001` | P1 | 空间照片如何迁移到 Windows/远程 GPU | `🟠 初步结论` | `⬜ 未开始` | 待领取 | Windows 本机 CUDA 设备选择已具备；远程尚缺 `SpatialSceneProvider`、异步 Job、资产结果契约、鉴权、幂等、哈希和回传对账，不得复用未鉴权脚本执行 |
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已记录蒙版面积、连通性、质量分和降级告警，并按质量降低推荐视差；待失败样本集和人工标注评测 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6)、[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8)、[PR #11](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/11) 与 [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 已覆盖独立 `pic-style-http` Provider、owner 隔离、结果图/参数卡片、重试、持久化草稿、逐张/多选/图文/图片文件输入、描述传参与稳定幂等键；待 Windows GPU 服务和真实手机联调 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | 既有 PR 已覆盖独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键；本轮新增 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。待 M4 真实权重/质量/功耗验收、Windows GPU 服务和真实手机联调 |
 
 ## 9. 虚拟试衣与数字人
 

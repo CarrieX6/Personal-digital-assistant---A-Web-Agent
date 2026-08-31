@@ -178,6 +178,7 @@ export default function Home() {
             />
           ) : activeView === "tools" ? (
             <ToolLibrary
+              apiBase={API_BASE}
               health={health}
               onOpenSpatial={() => openSpatial()}
               onOpenStyle={() => openStyle()}

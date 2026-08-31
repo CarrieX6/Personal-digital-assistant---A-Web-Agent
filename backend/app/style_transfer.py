@@ -264,6 +264,14 @@ class PicStyleHttpProvider:
                 if status == "completed":
                     result = payload["result"]
                     output = result["outputs"][0]
+                    upstream_provider = str(
+                        result.get("provider") or self.model_name
+                    )
+                    production_quality = upstream_provider not in {
+                        "fake",
+                        "local-preview",
+                        "preview",
+                    }
                     output_url = urljoin(f"{self.base_url}/", str(output["url"]))
                     download = self.client.get(output_url, headers=self._headers())
                     download.raise_for_status()
@@ -271,7 +279,7 @@ class PicStyleHttpProvider:
                     return ProviderResult(
                         image=image,
                         provider_name=self.name,
-                        model_name=str(result.get("provider", self.model_name)),
+                        model_name=upstream_provider,
                         metadata={
                             "upstream_job_id": job_id,
                             "provider_version": result.get("provider_version"),
@@ -279,7 +287,7 @@ class PicStyleHttpProvider:
                             "normalized_parameters": result.get(
                                 "normalized_parameters", {}
                             ),
-                            "production_quality": True,
+                            "production_quality": production_quality,
                         },
                     )
                 if status in {"failed", "cancelled", "timed_out"}:
@@ -311,6 +319,29 @@ class PicStyleHttpProvider:
                 upstream_status = response.json()
             except ValueError:
                 upstream_status = None
+            upstream_provider_status: Any = None
+            if ready:
+                try:
+                    provider_response = self.client.get(
+                        f"{self.base_url}/health/provider",
+                        headers=self._headers(),
+                        timeout=3,
+                    )
+                    if provider_response.status_code == 200:
+                        upstream_provider_status = provider_response.json()
+                except (httpx.HTTPError, ValueError):
+                    upstream_provider_status = None
+            upstream_provider = (
+                str(upstream_provider_status.get("provider") or "")
+                if isinstance(upstream_provider_status, dict)
+                else ""
+            )
+            production_quality = bool(
+                ready
+                and upstream_provider
+                and upstream_provider
+                not in {"fake", "local-preview", "preview"}
+            )
             return {
                 "ready": ready,
                 "loaded": ready,
@@ -318,6 +349,9 @@ class PicStyleHttpProvider:
                 "configured": True,
                 "gate": "managed_by_remote_service",
                 "upstream_status": upstream_status,
+                "upstream_provider_status": upstream_provider_status,
+                "upstream_provider": upstream_provider or None,
+                "production_quality": production_quality,
                 "error": None if ready else "service_not_ready",
             }
         except httpx.HTTPError:
@@ -328,6 +362,9 @@ class PicStyleHttpProvider:
                 "configured": True,
                 "gate": "managed_by_remote_service",
                 "upstream_status": None,
+                "upstream_provider_status": None,
+                "upstream_provider": None,
+                "production_quality": False,
                 "error": "service_unreachable",
             }
 
@@ -392,6 +429,7 @@ def build_style_provider_from_env() -> StyleTransferProvider:
                 "PHOTO_STYLE_UNLOAD_AFTER_GENERATION",
                 "true",
             ),
+            accelerator=os.getenv("PHOTO_STYLE_ACCELERATOR", "auto"),
         )
     raise AssetError(f"未知图片风格化 Provider：{selected}")
 
