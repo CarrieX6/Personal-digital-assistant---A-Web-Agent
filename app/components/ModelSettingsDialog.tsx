@@ -26,6 +26,28 @@ export type LLMSettingsPublic = {
 type ProviderCatalog = {
   providers: ProviderPreset[];
   settings: LLMSettingsPublic;
+  runtime?: LLMRuntimePublic | null;
+};
+
+type LLMRuntimeStatus =
+  | "disabled"
+  | "unconfigured"
+  | "configured_not_enabled"
+  | "testing"
+  | "ready"
+  | "degraded"
+  | "error";
+
+type LLMRuntimePublic = {
+  status: LLMRuntimeStatus;
+  active: boolean;
+  provider_id: string;
+  model: string;
+  has_api_key: boolean;
+  qa_available: boolean;
+  tool_calling_available: boolean;
+  last_tested_at?: string | null;
+  last_error?: string | null;
 };
 
 type DraftSettings = {
@@ -57,6 +79,52 @@ async function responseError(response: Response): Promise<string> {
   }
 }
 
+function runtimeCopy(runtime: LLMRuntimePublic | null) {
+  if (!runtime) {
+    return {
+      title: "正在确认模型状态",
+      detail: "尚未读取后端实际运行模式。",
+    };
+  }
+  switch (runtime.status) {
+    case "ready":
+      return {
+        title: `${runtime.model} 已启用`,
+        detail: "普通问答与 Tool Calling 均可用。",
+      };
+    case "degraded":
+      return {
+        title: `${runtime.model} 部分可用`,
+        detail: "普通问答可用，但 Tool Calling 尚未通过验证。",
+      };
+    case "configured_not_enabled":
+      return {
+        title: "模型已配置但尚未启用",
+        detail: "API Key 已安全保存；点击“保存并启用”后才会用于回答。",
+      };
+    case "testing":
+      return {
+        title: "正在验证模型",
+        detail: "正在检查普通问答和 Tool Calling。",
+      };
+    case "error":
+      return {
+        title: "模型配置异常",
+        detail: runtime.last_error || "请检查模型 ID、接口地址和 API Key。",
+      };
+    case "disabled":
+      return {
+        title: "真实模型已停用",
+        detail: "当前使用 Demo 模式，已保存的配置不会被删除。",
+      };
+    default:
+      return {
+        title: "尚未完成模型配置",
+        detail: "填写 API Key 后测试连接，再保存并启用。",
+      };
+  }
+}
+
 export function ModelSettingsDialog({
   open,
   apiBase,
@@ -75,9 +143,11 @@ export function ModelSettingsDialog({
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [disabling, setDisabling] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [runtime, setRuntime] = useState<LLMRuntimePublic | null>(null);
 
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === draft?.provider_id),
@@ -86,6 +156,7 @@ export function ModelSettingsDialog({
   const hasKeyForDraft =
     Boolean(savedSettings?.has_api_key) &&
     savedSettings?.provider_id === draft?.provider_id;
+  const currentRuntimeCopy = runtimeCopy(runtime);
 
   useEffect(() => {
     if (!open) return;
@@ -136,6 +207,7 @@ export function ModelSettingsDialog({
       .then((catalog) => {
         setProviders(catalog.providers);
         setSavedSettings(catalog.settings);
+        setRuntime(catalog.runtime ?? null);
         setDraft({
           enabled: catalog.settings.enabled,
           provider_id: catalog.settings.provider_id,
@@ -177,6 +249,7 @@ export function ModelSettingsDialog({
     if (!draft) return null;
     return {
       ...draft,
+      enabled: true,
       api_key: apiKey.trim() || null,
     };
   }
@@ -185,7 +258,10 @@ export function ModelSettingsDialog({
     const body = requestBody();
     if (!body) return;
     setTesting(true);
-    setFeedback({ tone: "neutral", message: "正在验证接口与 Tool Calling…" });
+    setFeedback({
+      tone: "neutral",
+      message: "正在验证普通问答与 Tool Calling…",
+    });
     try {
       const response = await fetch(`${apiBase}/api/settings/llm/test`, {
         method: "POST",
@@ -196,10 +272,11 @@ export function ModelSettingsDialog({
       const result = (await response.json()) as {
         message: string;
         latency_ms: number;
+        answer_preview: string;
       };
       setFeedback({
         tone: "success",
-        message: `${result.message} 延迟 ${result.latency_ms} ms。`,
+        message: `${result.message} 问答响应：“${result.answer_preview}” · 延迟 ${result.latency_ms} ms。`,
       });
     } catch (error) {
       setFeedback({
@@ -216,7 +293,10 @@ export function ModelSettingsDialog({
     const body = requestBody();
     if (!body) return;
     setSaving(true);
-    setFeedback({ tone: "neutral", message: "正在安全保存配置…" });
+    setFeedback({
+      tone: "neutral",
+      message: "正在验证配置并启用真实模型…",
+    });
     try {
       const response = await fetch(`${apiBase}/api/settings/llm`, {
         method: "PUT",
@@ -225,7 +305,26 @@ export function ModelSettingsDialog({
       });
       if (!response.ok) throw new Error(await responseError(response));
       const settings = (await response.json()) as LLMSettingsPublic;
+      const runtimeResponse = await fetch(
+        `${apiBase}/api/settings/llm/status`,
+      ).catch(() => null);
+      const activeRuntime = runtimeResponse?.ok
+        ? ((await runtimeResponse.json()) as LLMRuntimePublic)
+        : null;
       setSavedSettings(settings);
+      setRuntime(
+        activeRuntime ?? {
+          status: "ready",
+          active: true,
+          provider_id: settings.provider_id,
+          model: settings.model,
+          has_api_key: settings.has_api_key,
+          qa_available: true,
+          tool_calling_available: true,
+          last_tested_at: new Date().toISOString(),
+          last_error: null,
+        },
+      );
       setDraft({
         enabled: settings.enabled,
         provider_id: settings.provider_id,
@@ -237,9 +336,10 @@ export function ModelSettingsDialog({
       setShowKey(false);
       setFeedback({
         tone: "success",
-        message: settings.enabled
-          ? "配置已保存，真实模型现已启用。"
-          : "配置已保存，当前使用 Demo 模式。",
+        message:
+          activeRuntime?.status === "degraded"
+            ? "真实模型已启用，基础问答可用；当前模型未通过 Tool Calling 验证。"
+            : "普通问答与 Tool Calling 已验证，真实模型现已启用。",
       });
       onSettingsChanged(settings);
     } catch (error) {
@@ -249,6 +349,49 @@ export function ModelSettingsDialog({
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function disableModel() {
+    if (!draft) return;
+    setDisabling(true);
+    setFeedback({ tone: "neutral", message: "正在停用真实模型…" });
+    try {
+      const response = await fetch(`${apiBase}/api/settings/llm`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...draft,
+          enabled: false,
+          api_key: null,
+        }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const settings = (await response.json()) as LLMSettingsPublic;
+      setSavedSettings(settings);
+      setDraft({ ...draft, enabled: false });
+      setRuntime({
+        status: "disabled",
+        active: false,
+        provider_id: settings.provider_id,
+        model: settings.model,
+        has_api_key: settings.has_api_key,
+        qa_available: false,
+        tool_calling_available: false,
+        last_error: null,
+      });
+      setFeedback({
+        tone: "success",
+        message: "真实模型已停用，配置与 API Key 仍保存在本机。",
+      });
+      onSettingsChanged(settings);
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message: error instanceof Error ? error.message : "停用模型失败。",
+      });
+    } finally {
+      setDisabling(false);
     }
   }
 
@@ -270,6 +413,16 @@ export function ModelSettingsDialog({
       if (!response.ok) throw new Error(await responseError(response));
       const settings = (await response.json()) as LLMSettingsPublic;
       setSavedSettings(settings);
+      setRuntime({
+        status: "unconfigured",
+        active: false,
+        provider_id: settings.provider_id,
+        model: settings.model,
+        has_api_key: false,
+        qa_available: false,
+        tool_calling_available: false,
+        last_error: null,
+      });
       setDraft((current) => (current ? { ...current, enabled: false } : current));
       setApiKey("");
       setConfirmClear(false);
@@ -304,8 +457,8 @@ export function ModelSettingsDialog({
             <p className="eyebrow">Model connection</p>
             <h2 id="model-settings-title">模型供应商设置</h2>
             <p id="model-settings-description">
-              选择供应商、验证 Tool Calling，并把对应密钥安全保存在本机。
-              图像理解能力取决于所选模型与功能入口。
+              选择供应商并同时验证基础问答与 Tool Calling。只有点击“保存并启用”
+              后，真实模型才会接管对话；看图问答还要求所填模型支持图片输入。
             </p>
           </div>
           <button
@@ -325,6 +478,13 @@ export function ModelSettingsDialog({
           </div>
         ) : draft ? (
           <form onSubmit={saveSettings}>
+            <div className={`model-runtime-card ${runtime?.status ?? "unconfigured"}`}>
+              <span className="model-runtime-dot" aria-hidden="true" />
+              <div>
+                <strong>{currentRuntimeCopy.title}</strong>
+                <p>{currentRuntimeCopy.detail}</p>
+              </div>
+            </div>
             <fieldset className="provider-fieldset">
               <legend>选择供应商</legend>
               <div className="provider-grid">
@@ -354,7 +514,7 @@ export function ModelSettingsDialog({
                   onChange={(event) =>
                     setDraft({ ...draft, model: event.target.value })
                   }
-                  placeholder="输入支持 Tool Calling 的模型 ID"
+                  placeholder="输入支持 Tool Calling；看图时还需支持视觉"
                   required
                 />
                 <datalist id="provider-models">
@@ -427,16 +587,9 @@ export function ModelSettingsDialog({
                     }
                   />
                 </label>
-                <label className="enable-control">
-                  <input
-                    type="checkbox"
-                    checked={draft.enabled}
-                    onChange={(event) =>
-                      setDraft({ ...draft, enabled: event.target.checked })
-                    }
-                  />
-                  <span>启用真实模型；关闭后保留配置并使用 Demo 模式</span>
-                </label>
+                <p className="advanced-hint">
+                  模型启用状态由底部操作明确控制，不再随高级配置隐式切换。
+                </p>
               </div>
             </details>
 
@@ -450,7 +603,9 @@ export function ModelSettingsDialog({
                   查看供应商官方文档
                 </a>
               ) : (
-                <span>自定义服务需要兼容 Chat Completions Tool Calling。</span>
+                <span>
+                  自定义服务需兼容 Chat Completions；视觉模型还需支持 image_url。
+                </span>
               )}
               {hasKeyForDraft ? (
                 <button
@@ -478,20 +633,30 @@ export function ModelSettingsDialog({
             ) : null}
 
             <footer className="settings-actions">
+              {runtime?.active || savedSettings?.enabled ? (
+                <button
+                  className="danger-secondary-action"
+                  type="button"
+                  onClick={disableModel}
+                  disabled={testing || saving || disabling}
+                >
+                  {disabling ? "停用中…" : "停用真实模型"}
+                </button>
+              ) : null}
               <button
                 className="secondary-action"
                 type="button"
                 onClick={testConnection}
-                disabled={testing || saving}
+                disabled={testing || saving || disabling}
               >
                 {testing ? "测试中…" : "测试连接"}
               </button>
               <button
                 className="primary-action"
                 type="submit"
-                disabled={saving || testing}
+                disabled={saving || testing || disabling}
               >
-                {saving ? "保存中…" : "保存配置"}
+                {saving ? "验证并启用中…" : "保存并启用"}
               </button>
             </footer>
           </form>

@@ -72,6 +72,14 @@ from .models import (
     JobPublic,
     LLMSettingsPublic,
     LLMSettingsUpdate,
+    LLMRuntimePublic,
+    MemoryCreateRequest,
+    MemoryEvidenceListResponse,
+    MemoryEvidencePublic,
+    MemoryExportResponse,
+    MemoryListResponse,
+    MemoryPublic,
+    MemoryUpdateRequest,
     PhotoStyleCreateResponse,
     PhotoStyleProviderStatus,
     ProviderCatalogResponse,
@@ -80,7 +88,16 @@ from .models import (
     ToolInfo,
     ViewerLinkPublic,
 )
+from .memory import (
+    MemoryPolicyError,
+    MemoryRecord,
+    MemoryScope,
+    MemoryStatus,
+    MemoryType,
+    SESSION_SUMMARY_SCHEMA_VERSION,
+)
 from .settings import (
+    LLMRuntimeManager,
     SettingsError,
     SettingsService,
     create_default_settings_service,
@@ -122,6 +139,7 @@ def _conversation_public(summary: object) -> ConversationPublic:
     return ConversationPublic(
         id=_public_session_id(summary.thread_id),
         channel=summary.channel,
+        project_id=summary.project_id,
         title=summary.title,
         created_at=datetime.fromtimestamp(summary.created_at, tz=timezone.utc),
         updated_at=datetime.fromtimestamp(summary.updated_at, tz=timezone.utc),
@@ -154,6 +172,44 @@ def _require_local_root(request: Request) -> None:
         )
 
 
+def _memory_public(memory: MemoryRecord) -> MemoryPublic:
+    def timestamp(value: float | None) -> datetime | None:
+        return (
+            datetime.fromtimestamp(value, tz=timezone.utc)
+            if value is not None
+            else None
+        )
+
+    return MemoryPublic(
+        id=memory.id,
+        memory_type=memory.memory_type,
+        scope=memory.scope,
+        scope_id=memory.scope_id,
+        content=memory.content,
+        topic_key=memory.topic_key,
+        source=memory.source,
+        source_message_id=memory.source_message_id,
+        source_run_id=memory.source_run_id,
+        confidence=memory.confidence,
+        importance=memory.importance,
+        sensitivity=memory.sensitivity,
+        retrieval_policy=memory.retrieval_policy,
+        valid_from=datetime.fromtimestamp(memory.valid_from, tz=timezone.utc),
+        valid_to=timestamp(memory.valid_to),
+        status=memory.status,
+        supersedes_id=memory.supersedes_id,
+        created_at=datetime.fromtimestamp(memory.created_at, tz=timezone.utc),
+        updated_at=datetime.fromtimestamp(memory.updated_at, tz=timezone.utc),
+        last_accessed_at=timestamp(memory.last_accessed_at),
+        access_count=memory.access_count,
+        utility_score=memory.utility_score,
+        metadata=memory.metadata,
+        relevance_score=memory.relevance_score,
+        evidence_count=memory.evidence_count,
+        evidence_refs=list(memory.evidence_refs),
+    )
+
+
 def create_app(
     trace_path: Path = DEFAULT_TRACE_PATH,
     planner: Planner | None = None,
@@ -177,11 +233,22 @@ def create_app(
     selected_settings_service = settings_service or create_default_settings_service(
         DEFAULT_SETTINGS_PATH
     )
-    selected_planner = planner or selected_settings_service.build_planner()
+    llm_runtime = LLMRuntimeManager(
+        selected_settings_service,
+        registry,
+        initial_planner=planner,
+    )
+    selected_planner = llm_runtime.planner
     runner = AgentRunner(
         registry,
         selected_planner,
         JsonlTraceStore(trace_path),
+        image_loader=lambda source_image_id, owner_id: (
+            selected_spatial_service.read_source_image(
+                source_image_id,
+                owner_id=owner_id,
+            )
+        ),
     )
     channel_data_path = trace_path.parent
     selected_feishu_settings_service = feishu_settings_service or (
@@ -223,6 +290,7 @@ def create_app(
             await selected_feishu_runtime.stop()
             selected_viewer_service.close()
             runner.close()
+            llm_runtime.close()
             selected_style_service.close()
             selected_spatial_service.close()
 
@@ -248,6 +316,7 @@ def create_app(
     app.state.registry = registry
     app.state.runner = runner
     app.state.settings_service = selected_settings_service
+    app.state.llm_runtime = llm_runtime
     app.state.spatial_service = selected_spatial_service
     app.state.style_service = selected_style_service
     app.state.feishu_settings_service = selected_feishu_settings_service
@@ -260,11 +329,26 @@ def create_app(
     def health(request: Request) -> HealthResponse:
         current_registry: ToolRegistry = request.app.state.registry
         current_runner: AgentRunner = request.app.state.runner
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
+        runtime_status = runtime.public_status()
         return HealthResponse(
             status="ok",
             agent_mode=current_runner.planner.mode,
             llm_configured=current_runner.planner.is_llm,
+            llm_status=runtime_status.status,
+            llm_provider=runtime_status.provider_id,
             model=current_runner.planner.model_name,
+            context_tokenizer=(
+                current_runner.context_builder.token_counter.identifier
+            ),
+            session_summary_provider=(
+                str(current_runner.planner.summary_provider_id)
+                if callable(
+                    getattr(current_runner.planner, "summarize_session", None)
+                )
+                else "fallback:extractive-v2"
+            ),
+            session_summary_schema=SESSION_SUMMARY_SCHEMA_VERSION,
             tool_count=len(current_registry.list_tools()),
             feishu_status=request.app.state.feishu_runtime.public_status().status,
         )
@@ -416,6 +500,211 @@ def create_app(
         )
         return Response(status_code=204)
 
+    @app.get("/api/memories/export", response_model=MemoryExportResponse)
+    def export_memories(request: Request) -> MemoryExportResponse:
+        runner: AgentRunner = request.app.state.runner
+        records = runner.memory_store.list_memory_records(
+            owner_id=WEB_OWNER_ID,
+            status=None,
+            limit=None,
+        )
+        return MemoryExportResponse(
+            exported_at=datetime.now(timezone.utc),
+            memories=[_memory_public(record) for record in records],
+        )
+
+    @app.get("/api/memories", response_model=MemoryListResponse)
+    def list_memories(
+        request: Request,
+        memory_type: MemoryType | None = Query(default=None, alias="type"),
+        scope: MemoryScope | None = Query(default=None),
+        status: MemoryStatus | None = Query(default="active"),
+        query: str | None = Query(default=None, max_length=160),
+        include_inactive: bool = Query(default=False),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> MemoryListResponse:
+        runner: AgentRunner = request.app.state.runner
+        records = runner.memory_store.list_memory_records(
+            owner_id=WEB_OWNER_ID,
+            memory_type=memory_type,
+            scope=scope,
+            status=None if include_inactive else status,
+            query=query,
+            limit=limit,
+        )
+        return MemoryListResponse(
+            memories=[_memory_public(record) for record in records]
+        )
+
+    @app.post(
+        "/api/memories",
+        response_model=MemoryPublic,
+        status_code=201,
+    )
+    def create_memory(
+        payload: MemoryCreateRequest,
+        request: Request,
+    ) -> MemoryPublic:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            memory_id = runner.memory_store.remember(
+                owner_id=WEB_OWNER_ID,
+                content=payload.content,
+                source="web:memory-center",
+                memory_type=payload.memory_type,
+                scope=payload.scope,
+                scope_id=payload.scope_id,
+                confidence=payload.confidence,
+                importance=payload.importance,
+                sensitivity=payload.sensitivity,
+                retrieval_policy=payload.retrieval_policy,
+                valid_from=(
+                    payload.valid_from.timestamp()
+                    if payload.valid_from is not None
+                    else None
+                ),
+                valid_to=(
+                    payload.valid_to.timestamp()
+                    if payload.valid_to is not None
+                    else None
+                ),
+                metadata=payload.metadata,
+            )
+        except (MemoryPolicyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        created = runner.memory_store.get_memory(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+        )
+        assert created is not None
+        return _memory_public(created)
+
+    @app.post(
+        "/api/memories/atomic",
+        response_model=MemoryListResponse,
+        status_code=201,
+    )
+    def create_atomic_memories(
+        payload: MemoryCreateRequest,
+        request: Request,
+    ) -> MemoryListResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            memory_ids = runner.memory_store.remember_many(
+                owner_id=WEB_OWNER_ID,
+                content=payload.content,
+                source="web:memory-center",
+                memory_type=payload.memory_type,
+                scope=payload.scope,
+                scope_id=payload.scope_id,
+                confidence=payload.confidence,
+                importance=payload.importance,
+                sensitivity=payload.sensitivity,
+                retrieval_policy=payload.retrieval_policy,
+                valid_from=(
+                    payload.valid_from.timestamp()
+                    if payload.valid_from is not None
+                    else None
+                ),
+                valid_to=(
+                    payload.valid_to.timestamp()
+                    if payload.valid_to is not None
+                    else None
+                ),
+                metadata=payload.metadata,
+            )
+        except (MemoryPolicyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        records = [
+            runner.memory_store.get_memory(
+                owner_id=WEB_OWNER_ID,
+                memory_id=memory_id,
+            )
+            for memory_id in memory_ids
+        ]
+        return MemoryListResponse(
+            memories=[_memory_public(record) for record in records if record is not None]
+        )
+
+    @app.put("/api/memories/{memory_id}", response_model=MemoryPublic)
+    def update_memory(
+        memory_id: str,
+        payload: MemoryUpdateRequest,
+        request: Request,
+    ) -> MemoryPublic:
+        runner: AgentRunner = request.app.state.runner
+        updates = payload.model_dump(exclude_unset=True)
+        for field in ("valid_from", "valid_to"):
+            value = updates.get(field)
+            if isinstance(value, datetime):
+                updates[field] = value.timestamp()
+        try:
+            updated = runner.memory_store.update_memory(
+                owner_id=WEB_OWNER_ID,
+                memory_id=memory_id,
+                updates=updates,
+            )
+        except (MemoryPolicyError, ValueError) as exc:
+            status_code = 404 if "找不到" in str(exc) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return _memory_public(updated)
+
+    @app.get(
+        "/api/memories/{memory_id}/evidence",
+        response_model=MemoryEvidenceListResponse,
+    )
+    def list_memory_evidence(
+        memory_id: str,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> MemoryEvidenceListResponse:
+        runner: AgentRunner = request.app.state.runner
+        memory = runner.memory_store.get_memory(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+        )
+        if memory is None:
+            raise HTTPException(status_code=404, detail="找不到这条记忆。")
+        evidence = runner.memory_store.list_memory_evidence(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+            limit=limit,
+        )
+        return MemoryEvidenceListResponse(
+            evidence=[
+                MemoryEvidencePublic(
+                    evidence_id=item.evidence_id,
+                    memory_id=item.memory_id,
+                    source_type=item.source_type,
+                    source=item.source,
+                    excerpt=item.excerpt,
+                    content_hash=item.content_hash,
+                    source_message_id=item.source_message_id,
+                    source_run_id=item.source_run_id,
+                    confidence=item.confidence,
+                    observed_at=datetime.fromtimestamp(
+                        item.observed_at,
+                        tz=timezone.utc,
+                    ),
+                    created_at=datetime.fromtimestamp(
+                        item.created_at,
+                        tz=timezone.utc,
+                    ),
+                )
+                for item in evidence
+            ]
+        )
+
+    @app.delete("/api/memories/{memory_id}", status_code=204)
+    def delete_memory(memory_id: str, request: Request) -> Response:
+        runner: AgentRunner = request.app.state.runner
+        if not runner.memory_store.delete_memory(
+            owner_id=WEB_OWNER_ID,
+            memory_id=memory_id,
+        ):
+            raise HTTPException(status_code=404, detail="找不到这条记忆。")
+        return Response(status_code=204)
+
     @app.get(
         "/api/channels/messages",
         response_model=ChannelMessageListResponse,
@@ -466,6 +755,28 @@ def create_app(
             return Response(status_code=204)
         except AssetError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/source-images/{source_image_id}/content")
+    def get_source_image_content(
+        source_image_id: str,
+        request: Request,
+    ) -> FileResponse:
+        service: SpatialSceneService = request.app.state.spatial_service
+        try:
+            path = service.resolve_source_image_file(
+                source_image_id,
+                owner_id=WEB_OWNER_ID,
+            )
+        except AssetError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(
+            path,
+            media_type="image/webp",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post(
         "/api/spatial-scenes",
@@ -644,7 +955,8 @@ def create_app(
     )
     def provider_settings(request: Request) -> ProviderCatalogResponse:
         service: SettingsService = request.app.state.settings_service
-        return service.catalog()
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
+        return service.catalog(runtime.public_status())
 
     @app.put(
         "/api/settings/llm",
@@ -654,14 +966,24 @@ def create_app(
         payload: LLMSettingsUpdate,
         request: Request,
     ) -> LLMSettingsPublic:
-        service: SettingsService = request.app.state.settings_service
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
         current_runner: AgentRunner = request.app.state.runner
         try:
-            settings = service.save(payload)
-            current_runner.planner = service.build_planner()
+            settings, _, planner = runtime.apply(payload)
+            current_runner.planner = planner
             return settings
         except SettingsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LLMError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/settings/llm/status",
+        response_model=LLMRuntimePublic,
+    )
+    def llm_runtime_status(request: Request) -> LLMRuntimePublic:
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
+        return runtime.public_status()
 
     @app.post(
         "/api/settings/llm/test",
@@ -671,10 +993,9 @@ def create_app(
         payload: LLMSettingsUpdate,
         request: Request,
     ) -> ConnectionTestResponse:
-        service: SettingsService = request.app.state.settings_service
-        current_registry: ToolRegistry = request.app.state.registry
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
         try:
-            return service.test_connection(payload, current_registry)
+            return runtime.test(payload)
         except SettingsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMError as exc:
@@ -685,10 +1006,10 @@ def create_app(
         response_model=LLMSettingsPublic,
     )
     def clear_llm_api_key(request: Request) -> LLMSettingsPublic:
-        service: SettingsService = request.app.state.settings_service
+        runtime: LLMRuntimeManager = request.app.state.llm_runtime
         current_runner: AgentRunner = request.app.state.runner
-        settings = service.clear_key()
-        current_runner.planner = service.build_planner()
+        settings, planner = runtime.clear_key()
+        current_runner.planner = planner
         return settings
 
     @app.get(
@@ -829,6 +1150,11 @@ def create_app(
         current_runner: AgentRunner = request.app.state.runner
         spatial: SpatialSceneService = request.app.state.spatial_service
         try:
+            attachment_ids = list(dict.fromkeys(payload.attachment_image_ids))
+            attachment_contexts = [
+                spatial.get_source_image(source_id).model_dump()
+                for source_id in attachment_ids
+            ]
             source_context = (
                 spatial.get_source_image(payload.source_image_id).model_dump()
                 if payload.source_image_id
@@ -838,14 +1164,34 @@ def create_app(
                 spatial.get_source_image(source_id).model_dump()
                 for source_id in payload.style_image_ids
             ]
-            return current_runner.run(
+            response = current_runner.run(
                 payload.message,
+                attachment_contexts=attachment_contexts,
                 source_image_context=source_context,
                 style_image_contexts=style_contexts,
                 owner_id=WEB_OWNER_ID,
                 thread_id=_web_thread_id(payload.session_id or "default"),
                 channel="web",
+                project_id=payload.project_id,
             )
+            release_ids = {
+                str(source_id)
+                for step in response.steps
+                for source_id in (
+                    (step.output or {}).get("release_image_ids", [])
+                    if isinstance(
+                        (step.output or {}).get("release_image_ids", []),
+                        list,
+                    )
+                    else []
+                )
+            }
+            for source_id in release_ids:
+                try:
+                    spatial.delete_source_image(source_id)
+                except AssetError:
+                    pass
+            return response
         except AssetError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMError as exc:
@@ -904,6 +1250,38 @@ def create_app(
                     answer=response.answer,
                 )
             return response
+        except AgentRunIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AgentRunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/agent/runs/{run_id}/resume",
+        response_model=AgentRunResponse,
+    )
+    def resume_interrupted_agent_run(
+        run_id: str,
+        request: Request,
+    ) -> AgentRunResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            return runner.continue_run(run_id, is_admin=True)
+        except AgentRunIsolationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except AgentRunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/agent/runs/{run_id}/abandon",
+        response_model=AgentRunResponse,
+    )
+    def abandon_interrupted_agent_run(
+        run_id: str,
+        request: Request,
+    ) -> AgentRunResponse:
+        runner: AgentRunner = request.app.state.runner
+        try:
+            return runner.abandon_interrupted_run(run_id, is_admin=True)
         except AgentRunIsolationError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except AgentRunError as exc:

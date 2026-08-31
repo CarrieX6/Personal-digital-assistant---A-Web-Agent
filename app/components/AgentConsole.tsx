@@ -15,7 +15,19 @@ export type HealthInfo = {
   status: "ok";
   agent_mode: string;
   llm_configured: boolean;
+  llm_status?:
+    | "disabled"
+    | "unconfigured"
+    | "configured_not_enabled"
+    | "testing"
+    | "ready"
+    | "degraded"
+    | "error";
+  llm_provider?: string | null;
   model?: string | null;
+  context_tokenizer?: string | null;
+  session_summary_provider?: string | null;
+  session_summary_schema?: string | null;
   tool_count: number;
   feishu_status?:
     | "disabled"
@@ -42,7 +54,12 @@ type TraceStep = {
 
 type AgentRun = {
   run_id: string;
-  status: "waiting_approval" | "completed" | "failed";
+  status:
+    | "waiting_approval"
+    | "recoverable"
+    | "needs_attention"
+    | "completed"
+    | "failed";
   mode: string;
   answer: string;
   steps: TraceStep[];
@@ -84,15 +101,23 @@ type AgentJob = {
   kind?: "spatial_scene" | "photo_style_transfer";
 };
 
+type MessageAttachment = {
+  name: string;
+  preview?: string;
+};
+
+type PendingAttachment = MessageAttachment & {
+  id: string;
+  file: File;
+  preview: string;
+};
+
 type LocalMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: string;
-  attachment?: {
-    name: string;
-    preview?: string;
-  };
+  attachments?: MessageAttachment[];
   run?: AgentRun;
   assetId?: string;
   assetKind?: "spatial_scene" | "photo_style_transfer";
@@ -128,7 +153,16 @@ type ConversationMessageResponse = {
     asset_kind?: "spatial_scene" | "photo_style_transfer";
     attachment?: {
       name?: string;
+      preview_url?: string;
     };
+    style_attachments?: Array<{
+      name?: string;
+      preview_url?: string;
+    }>;
+    attachments?: Array<{
+      name?: string;
+      preview_url?: string;
+    }>;
   };
 };
 
@@ -138,7 +172,7 @@ type ChannelMessage = {
   chat_id: string;
   sender_id?: string | null;
   direction: "inbound" | "outbound" | "system";
-  kind: "text" | "markdown" | "image" | "card" | "status";
+  kind: "text" | "markdown" | "image" | "file" | "card" | "status";
   content: string;
   media_url?: string | null;
   created_at: string;
@@ -165,8 +199,41 @@ const examples = [
   "现在几点？",
 ];
 
+const loadingPhases = [
+  "正在理解你的请求",
+  "正在整理会话上下文",
+  "正在等待模型或工具返回",
+];
+
 function makeId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function AgentLoadingIndicator() {
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    const contextTimer = window.setTimeout(() => setPhase(1), 1200);
+    const responseTimer = window.setTimeout(() => setPhase(2), 3200);
+    return () => {
+      window.clearTimeout(contextTimer);
+      window.clearTimeout(responseTimer);
+    };
+  }, []);
+
+  return (
+    <div className="message-row assistant" role="status" aria-live="polite">
+      <div className="assistant-avatar">A</div>
+      <div className="message-bubble assistant typing-bubble" aria-atomic="true">
+        <span className="typing-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="typing-label">{loadingPhases[phase]}</span>
+      </div>
+    </div>
+  );
 }
 
 export function AgentConsole({
@@ -177,8 +244,13 @@ export function AgentConsole({
   onPhotoStyleReady,
 }: AgentConsoleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const styleInputRef = useRef<HTMLInputElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const followMessagesRef = useRef(true);
+  const forceMessageScrollRef = useRef(false);
+  const messageScrollSnapshotRef = useRef({
+    selectedId: "",
+    messageCount: 0,
+  });
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const [localThreads, setLocalThreads] = useState<LocalThread[]>([]);
@@ -187,13 +259,13 @@ export function AgentConsole({
   const [channelMessages, setChannelMessages] = useState<ChannelMessage[]>([]);
   const [channelLoading, setChannelLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<AgentRun[]>([]);
+  const [interruptedRuns, setInterruptedRuns] = useState<AgentRun[]>([]);
   const [message, setMessage] = useState("");
-  const [attachment, setAttachment] = useState<File | null>(null);
-  const [attachmentPreview, setAttachmentPreview] = useState("");
-  const [styleAttachments, setStyleAttachments] = useState<File[]>([]);
-  const [styleAttachmentPreviews, setStyleAttachmentPreviews] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [imagePreview, setImagePreview] = useState<MessageAttachment | null>(null);
   const [loading, setLoading] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState("");
+  const [recoveryBusy, setRecoveryBusy] = useState("");
   const [job, setJob] = useState<AgentJob | null>(null);
   const [retryingJob, setRetryingJob] = useState(false);
   const [error, setError] = useState("");
@@ -257,9 +329,24 @@ export function AgentConsole({
                 role: item.role as "user" | "assistant",
                 content: item.content,
                 createdAt: item.created_at,
-                attachment: item.metadata?.attachment?.name
-                  ? { name: item.metadata.attachment.name }
-                  : undefined,
+                attachments: (
+                  item.metadata?.attachments?.length
+                    ? item.metadata.attachments
+                    : [
+                        ...(item.metadata?.attachment
+                          ? [item.metadata.attachment]
+                          : []),
+                        ...(item.metadata?.style_attachments ?? []),
+                      ]
+                )
+                  .filter((attachment) => Boolean(attachment.name))
+                  .map((attachment) => ({
+                    name: attachment.name!,
+                    preview: resolveApiMediaUrl(
+                      apiBase,
+                      attachment.preview_url,
+                    ),
+                  })),
                 run: item.metadata?.run,
                 assetId: item.metadata?.asset_id,
                 assetKind: item.metadata?.asset_kind,
@@ -302,6 +389,23 @@ export function AgentConsole({
     };
   }, []);
 
+  useEffect(() => {
+    if (!imagePreview) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImagePreview(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [imagePreview]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice((current) => (current === notice ? "" : current));
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
   const loadChannelMessages = useCallback(async () => {
     try {
       const response = await fetch(`${apiBase}/api/channels/messages?limit=200`, {
@@ -332,10 +436,32 @@ export function AgentConsole({
     }
   }, [apiBase]);
 
+  const loadInterruptedRuns = useCallback(async () => {
+    try {
+      const responses = await Promise.all(
+        ["recoverable", "needs_attention"].map((status) =>
+          fetch(`${apiBase}/api/agent/runs?status=${status}&limit=20`, {
+            cache: "no-store",
+          }),
+        ),
+      );
+      for (const response of responses) {
+        if (!response.ok) throw new Error(await responseError(response));
+      }
+      const bodies = (await Promise.all(
+        responses.map((response) => response.json()),
+      )) as { runs: AgentRun[] }[];
+      setInterruptedRuns(bodies.flatMap((body) => body.runs));
+    } catch {
+      // Recovery polling is advisory and must not block normal chat.
+    }
+  }, [apiBase]);
+
   useEffect(() => {
     const refresh = () => {
       void loadChannelMessages();
       void loadPendingApprovals();
+      void loadInterruptedRuns();
     };
     const initial = window.setTimeout(refresh, 0);
     const interval = window.setInterval(refresh, 3000);
@@ -343,14 +469,40 @@ export function AgentConsole({
       window.clearTimeout(initial);
       window.clearInterval(interval);
     };
-  }, [loadChannelMessages, loadPendingApprovals]);
+  }, [loadChannelMessages, loadInterruptedRuns, loadPendingApprovals]);
+
+  const selectedMessageCount = selectedId.startsWith("local:")
+    ? (localThreads.find((thread) => `local:${thread.id}` === selectedId)
+        ?.messages.length ?? 0)
+    : selectedId.startsWith("feishu:")
+      ? channelMessages.filter(
+          (item) => `feishu:${item.chat_id}` === selectedId,
+        ).length
+      : 0;
 
   useEffect(() => {
-    messageListRef.current?.scrollTo({
-      top: messageListRef.current.scrollHeight,
-      behavior: "smooth",
+    const viewport = messageListRef.current;
+    const previous = messageScrollSnapshotRef.current;
+    const selectionChanged = previous.selectedId !== selectedId;
+    const messageAdded = selectedMessageCount > previous.messageCount;
+    messageScrollSnapshotRef.current = {
+      selectedId,
+      messageCount: selectedMessageCount,
+    };
+
+    const shouldScroll =
+      selectionChanged ||
+      (messageAdded &&
+        (forceMessageScrollRef.current || followMessagesRef.current));
+    forceMessageScrollRef.current = false;
+    if (!viewport || !shouldScroll) return;
+
+    if (selectionChanged) followMessagesRef.current = true;
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: "auto",
     });
-  }, [localThreads, selectedId, channelMessages, loading, job]);
+  }, [selectedId, selectedMessageCount]);
 
   useEffect(() => {
     if (!deleteTarget) return;
@@ -559,85 +711,99 @@ export function AgentConsole({
   }
 
   function chooseAttachment(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+    const selected = Array.from(event.target.files ?? []);
     setError("");
-    if (!file) return;
-    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    if (!selected.length) return;
+    if (
+      selected.some(
+        (file) =>
+          !["image/jpeg", "image/png", "image/webp"].includes(file.type),
+      )
+    ) {
       setError("附件仅支持 JPG、PNG 或 WebP 图片。");
       event.target.value = "";
       return;
     }
-    if (file.size > 20 * 1024 * 1024) {
-      setError("图片附件不能超过 20MB。");
+    if (selected.some((file) => file.size > 20 * 1024 * 1024)) {
+      setError("每张图片附件不能超过 20MB。");
       event.target.value = "";
       return;
     }
-    const preview = URL.createObjectURL(file);
-    previewUrlsRef.current.add(preview);
-    setAttachmentPreview(preview);
-    setAttachment(file);
-    if (!message.trim()) {
-      setMessage("把这张图片生成可拖动视角的空间照片");
-    }
+    setAttachments((current) => {
+      const known = new Set(
+        current.map(
+          (item) =>
+            `${item.file.name}:${item.file.size}:${item.file.lastModified}`,
+        ),
+      );
+      const additions = selected
+        .filter(
+          (file) =>
+            !known.has(`${file.name}:${file.size}:${file.lastModified}`),
+        )
+        .slice(0, Math.max(0, 4 - current.length))
+        .map((file) => {
+          const preview = URL.createObjectURL(file);
+          previewUrlsRef.current.add(preview);
+          return {
+            id: makeId(),
+            file,
+            name: file.name,
+            preview,
+          };
+        });
+      if (current.length + additions.length < current.length + selected.length) {
+        window.setTimeout(
+          () => setError("一次消息最多添加 4 张图片。"),
+          0,
+        );
+      }
+      return [...current, ...additions];
+    });
+    event.target.value = "";
   }
 
-  function clearAttachment() {
-    setAttachmentPreview("");
-    setAttachment(null);
+  function removeAttachment(id: string) {
+    setImagePreview(null);
+    setAttachments((current) => {
+      const removed = current.find((item) => item.id === id);
+      if (removed) {
+        URL.revokeObjectURL(removed.preview);
+        previewUrlsRef.current.delete(removed.preview);
+      }
+      return current.filter((item) => item.id !== id);
+    });
+  }
+
+  function clearAttachments() {
+    setAttachments((current) => {
+      current.forEach((item) => {
+        URL.revokeObjectURL(item.preview);
+        previewUrlsRef.current.delete(item.preview);
+      });
+      return [];
+    });
     if (inputRef.current) inputRef.current.value = "";
-  }
-
-  function chooseStyleAttachments(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    setError("");
-    if (!files.length) return;
-    if (files.length > 3) {
-      setError("风格参考图最多选择 3 张。");
-      event.target.value = "";
-      return;
-    }
-    if (
-      files.some(
-        (file) =>
-          !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
-          file.size > 20 * 1024 * 1024,
-      )
-    ) {
-      setError("风格参考仅支持 20MB 以内的 JPG、PNG 或 WebP 图片。");
-      event.target.value = "";
-      return;
-    }
-    const previews = files.map((file) => URL.createObjectURL(file));
-    previews.forEach((preview) => previewUrlsRef.current.add(preview));
-    setStyleAttachments(files);
-    setStyleAttachmentPreviews(previews);
-    if (!message.trim()) setMessage("把内容图按参考图进行图片风格化");
-  }
-
-  function clearStyleAttachments() {
-    setStyleAttachments([]);
-    setStyleAttachmentPreviews([]);
-    if (styleInputRef.current) styleInputRef.current.value = "";
   }
 
   async function runAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedLocal || !message.trim() || loading) return;
-    if (styleAttachments.length && !attachment) {
-      setError("图片风格化需要先选择一张内容图。");
+    if (!selectedLocal || (!message.trim() && !attachments.length) || loading) {
       return;
     }
     const threadId = selectedLocal.id;
-    const userText = message.trim();
-    const sentAttachment = attachment
-      ? { name: attachment.name, preview: attachmentPreview }
-      : undefined;
+    forceMessageScrollRef.current = true;
+    const userText = message.trim() || "请分析这些图片";
+    const pendingAttachments = [...attachments];
     const userMessage: LocalMessage = {
       id: makeId(),
       role: "user",
       content: userText,
       createdAt: new Date().toISOString(),
-      attachment: sentAttachment,
+      attachments: pendingAttachments.map(({ name, preview }) => ({
+        name,
+        preview,
+      })),
     };
     const nextTitle =
       selectedLocal.messages.length === 0
@@ -653,14 +819,14 @@ export function AgentConsole({
     setMessage("");
     setLoading(true);
     setError("");
+    setNotice("");
     setJob(null);
 
-    let sourceImage: SourceImage | null = null;
-    const stagedStyleImages: SourceImage[] = [];
+    const stagedImages: SourceImage[] = [];
     try {
-      if (attachment) {
+      for (const pending of pendingAttachments) {
         const uploadPayload = new FormData();
-        uploadPayload.append("file", attachment);
+        uploadPayload.append("file", pending.file);
         const uploadResponse = await fetch(`${apiBase}/api/source-images`, {
           method: "POST",
           body: uploadPayload,
@@ -668,19 +834,7 @@ export function AgentConsole({
         if (!uploadResponse.ok) {
           throw new Error(await responseError(uploadResponse));
         }
-        sourceImage = (await uploadResponse.json()) as SourceImage;
-      }
-      for (const styleAttachment of styleAttachments) {
-        const uploadPayload = new FormData();
-        uploadPayload.append("file", styleAttachment);
-        const uploadResponse = await fetch(`${apiBase}/api/source-images`, {
-          method: "POST",
-          body: uploadPayload,
-        });
-        if (!uploadResponse.ok) {
-          throw new Error(await responseError(uploadResponse));
-        }
-        stagedStyleImages.push((await uploadResponse.json()) as SourceImage);
+        stagedImages.push((await uploadResponse.json()) as SourceImage);
       }
 
       const response = await fetch(`${apiBase}/api/agent/run`, {
@@ -688,8 +842,7 @@ export function AgentConsole({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: userText,
-          source_image_id: sourceImage?.id,
-          style_image_ids: stagedStyleImages.map((image) => image.id),
+          attachment_image_ids: stagedImages.map((image) => image.id),
           session_id: threadId,
         }),
       });
@@ -702,6 +855,9 @@ export function AgentConsole({
             typeof output?.job_id === "string" &&
             typeof output?.asset_id === "string",
         );
+      const attachmentAction = result.steps
+        .map((step) => step.output?.attachment_action)
+        .find((action) => typeof action === "string");
       const assistantMessage: LocalMessage = {
         id: makeId(),
         role: "assistant",
@@ -740,32 +896,25 @@ export function AgentConsole({
               ? "photo_style_transfer"
               : "spatial_scene",
         });
-      } else {
-        if (sourceImage) {
-          await fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
-            method: "DELETE",
-          });
-        }
+      } else if (attachmentAction !== "vision") {
         await Promise.all(
-          stagedStyleImages.map((image) =>
+          stagedImages.map((image) =>
             fetch(`${apiBase}/api/source-images/${image.id}`, {
               method: "DELETE",
             }),
           ),
         );
       }
-      clearAttachment();
-      clearStyleAttachments();
-      await loadLocalConversations();
+      if (attachmentAction !== "clarification_required") {
+        clearAttachments();
+        await loadLocalConversations();
+      } else {
+        setNotice("附件已保留在输入框中，补充用途后可以直接继续发送。");
+      }
       onConnectionChange(true);
     } catch (requestError) {
       onConnectionChange(false);
-      if (sourceImage) {
-        void fetch(`${apiBase}/api/source-images/${sourceImage.id}`, {
-          method: "DELETE",
-        });
-      }
-      stagedStyleImages.forEach((image) => {
+      stagedImages.forEach((image) => {
         void fetch(`${apiBase}/api/source-images/${image.id}`, {
           method: "DELETE",
         });
@@ -825,9 +974,47 @@ export function AgentConsole({
     }
   }
 
+  async function resolveInterruptedRun(
+    runId: string,
+    action: "resume" | "abandon",
+  ) {
+    if (recoveryBusy) return;
+    setRecoveryBusy(runId);
+    setError("");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/agent/runs/${encodeURIComponent(runId)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await responseError(response));
+      setInterruptedRuns((current) =>
+        current.filter((run) => run.run_id !== runId),
+      );
+      await loadLocalConversations();
+      await loadChannelMessages();
+      await loadPendingApprovals();
+      await loadInterruptedRuns();
+      onConnectionChange(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : action === "resume"
+            ? "无法恢复这个中断任务。"
+            : "无法终止这个中断任务。",
+      );
+    } finally {
+      setRecoveryBusy("");
+    }
+  }
+
   const modeLabel = health?.llm_configured
-    ? health.model ?? "已配置模型"
-    : "演示规划器";
+    ? health.model ?? "真实模型"
+    : health?.llm_status === "configured_not_enabled"
+      ? "模型已配置，尚未启用"
+      : health?.llm_status === "error"
+        ? "模型配置异常"
+        : "演示规划器";
 
   return (
     <>
@@ -984,7 +1171,66 @@ export function AgentConsole({
           </section>
         ) : null}
 
-        <div className="chat-message-scroll" ref={messageListRef} aria-live="polite">
+        {interruptedRuns.length ? (
+          <section
+            className="root-approval-queue root-recovery-queue"
+            aria-label="中断的 Agent Run"
+          >
+            <div>
+              <strong>中断任务</strong>
+              <span>
+                {interruptedRuns.length} 个任务需要恢复或明确终止
+              </span>
+            </div>
+            {interruptedRuns.slice(0, 3).map((run) => (
+              <div className="root-approval-item" key={run.run_id}>
+                <span title={run.answer}>
+                  <strong>
+                    {run.status === "recoverable"
+                      ? "Checkpoint 已验证"
+                      : "Checkpoint 不可验证"}
+                  </strong>
+                  <small>
+                    {run.status === "recoverable" ? "可安全继续" : "需人工处置"}
+                    {" · "}
+                    {shortId(run.run_id)}
+                  </small>
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    disabled={Boolean(recoveryBusy)}
+                    onClick={() => resolveInterruptedRun(run.run_id, "abandon")}
+                  >
+                    {recoveryBusy === run.run_id ? "处理中…" : "终止"}
+                  </button>
+                  {run.status === "recoverable" ? (
+                    <button
+                      className="approve"
+                      type="button"
+                      disabled={Boolean(recoveryBusy)}
+                      onClick={() => resolveInterruptedRun(run.run_id, "resume")}
+                    >
+                      {recoveryBusy === run.run_id ? "恢复中…" : "继续"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </section>
+        ) : null}
+
+        <div
+          className="chat-message-scroll"
+          ref={messageListRef}
+          aria-live="polite"
+          onScroll={(event) => {
+            const viewport = event.currentTarget;
+            const distanceFromBottom =
+              viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+            followMessagesRef.current = distanceFromBottom <= 120;
+          }}
+        >
           {selectedLocal ? (
             selectedLocal.messages.length ? (
               selectedLocal.messages.map((item) => (
@@ -994,6 +1240,7 @@ export function AgentConsole({
                   apiBase={apiBase}
                   onOpenAsset={onSpatialSceneReady}
                   onOpenStyle={onPhotoStyleReady}
+                  onPreviewImage={setImagePreview}
                   onApprovalDecision={decideApproval}
                   approvalBusy={approvalBusy === item.run?.run_id}
                 />
@@ -1009,17 +1256,7 @@ export function AgentConsole({
             <ChatWelcome onExample={setMessage} />
           )}
 
-          {loading ? (
-            <div className="message-row assistant">
-              <div className="assistant-avatar">A</div>
-              <div className="message-bubble assistant typing-bubble">
-                <span />
-                <span />
-                <span />
-                <strong>正在规划和调用工具</strong>
-              </div>
-            </div>
-          ) : null}
+          {loading ? <AgentLoadingIndicator /> : null}
 
           {job ? (
             <div className="message-row assistant">
@@ -1085,40 +1322,35 @@ export function AgentConsole({
 
         {selectedLocal ? (
           <form className="chat-composer" onSubmit={runAgent}>
-            {attachment ? (
-              <div className="composer-attachment">
-                {/* This URL refers to a local file selected in this browser. */}
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={attachmentPreview} alt="待发送图片预览" />
-                <span>
-                  <strong>{attachment.name}</strong>
-                  <small>仅上传到本机 Agent</small>
-                </span>
-                <button
-                  type="button"
-                  onClick={clearAttachment}
-                  aria-label="移除图片附件"
-                >
-                  移除
-                </button>
-              </div>
-            ) : null}
-            {styleAttachments.length ? (
-              <div className="composer-style-attachments">
-                <span>风格参考 · {styleAttachments.length}/3</span>
-                <div>
-                  {styleAttachments.map((file, index) => (
-                    <span className="composer-style-chip" key={`${file.name}-${index}`}>
+            {attachments.length ? (
+              <div className="composer-attachments" aria-label="待发送附件">
+                {attachments.map((attachment, index) => (
+                  <article className="composer-attachment-chip" key={attachment.id}>
+                    <button
+                      className="composer-attachment-preview"
+                      type="button"
+                      aria-label={`预览附件 ${index + 1}：${attachment.name}`}
+                      onClick={() => setImagePreview(attachment)}
+                    >
                       {/* Local object URL; it has not left this device. */}
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={styleAttachmentPreviews[index]} alt="" />
-                      <small>{file.name}</small>
-                    </span>
-                  ))}
-                  <button type="button" onClick={clearStyleAttachments}>
-                    清空参考图
-                  </button>
-                </div>
+                      <img src={attachment.preview} alt="" />
+                      <span>{index + 1}</span>
+                    </button>
+                    <small title={attachment.name}>{attachment.name}</small>
+                    <button
+                      className="composer-attachment-remove"
+                      type="button"
+                      aria-label={`移除附件：${attachment.name}`}
+                      onClick={() => removeAttachment(attachment.id)}
+                    >
+                      ×
+                    </button>
+                  </article>
+                ))}
+                <span className="composer-attachment-note">
+                  {attachments.length}/4 · 可直接看图问答；生成类任务需明确说明用途
+                </span>
               </div>
             ) : null}
             <label className="sr-only" htmlFor="agent-chat-input">
@@ -1148,40 +1380,28 @@ export function AgentConsole({
                   ref={inputRef}
                   className="sr-only"
                   type="file"
+                  multiple
                   accept="image/jpeg,image/png,image/webp"
                   onChange={chooseAttachment}
                 />
-                <input
-                  ref={styleInputRef}
-                  className="sr-only"
-                  type="file"
-                  multiple
-                  accept="image/jpeg,image/png,image/webp"
-                  onChange={chooseStyleAttachments}
-                />
                 <button
                   className="composer-icon-button"
                   type="button"
+                  aria-label="添加附件"
+                  title="添加附件"
                   onClick={() => inputRef.current?.click()}
-                  aria-label="添加本地图片"
                 >
                   <AppIcon name="paperclip" width="19" height="19" />
-                </button>
-                <button
-                  className="composer-icon-button"
-                  type="button"
-                  onClick={() => styleInputRef.current?.click()}
-                  aria-label="添加风格参考图片"
-                  title="添加 1–3 张风格参考图"
-                >
-                  <AppIcon name="image" width="19" height="19" />
+                  {attachments.length ? (
+                    <small aria-hidden="true">{attachments.length}</small>
+                  ) : null}
                 </button>
                 <span>{message.length} / 4000</span>
               </div>
               <button
                 className="send-button"
                 type="submit"
-                disabled={loading || !message.trim()}
+                disabled={loading || (!message.trim() && !attachments.length)}
               >
                 发送
                 <AppIcon name="send" width="17" height="17" />
@@ -1240,6 +1460,30 @@ export function AgentConsole({
           </section>
         </div>
       ) : null}
+
+      {imagePreview?.preview ? (
+        <div
+          className="style-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${imagePreview.name}完整预览`}
+          onClick={() => setImagePreview(null)}
+        >
+          <button
+            className="style-lightbox-close"
+            type="button"
+            aria-label="关闭附件预览"
+            onClick={() => setImagePreview(null)}
+          >
+            ×
+          </button>
+          <figure onClick={(event) => event.stopPropagation()}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={imagePreview.preview} alt={imagePreview.name} />
+            <figcaption>{imagePreview.name} · 按 Esc 关闭</figcaption>
+          </figure>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1269,6 +1513,7 @@ function LocalMessageBubble({
   apiBase,
   onOpenAsset,
   onOpenStyle,
+  onPreviewImage,
   onApprovalDecision,
   approvalBusy,
 }: {
@@ -1276,6 +1521,7 @@ function LocalMessageBubble({
   apiBase: string;
   onOpenAsset: (assetId: string) => void;
   onOpenStyle: (assetId: string) => void;
+  onPreviewImage: (attachment: MessageAttachment) => void;
   onApprovalDecision: (runId: string, approved: boolean) => void;
   approvalBusy: boolean;
 }) {
@@ -1284,17 +1530,31 @@ function LocalMessageBubble({
     <div className={`message-row ${item.role}`}>
       {item.role === "assistant" ? <div className="assistant-avatar">A</div> : null}
       <div className={`message-bubble ${item.role}`}>
-        {item.attachment ? (
-          <div className="message-image">
-            {item.attachment.preview ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={item.attachment.preview} alt={item.attachment.name} />
-            ) : (
-              <span>
-                <AppIcon name="image" width="24" height="24" />
-              </span>
+        {item.attachments?.length ? (
+          <div
+            className="message-attachments"
+            data-count={item.attachments.length}
+            aria-label={`${item.attachments.length} 个图片附件`}
+          >
+            {item.attachments.map((attachment, index) =>
+              attachment.preview ? (
+                <button
+                  type="button"
+                  aria-label={`预览附件 ${index + 1}：${attachment.name}`}
+                  onClick={() => onPreviewImage(attachment)}
+                  key={`${attachment.name}-${index}`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={attachment.preview} alt="" />
+                  <span>{index + 1}</span>
+                </button>
+              ) : (
+                <span key={`${attachment.name}-${index}`}>
+                  <AppIcon name="image" width="20" height="20" />
+                  <small>{attachment.name}</small>
+                </span>
+              ),
             )}
-            <small>{item.attachment.name}</small>
           </div>
         ) : null}
         <p>{cleanMessageText(item.content)}</p>
@@ -1504,7 +1764,40 @@ function ChannelMessageBubble({
             </div>
           )
         ) : null}
-        {card?.variant === "menu" ? (
+        {item.kind === "file" ? (
+          mediaSrc ? (
+            <a
+              className="channel-file-download"
+              href={mediaSrc}
+              download
+              aria-label="下载飞书返回的结果文件"
+            >
+              <AppIcon name="download" width="22" height="22" />
+              <span>
+                <strong>风格化结果文件</strong>
+                <small>点击下载到本机</small>
+              </span>
+            </a>
+          ) : (
+            <div className="channel-image-placeholder">
+              <AppIcon name="download" width="24" height="24" />
+              <strong>下载文件不可用</strong>
+              <span>本地结果可能已经被删除</span>
+            </div>
+          )
+        ) : null}
+        {card?.variant === "style-draft" ? (
+          <div className="channel-function-card">
+            <span className="function-card-icon" aria-hidden="true">
+              <AppIcon name="image" width="19" height="19" />
+            </span>
+            <div>
+              <small>图片风格化</small>
+              <strong>草稿状态已更新</strong>
+              <p>{card.text}</p>
+            </div>
+          </div>
+        ) : card?.variant === "menu" ? (
           <div className="channel-function-card">
             <span className="function-card-icon" aria-hidden="true">
               <AppIcon name="tools" width="19" height="19" />
@@ -1532,7 +1825,7 @@ function ChannelMessageBubble({
               <span>请在飞书中点击“重新生成”</span>
             </div>
           </div>
-        ) : item.kind !== "image" ? (
+        ) : item.kind !== "image" && item.kind !== "file" ? (
           <>
             {card?.variant === "action" ? (
               <span className="message-kind-label">已选择功能</span>
@@ -1555,6 +1848,18 @@ function ChannelMessageBubble({
 
 function parseFunctionCard(item: ChannelMessage) {
   const cleaned = cleanMessageText(item.content);
+  if (
+    item.direction === "outbound" &&
+    cleaned.startsWith("[图片风格化草稿]")
+  ) {
+    return {
+      variant: "style-draft" as const,
+      items: [] as string[],
+      text:
+        cleaned.replace(/^\[图片风格化草稿\]\s*/, "") ||
+        "正在等待内容图、风格参考图或补充描述。",
+    };
+  }
   if (item.direction === "outbound" && cleaned.startsWith("[重试卡片]")) {
     return {
       variant: "retry" as const,
@@ -1668,6 +1973,12 @@ function formatTime(value: string) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
+}
+
+function resolveApiMediaUrl(apiBase: string, value: string | undefined) {
+  if (!value) return undefined;
+  if (value.startsWith("/")) return `${apiBase}${value}`;
+  return /^https?:\/\//i.test(value) ? value : undefined;
 }
 
 function formatRelative(value: string) {

@@ -8,7 +8,7 @@ type ChannelMessage = {
   chat_id: string;
   sender_id?: string | null;
   direction: "inbound" | "outbound" | "system";
-  kind: "text" | "markdown" | "image" | "card" | "status";
+  kind: "text" | "markdown" | "image" | "file" | "card" | "status";
   content: string;
   created_at: string;
 };
@@ -23,6 +23,7 @@ const kindLabels: Record<ChannelMessage["kind"], string> = {
   text: "文本",
   markdown: "回答",
   image: "图片",
+  file: "文件",
   card: "功能卡片",
   status: "状态",
 };

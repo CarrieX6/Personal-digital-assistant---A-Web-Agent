@@ -1,0 +1,93 @@
+{
+  "version": 2,
+  "cases": [
+    {
+      "id": "identity_paraphrase",
+      "memories": [
+        {"content": "我叫林舟"},
+        {"content": "我喜欢简洁回答"}
+      ],
+      "query": "你还记得我是谁吗？",
+      "expected_contains": ["我叫林舟"],
+      "expected_excludes": ["我喜欢简洁回答"]
+    },
+    {
+      "id": "sensitive_address_requires_explicit_intent",
+      "memories": [
+        {"content": "我的家庭住址是测试路 12 号"}
+      ],
+      "query": "测试路 12 号附近天气",
+      "expected_contains": [],
+      "expected_excludes": ["我的家庭住址是测试路 12 号"]
+    },
+    {
+      "id": "sensitive_address_explicit_query",
+      "memories": [
+        {"content": "我的家庭住址是测试路 12 号"}
+      ],
+      "query": "我的地址是什么？",
+      "expected_contains": ["我的家庭住址是测试路 12 号"],
+      "expected_excludes": []
+    },
+    {
+      "id": "preference_paraphrase",
+      "memories": [
+        {"content": "我偏好绿色界面"},
+        {"content": "空间照片失败后优先复用原图", "memory_type": "procedure"}
+      ],
+      "query": "我喜欢什么颜色的主题？",
+      "expected_contains": ["我偏好绿色界面"],
+      "expected_excludes": ["空间照片失败后优先复用原图"]
+    },
+    {
+      "id": "semantic_commute_paraphrase",
+      "memories": [
+        {"content": "我通常骑自行车通勤"},
+        {"content": "我偏好绿色界面"}
+      ],
+      "query": "我上班一般选择什么交通方式？",
+      "expected_contains": ["我通常骑自行车通勤"],
+      "expected_excludes": ["我偏好绿色界面"]
+    },
+    {
+      "id": "semantic_failure_retry_paraphrase",
+      "memories": [
+        {"content": "图片生成报错时先复用输入图再次执行", "memory_type": "procedure"},
+        {"content": "每周五整理工作日志", "memory_type": "procedure"}
+      ],
+      "query": "渲染出错以后怎样再试？",
+      "expected_contains": ["图片生成报错时先复用输入图再次执行"],
+      "expected_excludes": ["每周五整理工作日志"]
+    },
+    {
+      "id": "irrelevant_query_abstains",
+      "memories": [
+        {"content": "我偏好绿色界面"}
+      ],
+      "query": "帮我分析项目进度",
+      "expected_contains": [],
+      "expected_excludes": ["我偏好绿色界面"]
+    },
+    {
+      "id": "never_policy_blocks_context",
+      "memories": [
+        {"content": "我的名字是隐藏用户", "retrieval_policy": "never"}
+      ],
+      "query": "我的名字叫什么？",
+      "expected_contains": [],
+      "expected_excludes": ["我的名字是隐藏用户"]
+    },
+    {
+      "id": "reinforced_claim_keeps_evidence",
+      "memories": [
+        {"content": "我偏好简洁回答"},
+        {"content": "我偏好简洁回答"},
+        {"content": "我偏好绿色界面"}
+      ],
+      "query": "我的回答风格偏好是什么？",
+      "expected_contains": ["我偏好简洁回答"],
+      "expected_excludes": [],
+      "expected_min_evidence": {"我偏好简洁回答": 2}
+    }
+  ]
+}

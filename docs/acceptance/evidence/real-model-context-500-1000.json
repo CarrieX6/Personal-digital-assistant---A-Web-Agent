@@ -1,0 +1,40 @@
+{
+  "model": "glm-4.6v",
+  "passed": false,
+  "sessions": [
+    {
+      "turn_count": 500,
+      "passed": true,
+      "summary_calls": 3,
+      "provider_id": "llm-tool-schema:glm-4.6v",
+      "schema_version": "session-summary-v3",
+      "early_fact_answered": true,
+      "decision_recalled": true,
+      "task_recalled": true,
+      "provenance_valid": true,
+      "provenance_items": 4,
+      "provenance_sources": 4,
+      "recent_message_count": 20,
+      "request_input_upper_bound": 8483,
+      "request_output_reserve": 16384,
+      "request_context_window": 98304
+    },
+    {
+      "turn_count": 1000,
+      "passed": false,
+      "summary_calls": 2,
+      "provider_id": "fallback:extractive-v2",
+      "schema_version": "session-summary-v3",
+      "early_fact_answered": false,
+      "decision_recalled": true,
+      "task_recalled": true,
+      "provenance_valid": true,
+      "provenance_items": 16,
+      "provenance_sources": 20,
+      "recent_message_count": 20,
+      "request_input_upper_bound": 24498,
+      "request_output_reserve": 16384,
+      "request_context_window": 98304
+    }
+  ]
+}

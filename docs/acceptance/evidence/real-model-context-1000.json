@@ -1,0 +1,23 @@
+{
+  "model": "glm-4.6v",
+  "passed": true,
+  "sessions": [
+    {
+      "turn_count": 1000,
+      "passed": true,
+      "summary_calls": 5,
+      "provider_id": "llm-tool-schema:glm-4.6v",
+      "schema_version": "session-summary-v3",
+      "early_fact_answered": true,
+      "decision_recalled": true,
+      "task_recalled": true,
+      "provenance_valid": true,
+      "provenance_items": 6,
+      "provenance_sources": 4,
+      "recent_message_count": 20,
+      "request_input_upper_bound": 15749,
+      "request_output_reserve": 16384,
+      "request_context_window": 98304
+    }
+  ]
+}

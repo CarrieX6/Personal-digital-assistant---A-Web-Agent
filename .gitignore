@@ -68,3 +68,4 @@ next-env.d.ts
 /outputs/
 /work/
 /backend/models/
+/.idea/

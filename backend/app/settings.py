@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,7 @@ from .agent import DemoPlanner, Planner
 from .llm import LLMError, OpenAICompatiblePlanner, build_planner_from_env
 from .models import (
     ConnectionTestResponse,
+    LLMRuntimePublic,
     LLMSettingsPublic,
     LLMSettingsUpdate,
     ProviderCatalogResponse,
@@ -231,10 +233,14 @@ class SettingsService:
         self.secret_store = secret_store
         self.http_client = http_client
 
-    def catalog(self) -> ProviderCatalogResponse:
+    def catalog(
+        self,
+        runtime: LLMRuntimePublic | None = None,
+    ) -> ProviderCatalogResponse:
         return ProviderCatalogResponse(
             providers=PROVIDERS,
             settings=self.public_settings(),
+            runtime=runtime,
         )
 
     def public_settings(self) -> LLMSettingsPublic:
@@ -311,6 +317,15 @@ class SettingsService:
         update: LLMSettingsUpdate,
         registry: ToolRegistry,
     ) -> ConnectionTestResponse:
+        result, planner = self.validate_connection(update, registry)
+        planner.close()
+        return result
+
+    def validate_connection(
+        self,
+        update: LLMSettingsUpdate,
+        registry: ToolRegistry,
+    ) -> tuple[ConnectionTestResponse, OpenAICompatiblePlanner]:
         self._validate_provider(update.provider_id)
         provided_key = (
             update.api_key.get_secret_value().strip()
@@ -327,28 +342,63 @@ class SettingsService:
         if not api_key:
             raise SettingsError("测试连接前请填写该供应商的 API Key。")
 
+        model = update.model.strip()
+        if not model:
+            raise SettingsError("测试连接前请填写模型 ID。")
+
         stored = StoredLLMSettings(
             enabled=True,
             provider_id=update.provider_id,
             base_url=self._normalize_base_url(update.base_url),
-            model=update.model.strip(),
+            model=model,
             timeout_seconds=update.timeout_seconds,
         )
         planner = self._planner(stored, api_key)
+        try:
+            result = self._validate_planner(planner, stored, registry)
+        except (LLMError, SettingsError):
+            planner.close()
+            raise
+        return result, planner
+
+    @staticmethod
+    def _validate_planner(
+        planner: OpenAICompatiblePlanner,
+        stored: StoredLLMSettings,
+        registry: ToolRegistry,
+    ) -> ConnectionTestResponse:
         started = time.perf_counter()
+        qa_plan = planner.plan(
+            "请用一句简短中文回复：模型连接正常。不要调用任何工具。",
+            [],
+        )
+        answer = (qa_plan.direct_answer or "").strip()
+        if not answer:
+            raise LLMError("连接成功，但模型没有返回普通问答文本。")
+
+        current_time_schema = [
+            schema
+            for schema in registry.openai_schemas()
+            if schema.get("function", {}).get("name") == "current_time"
+        ]
         plan = planner.plan(
             "请调用 current_time 工具获取当前时间。必须调用工具，不要直接回答。",
-            registry.openai_schemas(),
+            current_time_schema,
         )
         selected_tools = [call.name for call in plan.tool_calls]
-        if "current_time" not in selected_tools:
-            raise LLMError("连接成功，但该模型没有按要求返回 Tool Calling。")
+        tool_calling_ok = "current_time" in selected_tools
         return ConnectionTestResponse(
             ok=True,
             model=stored.model,
             selected_tools=selected_tools,
+            tool_calling_ok=tool_calling_ok,
+            answer_preview=answer[:120],
             latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
-            message="连接成功，模型已正确选择 current_time 工具。",
+            message=(
+                "普通问答与 Tool Calling 均验证成功。"
+                if tool_calling_ok
+                else "普通问答可用，但 Tool Calling 未通过验证。"
+            ),
         )
 
     def _planner(
@@ -394,3 +444,150 @@ def create_default_settings_service(settings_path: Path) -> SettingsService:
         ),
     )
     return SettingsService(SettingsRepository(settings_path), secret_store)
+
+
+class LLMRuntimeManager:
+    """Owns the active planner and makes configuration activation observable."""
+
+    def __init__(
+        self,
+        service: SettingsService,
+        registry: ToolRegistry,
+        initial_planner: Planner | None = None,
+    ) -> None:
+        self.service = service
+        self.registry = registry
+        self._lock = threading.RLock()
+        self._planner = initial_planner or service.build_planner()
+        self._retired_planners: list[Planner] = []
+        public = service.public_settings()
+        stored = service.repository.load()
+        if self._planner.is_llm:
+            self._status = "ready"
+            self._qa_available = True
+            self._tool_calling_available = True
+        elif stored is None and not public.has_api_key:
+            self._status = "unconfigured"
+            self._qa_available = False
+            self._tool_calling_available = False
+        elif public.has_api_key and not public.enabled:
+            self._status = "configured_not_enabled"
+            self._qa_available = False
+            self._tool_calling_available = False
+        else:
+            self._status = "disabled"
+            self._qa_available = False
+            self._tool_calling_available = False
+        self._last_tested_at: datetime | None = None
+        self._last_error: str | None = None
+
+    @property
+    def planner(self) -> Planner:
+        with self._lock:
+            return self._planner
+
+    def public_status(self) -> LLMRuntimePublic:
+        settings = self.service.public_settings()
+        with self._lock:
+            return LLMRuntimePublic(
+                status=self._status,
+                active=self._planner.is_llm,
+                provider_id=settings.provider_id,
+                model=self._planner.model_name or settings.model,
+                has_api_key=settings.has_api_key,
+                qa_available=self._qa_available,
+                tool_calling_available=self._tool_calling_available,
+                last_tested_at=self._last_tested_at,
+                last_error=self._last_error,
+            )
+
+    def test(self, update: LLMSettingsUpdate) -> ConnectionTestResponse:
+        with self._lock:
+            previous_status = self._status
+            self._status = "testing"
+        try:
+            result = self.service.test_connection(update, self.registry)
+        except (LLMError, SettingsError) as exc:
+            with self._lock:
+                self._status = previous_status if self._planner.is_llm else "error"
+                self._last_tested_at = datetime.now(timezone.utc)
+                self._last_error = str(exc)
+            raise
+        with self._lock:
+            self._status = previous_status
+            self._last_tested_at = datetime.now(timezone.utc)
+            self._last_error = None
+        return result
+
+    def apply(
+        self,
+        update: LLMSettingsUpdate,
+    ) -> tuple[LLMSettingsPublic, ConnectionTestResponse | None, Planner]:
+        if not update.enabled:
+            settings = self.service.save(update)
+            planner = self.service.build_planner()
+            with self._lock:
+                if self._planner is not planner:
+                    self._retired_planners.append(self._planner)
+                self._planner = planner
+                self._status = "disabled"
+                self._qa_available = False
+                self._tool_calling_available = False
+                self._last_error = None
+            return settings, None, planner
+
+        with self._lock:
+            previous_planner = self._planner
+            previous_status = self._status
+            self._status = "testing"
+        candidate: OpenAICompatiblePlanner | None = None
+        try:
+            result, candidate = self.service.validate_connection(
+                update,
+                self.registry,
+            )
+            settings = self.service.save(update)
+        except (LLMError, SettingsError) as exc:
+            if candidate is not None:
+                candidate.close()
+            with self._lock:
+                self._planner = previous_planner
+                self._status = previous_status if previous_planner.is_llm else "error"
+                self._last_tested_at = datetime.now(timezone.utc)
+                self._last_error = str(exc)
+            raise
+
+        with self._lock:
+            if self._planner is not candidate:
+                self._retired_planners.append(self._planner)
+            self._planner = candidate
+            self._status = (
+                "ready" if result.tool_calling_ok else "degraded"
+            )
+            self._qa_available = True
+            self._tool_calling_available = result.tool_calling_ok
+            self._last_tested_at = datetime.now(timezone.utc)
+            self._last_error = None
+        return settings, result, candidate
+
+    def clear_key(self) -> tuple[LLMSettingsPublic, Planner]:
+        settings = self.service.clear_key()
+        planner = self.service.build_planner()
+        with self._lock:
+            if self._planner is not planner:
+                self._retired_planners.append(self._planner)
+            self._planner = planner
+            self._status = "unconfigured"
+            self._qa_available = False
+            self._tool_calling_available = False
+            self._last_error = None
+        return settings, planner
+
+    def close(self) -> None:
+        with self._lock:
+            planners = [self._planner, *self._retired_planners]
+            self._retired_planners = []
+        for planner in planners:
+            close = getattr(planner, "close", None)
+            if callable(close):
+                close()
