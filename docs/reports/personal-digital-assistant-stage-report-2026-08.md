@@ -2,7 +2,7 @@
 
 汇报人：**Zhuofan Xie**
 
-汇报基线：`main@2c3c0d2` + `codex/release-complete-deployment`
+汇报基线：`main@bf21762`（[PR #15](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/15) 已合并）
 
 审计日期：2026-09-04
 
