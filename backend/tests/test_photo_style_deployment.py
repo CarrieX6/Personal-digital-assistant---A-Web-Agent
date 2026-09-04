@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,26 @@ def test_configure_agent_records_reproducible_service_root(
     assert values["PHOTO_STYLE_PROVIDER"] == "pic-style-http"
     assert values["PHOTO_STYLE_AUTO_START"] == "true"
     assert values["PHOTO_STYLE_SERVICE_ROOT"] == ".capabilities/pic-style"
+
+
+def test_configure_agent_can_store_generated_service_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "agent"
+    service = project / ".capabilities" / "pic-style"
+    project.mkdir()
+    monkeypatch.setattr(deployment, "PROJECT_ROOT", project)
+
+    deployment.configure_agent(
+        service,
+        18000,
+        auto_start=True,
+        api_key="generated-service-key",
+    )
+
+    values = deployment.read_env(project / ".env")
+    assert values["PHOTO_STYLE_SERVICE_API_KEY"] == "generated-service-key"
 
 
 def test_archive_source_state_is_reusable_without_git(tmp_path: Path) -> None:
@@ -119,6 +140,33 @@ def test_doctor_fails_closed_without_local_accelerator(
 
     assert payload["real_provider_automatic_deployment_supported"] is False
     assert payload["supported_real_profiles"] == ["remote-http"]
+
+
+def test_doctor_tracks_managed_windows_worker_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = tmp_path / "pic-style"
+    service.mkdir()
+    (service / deployment.PROCESS_STATE_NAME).write_text(
+        json.dumps({"worker_pid": 42, "profile": "windows-nvidia-real"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(deployment.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(deployment.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(deployment, "nvidia_summary", lambda: "RTX Test, 8192 MiB")
+    monkeypatch.setattr(
+        deployment,
+        "torch_accelerator_summary",
+        lambda: {"torch": "test", "cuda_available": True, "mps_available": False},
+    )
+    monkeypatch.setattr(deployment, "process_is_running", lambda pid: pid == 42)
+    monkeypatch.setattr(deployment, "request_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(deployment, "git_commit", lambda _root: None)
+
+    payload = deployment.doctor(service, 18000)
+
+    assert payload["managed_process_running"] is True
 
 
 def test_prepare_windows_gpu_refuses_unsupported_device(

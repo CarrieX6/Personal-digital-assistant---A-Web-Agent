@@ -1,6 +1,6 @@
 # 分层、证据化与时态化 Agent 记忆
 
-作者：**Zhuofan Xie**
+实现与文档作者：**Xianggang Ma**
 更新日期：2026-08-27
 关联任务：`MEMORY-001`、`MEMORY-002`
 

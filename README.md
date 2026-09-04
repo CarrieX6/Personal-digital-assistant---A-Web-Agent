@@ -209,9 +209,13 @@ tests/                        前端渲染测试
 
 ```bash
 chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh
+./scripts/setup.sh --accept-model-licenses
 ./scripts/start.sh
 ```
+
+默认安装档位为 `complete + real`：会安装空间主体分割与本地语义记忆，并根据平台准备
+真实 SDXL + IP-Adapter。完整前置条件、模型许可证、Windows Docker GPU Worker、数据
+备份/恢复和验收见[完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)。
 
 ### Windows 10 / 11 一键启动
 
@@ -219,7 +223,7 @@ chmod +x scripts/setup.sh scripts/start.sh
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
+.\scripts\setup.ps1 --accept-model-licenses
 .\scripts\start.ps1
 ```
 
@@ -235,8 +239,8 @@ Worker。模型许可、约 9.84 GiB 权重准备和 Docker API + Windows Host G
 步骤以该仓库 README 与 `docs/docker.md` 为准；服务健康检查未通过时，本项目不会
 静默降级为 CPU 调色。
 
-先用部署管理器查看本机能力。普通一键部署只安装固定版本的 Fake 契约服务，不下载
-模型，也不会冒充真实效果：
+统一 `setup` 默认部署真实模型。以下 `deploy-test` 只保留给显式的开发链路测试，不是
+默认安装步骤，也不会冒充真实效果：
 
 ```bash
 ./scripts/photo-style.sh doctor
@@ -276,7 +280,8 @@ uvicorn backend.app.main:app --reload --port 8000
 
 API 文档：`http://127.0.0.1:8000/docs`
 
-首次生成空间照片会下载约 100MB 的深度模型，之后可以离线推理。
+默认完整安装会预下载并哈希锁定 Depth Anything V2 Small 与 BiRefNet，运行时使用本地
+只读路径。使用轻量安装并跳过空间模型时，首次生成才会联网下载。
 
 ### 跨平台主体分割
 
@@ -459,6 +464,7 @@ Use $team-git-workflow in English to prepare this change for review
 
 - [调研与实现中心](docs/project-board.md)
 - [文档中心](docs/README.md)
+- [完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)
 - [从零到可运行个人数字助手](docs/learning/implementation-roadmap.md)
 - [调研证据与文档维护方法](docs/learning/research-quality.md)
 - [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)

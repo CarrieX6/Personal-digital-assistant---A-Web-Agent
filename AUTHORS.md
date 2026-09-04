@@ -6,6 +6,6 @@
 
 ## Capability contributors
 
-- **Ma Xianggang** — photo style transfer capability, Web/PC workflow and integration documentation
+- **Xianggang Ma** — photo style transfer capability, Web/PC workflow and integration documentation
 
 Contributors are recorded through the Git commit history and GitHub pull requests.

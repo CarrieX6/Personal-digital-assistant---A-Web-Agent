@@ -38,7 +38,7 @@ const catalog = [
     description: "用一至三张参考图迁移色彩、纹理和视觉风格。",
     status: "installed" as const,
     icon: "image" as const,
-    meta: "CPU 预览 · 可选本地 SDXL + IP-Adapter",
+    meta: "真实 SDXL + IP-Adapter · 按平台部署",
   },
   {
     id: "text-kit",

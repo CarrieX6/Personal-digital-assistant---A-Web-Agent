@@ -1,6 +1,7 @@
 # 图片风格化独立服务部署与迁移
 
-作者：**Zhuofan Xie**  
+功能实现负责人：**Xianggang Ma**
+文档维护：**项目组**
 更新日期：2026-08-31  
 对应任务：`STYLE-001`、`CAP-002`
 
@@ -22,9 +23,9 @@ macOS / Linux  ./scripts/photo-style.sh <command>
 Windows        .\scripts\photo-style.ps1 <command>
 ```
 
-它负责固定源码版本、独立虚拟环境、配置、进程、健康检查和部署状态记录。普通一键命令
-只部署 Fake 契约测试服务，不下载模型；真实权重约 9.84 GiB，必须由操作者审阅许可证并
-显式确认。真实模型现在有三条明确路径：
+它负责固定源码版本、独立虚拟环境、配置、进程、健康检查和部署状态记录。主项目统一
+`setup` 默认选择真实模型；`deploy-test` 仅作为显式 Fake 契约测试。真实权重约
+9.84 GiB，必须由操作者审阅许可证并显式确认。真实模型现在有三条明确路径：
 
 1. **Windows + NVIDIA CUDA 独立服务**：已有 RTX 4060 工程冒烟证据，仍需每台设备复验；
 2. **Apple Silicon + PyTorch MPS 本机 Provider**：代码和一键准备已支持，但当前 M4
@@ -74,6 +75,7 @@ HTTP 端口。
 | `deploy-test` | 是 | 否 | 一键安装固定源码、隔离依赖、Fake 服务并配置 Agent |
 | `install-service` | 是 | 否 | 只安装服务，不启动 |
 | `configure-agent` | 否 | 否 | 将 Agent 配置为访问本机独立服务并启用自动启动 |
+| `configure-real-windows` | 否 | 否 | 配置 Docker API、随机本机 Key 与 Windows Host GPU Worker |
 | `start` / `stop` | 否 | 否 | 管理由本部署器启动的服务进程 |
 | `plan-real` | 否 | 否 | 打印固定模型、下载量和许可证链接 |
 | `prepare-windows-gpu` | 是 | 默认否 | Windows NVIDIA 依赖和模型准备；未确认许可证时在下载前停止 |
@@ -82,7 +84,8 @@ HTTP 端口。
 
 ## macOS / Linux：链路测试部署
 
-先完成主项目安装，然后执行：
+默认完整部署直接运行 `./scripts/setup.sh --accept-model-licenses`。只有需要隔离排查
+Web/飞书/Job 契约而不下载模型时，才显式执行：
 
 ```bash
 ./scripts/photo-style.sh doctor
@@ -153,11 +156,18 @@ Diffusers；迁移 Core ML 需要重新实现 Adapter 注入、权重转换和�
 
 ## Windows：基础服务与真实 GPU 准备
 
-先安装 Python 3.11/3.12、Node.js、Git。基础链路：
+先安装 Python 3.11/3.12、Node.js、Git、Docker Desktop + WSL2 和 NVIDIA 驱动。默认
+完整部署：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
+.\scripts\setup.ps1 --accept-model-licenses
+.\scripts\start.ps1
+```
+
+只排查 Fake 契约链路时才执行：
+
+```powershell
 .\scripts\photo-style.ps1 doctor
 .\scripts\photo-style.ps1 deploy-test
 .\scripts\photo-style.ps1 status --json
@@ -178,8 +188,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\photo-style.ps1 prepare-windows-gpu --accept-model-licenses
 ```
 
-该命令只完成固定权重下载和 SHA/lock 准备，不会自动把真实 Provider 标为生产可用。随后
-仍需在 `pic-style` 目录执行：
+统一完整安装会继续执行 `configure-real-windows`，把 Agent、Docker API 和宿主机 GPU
+Worker 串成自动启动链路；但不会代替本机质量判定。随后仍需在 `pic-style` 目录执行：
 
 1. `hardware_report.py`；
 2. `benchmark_local.py --suite preflight`；
@@ -222,15 +232,15 @@ GPU 机只允许 Agent 机 IP 访问服务。跨互联网必须增加 HTTPS、�
 
 ## 迁移到新电脑
 
-不要复制 `.venv`、容器层或系统 CUDA。推荐流程：
+不要复制 `.venv`、容器层或系统 CUDA。代码与运行数据分开迁移。推荐流程：
 
 1. 在旧机运行 `status --json`，保存 source commit、profile 和 Provider 状态；
 2. 停止旧机 Agent 与风格服务，防止两个实例同时消费相同任务；
-3. 新机从 GitHub 拉取 Web Agent 的同一版本并运行主项目 `setup`；
-4. 运行 `photo-style.* doctor` 和 `deploy-test`，由管理器重建隔离环境；
-5. Windows GPU 机重新审阅许可证、下载并校验固定权重，不能复制未知来源缓存；
-6. API Key 在新机安全重新注入，不进入 Git、普通压缩包或聊天；
-7. 迁移业务数据时单独备份数据库/资产并校验哈希，不把用户数据混进源码部署包；
+3. 旧机用 `scripts/deploy.py backup --output <文件>.pdabundle` 导出口令加密运行数据；
+4. 新机从 GitHub 拉取 Web Agent 的同一版本并运行默认完整 `setup`；
+5. 用 `scripts/deploy.py restore <文件>.pdabundle` 恢复会话、记忆、资产与可迁移 Secret；
+6. Windows GPU 机重新审阅许可证、下载并校验固定权重，不能复制未知来源缓存；
+7. API Key 只进入系统钥匙串或加密迁移包，不进入 Git、普通压缩包或聊天；
 8. 依次验收 upstream smoke、Web、飞书图片输入、结果回传和失败重试；
 9. 新机稳定后再停用旧机，保留短期只读回滚备份。
 
@@ -275,7 +285,8 @@ pnpm test
 - 当前管理器没有自动卸载，避免误删模型和用户任务；卸载前必须先分类服务代码、模型、
   数据和备份，再设计可恢复操作；
 - macOS MPS 工程路径已实现但尚未在本机下载权重或跑真实图；MPS 质量门禁仍为 pending；
-- Windows GPU 自动化尚未替代上游 benchmark 和人工质量确认；
+- Windows GPU 已封装 Docker API + Host Worker 自动配置/启动，但尚未替代上游 benchmark、
+  目标实机重启验证和人工质量确认；
 - `frogi-m/pic-style` 独立服务的真实 Worker 仍为 CUDA 专用；当前 MPS 是主仓库内
   `sdxl-local` 工程路径。待 MPS 实测稳定后，应把同一加速器抽象下沉到独立服务；
 - 生产环境仍需服务版本升级/回滚、签名制品、SBOM、漏洞扫描、队列监控和备份恢复演练；
