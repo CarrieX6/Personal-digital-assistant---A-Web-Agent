@@ -193,10 +193,10 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SEC-001` | P0 | 外部消息控制本地电脑的威胁模型与权限层 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已有 Open ID 白名单、飞书身份绑定状态硬检查、Tool 风险等级、调用前 Schema、Interrupt 审批、owner 隔离和非幂等重放保护；Root 绑定 API 目前仅限本机来源。待正式威胁模型、用户门户与 Root 认证、资产 workspace 授权、审批过期和攻击测试 |
 | `AUTH-001` | P0 | Web API、配置和资产如何认证并执行 owner 授权 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已实现飞书外部身份、独立工作区、本机设备绑定、状态硬拦截与本机 Root 管理 UI/API；当前 Web 仍是全局 Root 视图。待飞书 OAuth 用户门户、Session、资源级授权、限流和跨电脑 Control Plane |
 | `SEC-002` | P1 | Prompt Injection、恶意附件和能力安装如何防护 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 攻击样本、隔离策略、审计与应急流程 |
-| `PERF-001` | P1 | 如何统一测量延迟、吞吐、内存、显存、功耗和温度 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已完成[空间照片与飞书链路首轮基线](experiments/perf-001-spatial-feishu-baseline-2026-09-03.md)：20 次生成平均 5.030 s、P95 7.584 s、成功 20/20，23 条飞书入站至首条出站记录 P95 1191.1 ms；待标准 `.venv`、Windows NVIDIA、CPU-only、功耗、温度、并发和大样本复测 |
+| `PERF-001` | P1 | 如何统一测量延迟、吞吐、内存、显存、功耗和温度 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #15](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/15) 提交[空间照片与飞书链路首轮基线](experiments/perf-001-spatial-feishu-baseline-2026-09-03.md)：20 次生成平均 5.030 s、P95 7.584 s、成功 20/20，23 条飞书入站至首条出站记录 P95 1191.1 ms；待标准 `.venv`、Windows NVIDIA、CPU-only、功耗、温度、并发和大样本复测 |
 | `PERF-002` | P1 | 量化、缓存、按需加载和自适应降级如何落地 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 对照实验、质量损失和设备分级 |
 | `QA-001` | P1 | 本地模型、外部平台和异步任务如何稳定测试 | `⬜ 未开始` | `🧱 局部实现` | 待领取 | Fake、录制回放、集成测试和失败注入方案 |
-| `OPS-001` | P1 | 本地 Agent 如何开机启动、守护、升级和告警 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 在 PR #6 跨平台入口基础上，当前发布分支增加统一 `deploy.py`、完整/轻量安装档位、真实模型许可门禁、空间模型固定快照准备、图片风格化 Provider 编排、doctor、备份恢复和完整迁移文档；30 项部署专项测试及前端 Build/SSR 通过。待 PR 合入、Windows/MPS 真实模型实机验收、守护、日志轮转和升级回滚 |
+| `OPS-001` | P1 | 本地 Agent 如何开机启动、守护、升级和告警 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #15](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/15) 在 PR #6 跨平台入口基础上增加统一 `deploy.py`、完整/轻量安装档位、真实模型许可门禁、空间模型固定快照准备、图片风格化 Provider 编排、doctor、备份恢复和完整迁移文档；30 项部署专项测试及前端 Build/SSR 通过。待合入、Windows/MPS 真实模型实机验收、守护、日志轮转和升级回滚 |
 
 ## 12. 知识体系与学习
 
@@ -210,7 +210,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `LEARN-OPS-001` | P1 | 补充可靠性、安全、运维和产品化正文 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已覆盖可靠性、权限、可观测性、Capability、供应链、数据、性能、测试、运维和 UX；基线待测 |
 | `LEARN-ROADMAP-001` | P0 | 建立从零学习到项目实现的连续阶段和验收门槛 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已映射当前代码、阶段 0–9、交付物和任务 ID；阶段实现待推进 |
 | `LEARN-RESEARCH-001` | P0 | 审查资料完整性、证据质量与时效更新机制 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已完成本轮覆盖审查，修正 MCP/Android 时效信息，登记微信/HarmonyOS/框架横评缺口 |
-| `REPORT-001` | P0 | 如何用可验证结果、用户故事和清晰归属完成阶段汇报 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已形成[阶段汇报初稿](reports/personal-digital-assistant-stage-report-2026-08.md)，完成 10 页主线、贡献边界、自动化门禁，并补入空间照片和飞书首轮性能基线；待真实手机 Viewer、Windows GPU、断网恢复、功耗数据和团队归属措辞确认 |
+| `REPORT-001` | P0 | 如何用可验证结果、用户故事和清晰归属完成阶段汇报 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #15](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/15) 提交[阶段汇报初稿](reports/personal-digital-assistant-stage-report-2026-08.md)，完成 10 页主线、贡献边界、自动化门禁，并补入空间照片和飞书首轮性能基线；待真实手机 Viewer、Windows GPU、断网恢复、功耗数据和团队归属措辞确认 |
 
 ## 13. 每次更新必须填写
 
