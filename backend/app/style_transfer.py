@@ -752,7 +752,7 @@ class PhotoStyleService:
             manifest = {
                 "schema": "personal-agent.photo-style-transfer",
                 "version": 1,
-                "author": "Ma Xianggang",
+                "author": "Xianggang Ma",
                 "content": metadata["source_file"],
                 "styles": metadata["style_files"],
                 "result": result_path.name,
@@ -910,7 +910,7 @@ def register_style_tools(
                 id="photo-style-transfer",
                 name="图片风格化",
                 version="1.2.0",
-                author="Ma Xianggang",
+                author="Xianggang Ma",
                 description="将一至三张参考图的视觉风格迁移到内容图，并可调节结构与细节保持程度。",
                 entrypoint="create_photo_style_transfer",
                 input_schema=input_schema,

@@ -2,6 +2,10 @@
 
 作者：**Zhuofan Xie**
 
+> 新电脑从 GitHub 开始的完整安装、真实模型、数据备份/恢复和逐项验收，请优先使用
+> [个人数字助手完整本地部署与迁移手册](complete-local-deployment.md)。本文保留网络拓扑
+> 与 Viewer 专题说明。
+
 如果是在新电脑安装某个媒体能力，而不只是启动基础服务，请同时按
 [飞书图片与 2.5D 能力接入 SOP](feishu-media-capability-sop.md#5-新电脑安装与配置)
 完成拓扑选择、模型/Provider 配置、数据迁移和安装后验收。
@@ -18,7 +22,7 @@
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
+.\scripts\setup.ps1 --accept-model-licenses
 .\scripts\start.ps1
 ```
 
@@ -50,7 +54,7 @@ Docker API/Redis/PostgreSQL/MinIO，加宿主机单并发 NVIDIA Worker 的混�
 
 ```bash
 chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh
+./scripts/setup.sh --accept-model-licenses
 ./scripts/start.sh
 ```
 

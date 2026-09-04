@@ -1,7 +1,7 @@
 # 调研与实现中心
 
 作者：**Zhuofan Xie**
-更新日期：2026-08-24
+更新日期：2026-09-04
 
 本文件是项目技术调研与实现进度的统一入口。它回答四个问题：
 
@@ -21,6 +21,15 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 4. 需要实测时，从[实验模板](experiments/experiment-template.md)创建实验记录。
 5. 需要确定项目级方案时，从 [ADR 模板](decisions/ADR-template.md)创建决策记录。
 6. 进入实现后关联分支、PR、测试与文档，完成后同时更新两个状态。
+
+### 贡献归属规则
+
+- “负责人”记录该任务的主要设计与实现者，不以最终合并人、提交代操作人或文档整理人
+  替代真实实现者；
+- 合并、冲突处理、回归验证和部署文档整理应作为协作工作单独描述，不自动获得功能
+  实现归属；
+- 图片风格化与分层长短期记忆的主要实现人为 **Xianggang Ma**。阶段汇报中，这两项
+  作为团队已有能力说明，不归入 Zhuofan Xie 的个人工作成果。
 
 ### Git Skill 自动同步
 
@@ -65,6 +74,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 - [ ] `LEARN-001`：建立个人数字助手分层知识库与学习导航。
 - [ ] `AGENT-001`：确定 Agent Orchestrator 架构和工具执行循环。
+- [ ] `REPORT-001`：完成个人数字助手阶段审计、贡献归属和公司汇报材料。
 - [ ] `CHANNEL-001`：完成飞书长连接文本消息闭环 PoC。
 - [ ] `SEC-001`：建立外部聊天控制的身份、权限与威胁模型。
 - [ ] `MEMORY-001`：确定记忆分层、写入策略和 SQLite 首版 Schema。
@@ -134,11 +144,11 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `✅ 已决策` | `✅ 已完成` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 整合类型、范围、时效、否定与取代、证据链、字段加密、project 贯通、显式跨渠道身份映射、结构化滚动摘要和记忆管理 API/UI；[2026-08-28 硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 9/9 通过，2026-08-31 仓库级回归 186 passed |
+| `MEMORY-001` | P0 | 会话、偏好、任务和资产记忆如何分层 | `✅ 已决策` | `✅ 已完成` | Xianggang Ma | Xianggang Ma 实现类型、范围、时效、否定与取代、证据链、字段加密、project 贯通、显式跨渠道身份映射、结构化滚动摘要和记忆管理 API/UI；经 [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 合入，[2026-08-28 硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 9/9 通过，2026-08-31 仓库级回归 186 passed |
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
-| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `✅ 已决策` | `✅ 已完成` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 整合结构化/词法/本地向量混合召回、证据加权、真实模型结构化滚动摘要、完整请求 Token 硬门禁和 old/new shadow 自动切换；[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 覆盖 500/1000/2000 轮与 128-owner 隔离 |
+| `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `✅ 已决策` | `✅ 已完成` | Xianggang Ma | Xianggang Ma 实现结构化/词法/本地向量混合召回、证据加权、真实模型结构化滚动摘要、完整请求 Token 硬门禁和 old/new shadow 自动切换；经 [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 合入，[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 覆盖 500/1000/2000 轮与 128-owner 隔离 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)；待将空间照片等旧工具补齐 Manifest、角色权限和通用安装器 |
-| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已增加图片风格化跨平台管理器、固定源码/API 归档回退、隔离环境、Fake 链路部署、自动启动、Windows NVIDIA 许可门禁、macOS MPS 工程准备、安全远程 Provider 配置与[迁移文档](guides/photo-style-deployment.md)；待 MPS/第二台 Windows 实机验收、可恢复卸载、签名制品、SBOM 与通用 Capability Installer |
+| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟠 初步结论` | `🧱 局部实现` | Xianggang Ma | 围绕 Xianggang Ma 实现的图片风格化能力，已增加跨平台管理器、固定源码/API 归档回退、隔离环境、Fake 链路部署、自动启动、Windows NVIDIA 许可门禁、macOS MPS 工程准备、安全远程 Provider 配置与[迁移文档](guides/photo-style-deployment.md)；待 MPS/第二台 Windows 实机验收、可恢复卸载、签名制品、SBOM 与通用 Capability Installer |
 | `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 2026-08-26 新增外部身份、个人工作区、设备节点和审计表，沿用既有 owner key 保持数据兼容；见[身份、工作区与节点绑定](architecture/identity-workspace-device-binding.md)。待正式迁移工具、生命周期、备份恢复和多设备路由 |
 
 ## 7. LLM 与模型路由
@@ -158,7 +168,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已记录蒙版面积、连通性、质量分和降级告警，并按质量降低推荐视差；待失败样本集和人工标注评测 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Ma Xianggang / Zhuofan Xie | 既有 PR 已覆盖独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键；本轮新增 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。待 M4 真实权重/质量/功耗验收、Windows GPU 服务和真实手机联调 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Xianggang Ma | Xianggang Ma 实现图片风格化主链路，包括独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键，并扩展 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。待 M4 真实权重/质量/功耗验收、Windows GPU 服务和真实手机联调 |
 
 ## 9. 虚拟试衣与数字人
 
@@ -183,10 +193,10 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SEC-001` | P0 | 外部消息控制本地电脑的威胁模型与权限层 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已有 Open ID 白名单、飞书身份绑定状态硬检查、Tool 风险等级、调用前 Schema、Interrupt 审批、owner 隔离和非幂等重放保护；Root 绑定 API 目前仅限本机来源。待正式威胁模型、用户门户与 Root 认证、资产 workspace 授权、审批过期和攻击测试 |
 | `AUTH-001` | P0 | Web API、配置和资产如何认证并执行 owner 授权 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已实现飞书外部身份、独立工作区、本机设备绑定、状态硬拦截与本机 Root 管理 UI/API；当前 Web 仍是全局 Root 视图。待飞书 OAuth 用户门户、Session、资源级授权、限流和跨电脑 Control Plane |
 | `SEC-002` | P1 | Prompt Injection、恶意附件和能力安装如何防护 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 攻击样本、隔离策略、审计与应急流程 |
-| `PERF-001` | P1 | 如何统一测量延迟、吞吐、内存、显存、功耗和温度 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准设备、采样方法、报告模板和基线数据 |
+| `PERF-001` | P1 | 如何统一测量延迟、吞吐、内存、显存、功耗和温度 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已完成[空间照片与飞书链路首轮基线](experiments/perf-001-spatial-feishu-baseline-2026-09-03.md)：20 次生成平均 5.030 s、P95 7.584 s、成功 20/20，23 条飞书入站至首条出站记录 P95 1191.1 ms；待标准 `.venv`、Windows NVIDIA、CPU-only、功耗、温度、并发和大样本复测 |
 | `PERF-002` | P1 | 量化、缓存、按需加载和自适应降级如何落地 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 对照实验、质量损失和设备分级 |
 | `QA-001` | P1 | 本地模型、外部平台和异步任务如何稳定测试 | `⬜ 未开始` | `🧱 局部实现` | 待领取 | Fake、录制回放、集成测试和失败注入方案 |
-| `OPS-001` | P1 | 本地 Agent 如何开机启动、守护、升级和告警 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并 macOS/Linux 与 Windows PowerShell 安装/启动脚本，前端命令移除 POSIX 环境变量语法；待 Windows 实机、GPU 驱动、守护、日志轮转、升级回滚与 CPU-only Docker Compose |
+| `OPS-001` | P1 | 本地 Agent 如何开机启动、守护、升级和告警 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 在 PR #6 跨平台入口基础上，当前发布分支增加统一 `deploy.py`、完整/轻量安装档位、真实模型许可门禁、空间模型固定快照准备、图片风格化 Provider 编排、doctor、备份恢复和完整迁移文档；30 项部署专项测试及前端 Build/SSR 通过。待 PR 合入、Windows/MPS 真实模型实机验收、守护、日志轮转和升级回滚 |
 
 ## 12. 知识体系与学习
 
@@ -200,6 +210,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `LEARN-OPS-001` | P1 | 补充可靠性、安全、运维和产品化正文 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已覆盖可靠性、权限、可观测性、Capability、供应链、数据、性能、测试、运维和 UX；基线待测 |
 | `LEARN-ROADMAP-001` | P0 | 建立从零学习到项目实现的连续阶段和验收门槛 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已映射当前代码、阶段 0–9、交付物和任务 ID；阶段实现待推进 |
 | `LEARN-RESEARCH-001` | P0 | 审查资料完整性、证据质量与时效更新机制 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已完成本轮覆盖审查，修正 MCP/Android 时效信息，登记微信/HarmonyOS/框架横评缺口 |
+| `REPORT-001` | P0 | 如何用可验证结果、用户故事和清晰归属完成阶段汇报 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已形成[阶段汇报初稿](reports/personal-digital-assistant-stage-report-2026-08.md)，完成 10 页主线、贡献边界、自动化门禁，并补入空间照片和飞书首轮性能基线；待真实手机 Viewer、Windows GPU、断网恢复、功耗数据和团队归属措辞确认 |
 
 ## 13. 每次更新必须填写
 

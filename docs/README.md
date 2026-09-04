@@ -19,6 +19,12 @@
 - [实验记录](experiments/README.md)：模型、Agent、平台和性能实验索引。
 - [技术决策记录](decisions/README.md)：已经生效或被替代的 ADR 索引。
 
+### 阶段汇报与审计
+
+- [个人数字助手项目阶段汇报（2026-08）](reports/personal-digital-assistant-stage-report-2026-08.md)：
+  面向公司和团队评审的 10 页结果型汇报、故事主线、贡献边界、数据证据与下一阶段。
+- [阶段汇报索引](reports/README.md)：汇报文档的归属和证据要求。
+
 ### 架构设计
 
 - [系统架构](architecture/system-architecture.md)：最终目标、模块边界、消息链路、
@@ -32,6 +38,8 @@
 
 ### 配置指南
 
+- [个人数字助手完整本地部署与迁移手册](guides/complete-local-deployment.md)：从 GitHub
+  克隆到一键安装、真实模型、Web/Agent/功能库/飞书配置、加密数据迁移和完整验收。
 - [飞书机器人配置与使用指南](guides/feishu-setup.md)：企业自建应用、权限、长连接、
   Open ID、私聊、群聊、图片、卡片回调、Root 可见性与故障排查。
 - [macOS / Windows 本地部署](guides/deployment.md)：原生一键安装、启动、GPU 边界与

@@ -1,6 +1,6 @@
 # 图片风格化 Skill 集成说明
 
-作者：**Ma Xianggang**
+实现与文档作者：**Xianggang Ma**
 更新日期：2026-08-20
 任务：`STYLE-001`
 
@@ -44,7 +44,7 @@ Agent 控制台为内容图和风格参考图提供独立上传入口：内容�
 
 - ID：`photo-style-transfer`；
 - 入口：`create_photo_style_transfer`；
-- 作者：Ma Xianggang；
+- 作者：Xianggang Ma；
 - 输入 Schema：内容图 ID、1–3 个风格图 ID、模式、质量、强度、提示词和种子；
 - 本地模型、存储、权限与下载要求。
 

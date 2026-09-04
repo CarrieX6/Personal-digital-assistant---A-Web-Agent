@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import platform
+import secrets
 import shutil
 import signal
 import subprocess
@@ -364,19 +365,25 @@ def configure_test_service(service_root: Path, port: int, commit: str) -> None:
     )
 
 
-def configure_agent(service_root: Path, port: int, *, auto_start: bool) -> None:
+def configure_agent(
+    service_root: Path,
+    port: int,
+    *,
+    auto_start: bool,
+    api_key: str | None = None,
+) -> None:
     relative_root = os.path.relpath(service_root, PROJECT_ROOT)
-    update_env(
-        PROJECT_ROOT / ".env",
-        {
+    updates = {
             "PHOTO_STYLE_PROVIDER": "pic-style-http",
             "PHOTO_STYLE_SERVICE_URL": f"http://127.0.0.1:{port}",
             "PHOTO_STYLE_TENANT_ID": "personal-agent",
             "PHOTO_STYLE_TIMEOUT_SECONDS": "900",
             "PHOTO_STYLE_AUTO_START": "true" if auto_start else "false",
             "PHOTO_STYLE_SERVICE_ROOT": relative_root,
-        },
-    )
+        }
+    if api_key:
+        updates["PHOTO_STYLE_SERVICE_API_KEY"] = api_key
+    update_env(PROJECT_ROOT / ".env", updates)
 
 
 def write_deployment_state(
@@ -437,6 +444,10 @@ def process_is_running(pid: int | None) -> bool:
 
 
 def start_service(service_root: Path, port: int, wait_seconds: int = 60) -> None:
+    deployment = read_deployment_state(service_root)
+    if deployment.get("profile") == "windows-nvidia-real":
+        start_windows_real_service(service_root, port, wait_seconds=max(180, wait_seconds))
+        return
     ready_url = f"http://127.0.0.1:{port}/health/ready"
     if request_json(ready_url):
         print(f"图片风格化服务已在运行：{ready_url}")
@@ -498,7 +509,23 @@ def start_service(service_root: Path, port: int, wait_seconds: int = 60) -> None
 
 def stop_service(service_root: Path) -> None:
     state = read_process_state(service_root)
-    pid_value = state.get("pid")
+    if state.get("profile") == "windows-nvidia-real":
+        worker_value = state.get("worker_pid")
+        worker_pid = (
+            int(worker_value)
+            if isinstance(worker_value, int | str) and str(worker_value).isdigit()
+            else 0
+        )
+        if process_is_running(worker_pid):
+            try:
+                os.kill(worker_pid, signal.SIGTERM)
+            except OSError as exc:
+                raise DeploymentError(f"无法停止 GPU Worker {worker_pid}。") from exc
+        run(["docker", "compose", "stop"], cwd=service_root)
+        process_state_path(service_root).unlink(missing_ok=True)
+        print("已停止 Windows NVIDIA 图片风格化 Worker 和容器服务。")
+        return
+    pid_value = state.get("worker_pid", state.get("pid"))
     pid = int(pid_value) if isinstance(pid_value, int | str) and str(pid_value).isdigit() else 0
     if not process_is_running(pid):
         process_state_path(service_root).unlink(missing_ok=True)
@@ -513,6 +540,192 @@ def stop_service(service_root: Path) -> None:
         time.sleep(0.2)
     process_state_path(service_root).unlink(missing_ok=True)
     print(f"已停止图片风格化服务进程：{pid}")
+
+
+def read_deployment_state(service_root: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            (service_root / DEPLOYMENT_STATE_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def configure_real_windows(service_root: Path, port: int, source_ref: str) -> None:
+    info = doctor(service_root, port)
+    if "windows-nvidia-service" not in info["supported_real_profiles"]:
+        raise DeploymentError("真实独立服务配置仅支持 Windows + NVIDIA。")
+    if not command_available("docker"):
+        raise DeploymentError("未找到 Docker Desktop；请先启用 WSL2 后端。")
+    commit = git_commit(service_root)
+    if not commit:
+        raise DeploymentError("无法确认 pic-style 固定源码版本。")
+    env_path = service_root / ".env"
+    example = service_root / ".env.example"
+    if not env_path.exists() and example.is_file():
+        shutil.copyfile(example, env_path)
+    existing = read_env(env_path)
+    api_key = existing.get("PHOTO_STYLE_API_KEY") or secrets.token_urlsafe(32)
+    update_env(
+        env_path,
+        {
+            "PHOTO_STYLE_ENVIRONMENT": "local",
+            "PHOTO_STYLE_PROVIDER": "sdxl_ip_adapter_8gb_v1",
+            "PHOTO_STYLE_API_KEY": api_key,
+            "PHOTO_STYLE_API_PORT": str(port),
+            "PHOTO_STYLE_QUEUE_BACKEND": "celery",
+            "PHOTO_STYLE_ALLOW_MODEL_DOWNLOADS": "false",
+            "PHOTO_STYLE_LCM_PREVIEW_ENABLED": "false",
+            "PHOTO_STYLE_BUILD_VERSION": commit,
+        },
+    )
+    configure_agent(
+        service_root,
+        port,
+        auto_start=True,
+        api_key=api_key,
+    )
+    write_deployment_state(
+        service_root,
+        source_ref=source_ref,
+        commit=commit,
+        port=port,
+        profile="windows-nvidia-real",
+    )
+    print("Windows NVIDIA 真实独立服务已配置。下次启动 Agent 时会一并拉起。")
+
+
+def start_windows_real_service(
+    service_root: Path,
+    port: int,
+    wait_seconds: int = 180,
+) -> None:
+    if os.name != "nt":
+        raise DeploymentError("windows-nvidia-real 只能在原 Windows 主机启动。")
+    ready_url = f"http://127.0.0.1:{port}/health/ready"
+    provider_url = f"http://127.0.0.1:{port}/health/provider"
+    provider = request_json(provider_url)
+    state = read_process_state(service_root)
+    worker_value = state.get("worker_pid")
+    worker_pid = (
+        int(worker_value)
+        if isinstance(worker_value, int | str) and str(worker_value).isdigit()
+        else 0
+    )
+    if (
+        request_json(ready_url)
+        and provider
+        and provider.get("provider") == "sdxl_ip_adapter_8gb_v1"
+        and process_is_running(worker_pid)
+    ):
+        print(f"真实图片风格化服务已在运行：{ready_url}")
+        return
+    python = service_python(service_root)
+    if not python.is_file():
+        raise DeploymentError("独立服务环境缺失，请重新运行完整部署。")
+    compose_env = os.environ.copy()
+    compose_env["PHOTO_STYLE_PROVIDER"] = "sdxl_ip_adapter_8gb_v1"
+    run(
+        [
+            "docker",
+            "compose",
+            "up",
+            "--build",
+            "--detach",
+            "postgres",
+            "redis",
+            "minio",
+            "minio-init",
+            "migrate",
+            "api",
+        ],
+        cwd=service_root,
+        capture=False,
+    )
+    service_env = read_env(service_root / ".env")
+    worker_env = os.environ.copy()
+    worker_env.update(
+        {
+            "PHOTO_STYLE_ENVIRONMENT": "local",
+            "PHOTO_STYLE_DATABASE_URL": (
+                "postgresql+psycopg://photo_style:local-development-only@"
+                "127.0.0.1:5432/photo_style"
+            ),
+            "PHOTO_STYLE_ASSET_BACKEND": "s3",
+            "PHOTO_STYLE_S3_ENDPOINT_URL": "http://127.0.0.1:9000",
+            "PHOTO_STYLE_S3_PUBLIC_ENDPOINT_URL": "http://127.0.0.1:9000",
+            "PHOTO_STYLE_S3_BUCKET": "photo-style",
+            "PHOTO_STYLE_S3_REGION": "us-east-1",
+            "PHOTO_STYLE_S3_ACCESS_KEY_ID": "minio-local",
+            "PHOTO_STYLE_S3_SECRET_ACCESS_KEY": "minio-local-password",
+            "PHOTO_STYLE_QUEUE_BACKEND": "celery",
+            "PHOTO_STYLE_REDIS_URL": "redis://127.0.0.1:6379/0",
+            "PHOTO_STYLE_PROVIDER": "sdxl_ip_adapter_8gb_v1",
+            "PHOTO_STYLE_ALLOW_MODEL_DOWNLOADS": "false",
+            "PHOTO_STYLE_LCM_PREVIEW_ENABLED": "false",
+            "PHOTO_STYLE_API_KEY": service_env.get("PHOTO_STYLE_API_KEY", ""),
+        }
+    )
+    logs = service_root / LOG_DIRECTORY_NAME
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / "gpu-worker.log"
+    log_handle = log_path.open("ab")
+    worker = subprocess.Popen(
+        [
+            str(python),
+            "-m",
+            "celery",
+            "-A",
+            "photo_style_skill.worker.celery_app:celery_app",
+            "worker",
+            "--pool=solo",
+            "--concurrency=1",
+            "--loglevel=INFO",
+            "--queues=photo-style",
+        ],
+        cwd=service_root,
+        env=worker_env,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        ),
+    )
+    log_handle.close()
+    process_state_path(service_root).write_text(
+        json.dumps(
+            {
+                "worker_pid": worker.pid,
+                "profile": "windows-nvidia-real",
+                "started_at": utc_now(),
+                "port": port,
+                "log_path": str(log_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    deadline = time.monotonic() + max(30, wait_seconds)
+    while time.monotonic() < deadline:
+        provider = request_json(provider_url)
+        if (
+            request_json(ready_url)
+            and provider
+            and provider.get("provider") == "sdxl_ip_adapter_8gb_v1"
+            and process_is_running(worker.pid)
+        ):
+            print(f"真实图片风格化服务已启动：{ready_url}")
+            return
+        if worker.poll() is not None:
+            break
+        time.sleep(1)
+    if process_is_running(worker.pid):
+        os.kill(worker.pid, signal.SIGTERM)
+    raise DeploymentError(f"真实 GPU Worker 未能就绪，请查看：{log_path}")
 
 
 def memory_bytes() -> int | None:
@@ -637,7 +850,7 @@ def doctor(service_root: Path, port: int) -> dict[str, Any]:
     else:
         reason = "no supported local CUDA or Apple MPS accelerator detected"
     state = read_process_state(service_root)
-    pid_value = state.get("pid")
+    pid_value = state.get("worker_pid", state.get("pid"))
     pid = int(pid_value) if isinstance(pid_value, int | str) and str(pid_value).isdigit() else None
     return {
         "platform": system,
@@ -853,6 +1066,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("deploy-test", help="一键部署安全的 Fake 契约测试服务")
     subparsers.add_parser("install-service", help="安装固定版本服务和隔离依赖")
     subparsers.add_parser("configure-agent", help="写入 Web Agent 的 HTTP Provider 配置")
+    subparsers.add_parser(
+        "configure-real-windows",
+        help="配置 Windows NVIDIA 的 Docker API 与宿主机真实 GPU Worker",
+    )
     subparsers.add_parser("start", help="启动已安装的独立服务")
     subparsers.add_parser("stop", help="停止由本管理器启动的服务")
     subparsers.add_parser("plan-real", help="展示真实模型、下载量和许可证，不下载")
@@ -904,6 +1121,8 @@ def main() -> None:
         elif args.command == "configure-agent":
             configure_agent(service_root, args.port, auto_start=True)
             print("Web Agent 配置已更新；后端进程需重启后加载新环境变量。")
+        elif args.command == "configure-real-windows":
+            configure_real_windows(service_root, args.port, args.source_ref)
         elif args.command == "start":
             start_service(service_root, args.port)
         elif args.command == "stop":

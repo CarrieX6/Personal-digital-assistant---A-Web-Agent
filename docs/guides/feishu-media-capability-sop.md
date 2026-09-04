@@ -5,6 +5,10 @@
 更新日期：2026-08-24
 适用范围：空间照片、图片风格化，以及未来虚拟试衣、虚拟宠物、3D 模型等媒体能力
 
+> 新电脑安装、真实模型和加密数据迁移的统一入口已迁移到
+> [个人数字助手完整本地部署与迁移手册](complete-local-deployment.md)。本节保留飞书媒体
+> Capability 的渠道专项要求。
+
 ## 1. 结论先行
 
 飞书用户不应只收到一句“生成完成”，也不能把 2.5D 资产误当成普通图片发送。不同
@@ -464,7 +468,7 @@ macOS / Linux：
 
 ```bash
 chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh
+./scripts/setup.sh --accept-model-licenses
 ./scripts/start.sh
 ```
 
@@ -472,7 +476,7 @@ Windows PowerShell：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
+.\scripts\setup.ps1 --accept-model-licenses
 .\scripts\start.ps1
 ```
 
@@ -558,8 +562,8 @@ macOS / Linux  ./scripts/photo-style.sh doctor
 Windows        .\scripts\photo-style.ps1 doctor
 ```
 
-`deploy-test` 可一键部署 Fake 契约服务，用于先验收 Web/飞书上传、Job、回传和重试；
-它不是 SDXL。真实 Windows NVIDIA 准备、许可证确认、自动启动、迁移和回滚见
+统一 `setup` 默认安装真实图片风格化。`deploy-test` 仅用于显式隔离验收 Web/飞书上传、
+Job、回传和重试；它不是 SDXL。真实 Windows NVIDIA 准备、许可证确认、自动启动、迁移和回滚见
 [图片风格化独立服务部署与迁移](photo-style-deployment.md)。Apple Silicon 使用
 `prepare-macos-mps`；远程服务使用 `configure-remote --url https://...`，API Key 另行
 安全注入。以下手工步骤保留用于理解和
@@ -661,23 +665,18 @@ App Secret、Open ID 白名单和启用状态必须重新配置。迁移流程�
 
 ### 5.8 新装与数据迁移必须分开
 
-全新安装默认创建空的会话、记忆和资产库，这是最安全、最容易验收的路径。若确实需要把
-旧电脑作为整体迁移：
+全新安装默认创建空的会话、记忆和资产库。整体迁移时，停止两台电脑的服务后使用统一
+部署器：
 
-1. 停止旧、新两台电脑的 Agent，避免复制正在写入的 SQLite/WAL；
-2. 对旧电脑 `backend/data/` 做加密、带哈希的管理员备份，并把它视为包含聊天、图片、
-   记忆和密钥材料的敏感数据；
-3. 在受控介质中迁移所需数据库与资产目录，不得提交 Git；若需要让旧 Viewer 链接继续
-   有效才迁移 `viewer-secret.key`，否则在新机重新生成并让旧链接自然失效；
-4. 模型权重优先按锁文件重新下载和校验，不把它们混入用户数据备份；
-5. 默认不要迁移 `.secret_master_key`、`*.enc` 或操作系统钥匙串内容；LLM Key 和飞书
-   App Secret 在新电脑 UI 中重新录入；
-6. 启动后验证 owner 隔离、历史资产、记忆、任务状态和 Viewer 签名；
-7. 验收前保留只读旧备份，不要立即删除源数据。
+```bash
+.venv/bin/python scripts/deploy.py backup --output personal-assistant.pdabundle
+.venv/bin/python scripts/deploy.py restore personal-assistant.pdabundle
+```
 
-当前尚无自动化导出/导入与数据库迁移工具，因此上述流程属于管理员手工迁移，不是普通
-用户功能。产品化前应增加版本化 Backup Manifest、SQLite 一致性检查、加密导出、恢复
-演练和跨平台路径重写。
+迁移包包含版本化 Manifest、逐文件 SHA-256、会话/记忆/资产和可读取的系统钥匙串 Secret，
+并使用 scrypt + AES-256-GCM 加密。模型与 `.capabilities` 默认不打包，需要离线迁移时
+显式追加 `--include-models --include-capabilities`。恢复遇到同名数据默认拒绝覆盖；只有
+管理员确认可替换时使用 `--force`。完整步骤和风险见统一部署手册。
 
 ### 5.9 端口、网络和安装后验收
 
@@ -709,9 +708,10 @@ App Secret、Open ID 白名单和启用状态必须重新配置。迁移流程�
 使用新版本数据库。模型服务不可用时，应把能力标记为“未安装/维护中”，保留已完成资产，
 不要自动改用低质量 Provider。
 
-当前项目还缺少正式 Release tag、配置 Schema 迁移、单能力禁用开关和一键数据迁移工具。
-在这些能力完成前，更新与回滚必须由管理员执行并保留审计记录。删除模型或用户资产属于
-破坏性操作，不纳入自动卸载脚本。
+当前项目还缺少正式 Release tag、配置 Schema 自动迁移和单能力禁用开关。已有加密
+运行数据迁移工具，但恢复演练、跨版本 Schema 兼容和大体积模型包仍需在目标设备验证。
+更新与回滚必须由管理员执行并保留审计记录。删除模型或用户资产属于破坏性操作，不纳入
+自动卸载脚本。
 
 ## 6. 建议的代码拆分
 
