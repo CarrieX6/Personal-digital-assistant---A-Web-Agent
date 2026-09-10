@@ -1315,7 +1315,7 @@ class FeishuChannelRuntime:
         )
         if self._requests_flux_gs_help(text):
             self.store.mark_completed(message_id, "flux-gs-help")
-            await self._send_flux_gs_help(chat_id, message_id)
+            await self._send_flux_gs_guidance(chat_id, message_id)
             return
         if self._requests_spatial_photo(text):
             discarded = await self._discard_photo_style_collection(
@@ -1642,7 +1642,7 @@ class FeishuChannelRuntime:
             )
             return
         if command == "flux_gs_demo":
-            await self._send_flux_gs_help(chat_id, message_id)
+            await self._send_flux_gs_guidance(chat_id, message_id)
             return
         prompts = {
             "list_assets": "查看我的个人资产",
@@ -1714,7 +1714,7 @@ class FeishuChannelRuntime:
                         "action": {"command": "photo_style_transfer"},
                     },
                     {
-                        "label": "Flux-GS 3D",
+                        "label": "3D 场景建模",
                         "action": {"command": "flux_gs_demo"},
                     },
                 ]
@@ -1760,12 +1760,12 @@ class FeishuChannelRuntime:
             direction="outbound",
             kind="card",
             content=(
-                "[功能卡片] 空间照片、图片风格化、Flux-GS 3D、个人资产、"
+                "[功能卡片] 空间照片、图片风格化、3D 场景建模、个人资产、"
                 "能力列表、当前时间"
             ),
         )
 
-    async def _send_flux_gs_help(
+    async def _send_flux_gs_guidance(
         self,
         chat_id: str,
         message_id: str,
@@ -1785,39 +1785,20 @@ class FeishuChannelRuntime:
             if ready
             else "GPU 服务尚未连接"
         )
-        card = (
-            new_card()
-            .header(
-                title="Flux-GS 3D 场景",
-                subtitle=state,
-                template="green" if ready else "orange",
-            )
-            .markdown(
-                "**输入**：已完成 COLMAP 重建的数据集，包含 `images/` 与 "
-                "`sparse/0/`。\n"
-                "**调用**：由电脑端管理员把数据集放入受控目录，然后发送 "
-                "`生成 Flux-GS，dataset_id=数据集ID`。\n"
-                "**输出**：独立 NVIDIA GPU 服务训练并发布 WebGL 预览链接。\n\n"
-                "训练会消耗较长 GPU 时间，创建任务前必须在审批卡片中确认。"
-            )
-            .buttons(
-                [
-                    {
-                        "label": "查看能力列表",
-                        "action": {"command": "capabilities"},
-                        "style": "primary",
-                    }
-                ]
-            )
-            .footer("贡献者：Zuheng Zhao · 训练服务与主 Agent 进程隔离")
-            .build()
+        guidance = (
+            f"已选择 3D 场景建模。当前状态：{state}。\n"
+            "现有 Flux-GS 后端要求多视角照片和 COLMAP sparse/0 相机数据，"
+            "不能把一张 2D 图片直接交给它训练。\n"
+            "管理员准备数据后可发送：生成 Flux-GS，dataset_id=数据集ID。\n"
+            "系统会在实际调用时校验输入和服务状态；创建 GPU 训练任务前仍需审批。\n"
+            "单张图片直接生成 3D 还需要接入单图多视角生成与相机估计前置模型。\n"
+            "功能贡献者：Zuheng Zhao。"
         )
-        await self._send_card(
+        await self._reply_safely(
             chat_id,
             message_id,
-            card.data,
-            self._uuid(message_id, "flux-gs-help"),
-            f"[功能卡片] Flux-GS 3D：{state}",
+            guidance,
+            "flux-gs-guidance",
         )
 
     async def _send_feature_menu_once(
@@ -3300,7 +3281,7 @@ class FeishuChannelRuntime:
             "photo_style_transfer": "图片风格化",
             "photo_style_start": "开始图片风格化",
             "photo_style_cancel": "取消图片风格化草稿",
-            "flux_gs_demo": "Flux-GS 3D 场景",
+            "flux_gs_demo": "3D 场景建模",
             "retry_spatial_job": "重新生成空间照片",
             "refresh_spatial_viewer": "刷新空间照片预览链接",
             "retry_photo_style_job": "重新生成图片风格化",

@@ -81,8 +81,8 @@ const catalog = [
   },
   {
     id: "flux-gs",
-    name: "Flux-GS 3D 场景",
-    description: "用 COLMAP 多视角数据训练 3D Gaussian Splatting，并发布 WebGL 预览。",
+    name: "3D 场景建模（Flux-GS）",
+    description: "用多视角照片和 COLMAP 相机数据训练 3D Gaussian Splatting，并发布 WebGL 预览。",
     status: "available" as const,
     icon: "cube" as const,
     meta: "独立 NVIDIA GPU 服务 · 需要人工审批",

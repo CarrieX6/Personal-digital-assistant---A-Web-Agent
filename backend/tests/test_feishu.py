@@ -804,7 +804,7 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
             item[1]["card"] for item in channel.sent if "card" in item[1]
         )
         assert "图片风格化" in json.dumps(card_payload, ensure_ascii=False)
-        assert "Flux-GS 3D" in json.dumps(card_payload, ensure_ascii=False)
+        assert "3D 场景建模" in json.dumps(card_payload, ensure_ascii=False)
         draft_card = next(
             item[1]["card"]
             for item in channel.sent
@@ -821,7 +821,7 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
         spatial.close()
 
 
-def test_runtime_flux_gs_card_reports_preview_boundary_and_contributor(
+def test_runtime_flux_gs_action_reuses_single_menu_card_and_replies_with_guidance(
     tmp_path: Path,
 ) -> None:
     service, secrets = build_feishu_settings(tmp_path)
@@ -854,6 +854,7 @@ def test_runtime_flux_gs_card_reports_preview_boundary_and_contributor(
 
     async def scenario() -> None:
         await runtime.apply_settings(settings)
+        await runtime._send_feature_menu("oc_chat", "om_menu")
         await channel.handlers["cardAction"](event)
         await asyncio.sleep(0)
         while runtime._tasks:
@@ -862,13 +863,14 @@ def test_runtime_flux_gs_card_reports_preview_boundary_and_contributor(
 
     try:
         asyncio.run(scenario())
-        payload = json.dumps(
-            next(item[1]["card"] for item in channel.sent if "card" in item[1]),
-            ensure_ascii=False,
-        )
-        assert "预览校验模式" in payload
-        assert "dataset_id" in payload
-        assert "Zuheng Zhao" in payload
+        cards = [item for item in channel.sent if "card" in item[1]]
+        assert len(cards) == 1
+        assert "3D 场景建模" in json.dumps(cards[0][1]["card"], ensure_ascii=False)
+        reply = next(item[1]["text"] for item in channel.sent if "text" in item[1])
+        assert "预览校验模式" in reply
+        assert "dataset_id" in reply
+        assert "不能把一张 2D 图片直接交给它训练" in reply
+        assert "Zuheng Zhao" in reply
     finally:
         flux.close()
 
