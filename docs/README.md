@@ -46,6 +46,8 @@
   局域网签名 Viewer。
 - [图片风格化独立服务部署与迁移](guides/photo-style-deployment.md)：跨平台部署管理器、
   Fake 链路测试、macOS MPS、Windows NVIDIA、远程 GPU、自动启动、迁移和验收。
+- [Flux-GS Capability 接入与部署](guides/flux-gs-capability.md)：受控数据集 ID、独立
+  Linux/NVIDIA GPU 服务、Agent 工具、飞书卡片、WebGL 结果和非商用许可门禁。
 - [macOS MPS 真实风格化验收模板](experiments/style-004-macos-mps-validation.md)：固定样本、
   十次稳定性、统一内存、功耗、fallback 和质量门禁。
 - [新功能 / Capability 接入指南](guides/capability-integration.md)：服务、Provider、

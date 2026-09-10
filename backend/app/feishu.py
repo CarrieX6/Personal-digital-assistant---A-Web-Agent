@@ -29,6 +29,7 @@ from .agent import AgentRunError, AgentRunner
 from .assets import AssetError, SpatialSceneService
 from .channel_settings import FeishuSettingsService, StoredFeishuSettings
 from .identity import IdentityBindingError, IdentityBindingRegistry
+from .flux_gs import FluxGSService
 from .lan_viewer import ViewerLinkError
 from .models import ChannelMessagePublic, FeishuRuntimePublic
 from .style_transfer import PhotoStyleService, StyleParameters
@@ -754,6 +755,7 @@ class FeishuChannelRuntime:
         channel_factory: ChannelFactory = FeishuChannel,
         spatial_service: SpatialSceneService | None = None,
         style_service: PhotoStyleService | None = None,
+        flux_gs_service: FluxGSService | None = None,
         viewer_link_factory: Callable[[str], str] | None = None,
         identity_registry: IdentityBindingRegistry | None = None,
         job_poll_interval: float = 2,
@@ -766,6 +768,7 @@ class FeishuChannelRuntime:
         self.channel_factory = channel_factory
         self.spatial_service = spatial_service
         self.style_service = style_service
+        self.flux_gs_service = flux_gs_service
         self.viewer_link_factory = viewer_link_factory
         self.identity_registry = identity_registry
         self.job_poll_interval = job_poll_interval
@@ -1181,7 +1184,10 @@ class FeishuChannelRuntime:
         await self._send_feature_menu_once(
             chat_id,
             message_id,
-            force=self._requests_photo_style(text),
+            force=(
+                self._requests_photo_style(text)
+                or self._requests_flux_gs_help(text)
+            ),
         )
         image_resources = self._image_resource_entries(message)
         if image_resources:
@@ -1307,6 +1313,10 @@ class FeishuChannelRuntime:
             sender_id,
             max_age_seconds=self.style_collection_ttl_seconds,
         )
+        if self._requests_flux_gs_help(text):
+            self.store.mark_completed(message_id, "flux-gs-help")
+            await self._send_flux_gs_help(chat_id, message_id)
+            return
         if self._requests_spatial_photo(text):
             discarded = await self._discard_photo_style_collection(
                 chat_id=chat_id,
@@ -1631,6 +1641,9 @@ class FeishuChannelRuntime:
                 sender_id=sender_id,
             )
             return
+        if command == "flux_gs_demo":
+            await self._send_flux_gs_help(chat_id, message_id)
+            return
         prompts = {
             "list_assets": "查看我的个人资产",
             "capabilities": "你能做什么？请简洁列出当前可用能力。",
@@ -1700,6 +1713,10 @@ class FeishuChannelRuntime:
                         "label": "图片风格化",
                         "action": {"command": "photo_style_transfer"},
                     },
+                    {
+                        "label": "Flux-GS 3D",
+                        "action": {"command": "flux_gs_demo"},
+                    },
                 ]
             )
             .buttons(
@@ -1743,9 +1760,64 @@ class FeishuChannelRuntime:
             direction="outbound",
             kind="card",
             content=(
-                "[功能卡片] 空间照片、图片风格化、个人资产、"
+                "[功能卡片] 空间照片、图片风格化、Flux-GS 3D、个人资产、"
                 "能力列表、当前时间"
             ),
+        )
+
+    async def _send_flux_gs_help(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> None:
+        service = self.flux_gs_service
+        status = (
+            await asyncio.to_thread(service.provider_status)
+            if service is not None
+            else {"ready": False, "error": "capability_unavailable"}
+        )
+        ready = status.get("ready") is True
+        production = status.get("production_quality") is True
+        state = (
+            "真实 GPU 服务已就绪"
+            if ready and production
+            else "预览校验模式（不执行真实训练）"
+            if ready
+            else "GPU 服务尚未连接"
+        )
+        card = (
+            new_card()
+            .header(
+                title="Flux-GS 3D 场景",
+                subtitle=state,
+                template="green" if ready else "orange",
+            )
+            .markdown(
+                "**输入**：已完成 COLMAP 重建的数据集，包含 `images/` 与 "
+                "`sparse/0/`。\n"
+                "**调用**：由电脑端管理员把数据集放入受控目录，然后发送 "
+                "`生成 Flux-GS，dataset_id=数据集ID`。\n"
+                "**输出**：独立 NVIDIA GPU 服务训练并发布 WebGL 预览链接。\n\n"
+                "训练会消耗较长 GPU 时间，创建任务前必须在审批卡片中确认。"
+            )
+            .buttons(
+                [
+                    {
+                        "label": "查看能力列表",
+                        "action": {"command": "capabilities"},
+                        "style": "primary",
+                    }
+                ]
+            )
+            .footer("贡献者：Zuheng Zhao · 训练服务与主 Agent 进程隔离")
+            .build()
+        )
+        await self._send_card(
+            chat_id,
+            message_id,
+            card.data,
+            self._uuid(message_id, "flux-gs-help"),
+            f"[功能卡片] Flux-GS 3D：{state}",
         )
 
     async def _send_feature_menu_once(
@@ -2867,6 +2939,21 @@ class FeishuChannelRuntime:
         ) is None
 
     @staticmethod
+    def _requests_flux_gs_help(text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).casefold()
+        if "dataset_id=" in compact or "datasetid=" in compact:
+            return False
+        return compact in {
+            "flux-gs",
+            "fluxgs",
+            "flux-gs3d",
+            "3d高斯",
+            "3d高斯重建",
+            "生成3d场景",
+            "生成3dgs",
+        }
+
+    @staticmethod
     def _photo_style_request_description(text: str) -> str:
         match = re.search(
             r"(?:图片|照片)\s*(?:风格化|风格转换|风格迁移)|"
@@ -3213,6 +3300,7 @@ class FeishuChannelRuntime:
             "photo_style_transfer": "图片风格化",
             "photo_style_start": "开始图片风格化",
             "photo_style_cancel": "取消图片风格化草稿",
+            "flux_gs_demo": "Flux-GS 3D 场景",
             "retry_spatial_job": "重新生成空间照片",
             "refresh_spatial_viewer": "刷新空间照片预览链接",
             "retry_photo_style_job": "重新生成图片风格化",
