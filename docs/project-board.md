@@ -168,7 +168,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-002` | P1 | LDI、MPI、Mesh、单图 3DGS 的质量与成本边界 | `🧪 待实验` | `🧱 局部实现` | 待领取 | 多路线原型、伪影分析、ADR |
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已记录蒙版面积、连通性、质量分和降级告警，并按质量降低推荐视差；待失败样本集和人工标注评测 |
-| `SPATIAL-005` | P2 | Flux-GS 多视角 3D 场景如何作为独立能力接入 Agent 与飞书 | `🟠 初步结论` | `👀 评审中` | Zuheng Zhao | 基于 Zuheng Zhao 的 Flux-GS Skill 接入受控 dataset_id、三项 Tool、独立 HTTP Provider、人工审批、工具库状态与飞书功能卡片；主仓库不复制 CUDA/Viewer 大文件。待 PR、Linux NVIDIA 实机训练、跨节点数据上传、完成通知与许可确认 |
+| `SPATIAL-005` | P2 | Flux-GS 多视角 3D 场景如何作为独立能力接入 Agent 与飞书 | `🟠 初步结论` | `🧱 局部实现` | Zuheng Zhao | [PR #17](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/17) 已接入受控 dataset_id、三项 Tool、独立 HTTP Provider、人工审批、工具库状态与飞书功能卡片；主仓库不复制 CUDA/Viewer 大文件。待 Linux NVIDIA 实机训练、跨节点数据上传、完成通知与许可确认 |
 | `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Xianggang Ma | Xianggang Ma 实现图片风格化主链路，包括独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键，并扩展 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。待 M4 真实权重/质量/功耗验收、Windows GPU 服务和真实手机联调 |
 
 ## 9. 虚拟试衣与数字人
