@@ -49,6 +49,7 @@ __pycache__/
 /backend/data/identity.sqlite3*
 /backend/data/assets/
 /backend/data/source-images/
+/backend/data/flux-gs-datasets/
 /backend/data/native-cache/
 /backend/data/assets.sqlite3*
 /backend/data/agent_checkpoints.sqlite3*

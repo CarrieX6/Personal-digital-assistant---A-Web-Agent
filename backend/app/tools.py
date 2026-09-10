@@ -260,6 +260,7 @@ def list_capabilities(_: dict[str, Any]) -> dict[str, Any]:
             "统计字数：……",
             "现在几点？",
             "查看我的个人资产",
+            "生成 Flux-GS 3D 场景：dataset_id=demo-scene（需要审批）",
             "记住：我偏好在本机处理私人图片",
             "查看我的记忆",
         ]

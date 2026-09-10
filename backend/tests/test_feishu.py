@@ -21,6 +21,7 @@ from backend.app.channel_settings import (
     StoredFeishuSettings,
 )
 from backend.app.identity import IdentityBindingRegistry
+from backend.app.flux_gs import FluxGSService, LocalFluxGSPreviewProvider
 from backend.app.feishu import (
     FeishuChannelRuntime,
     SQLiteChannelStore,
@@ -803,6 +804,7 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
             item[1]["card"] for item in channel.sent if "card" in item[1]
         )
         assert "图片风格化" in json.dumps(card_payload, ensure_ascii=False)
+        assert "Flux-GS 3D" in json.dumps(card_payload, ensure_ascii=False)
         draft_card = next(
             item[1]["card"]
             for item in channel.sent
@@ -817,6 +819,58 @@ def test_runtime_feature_menu_includes_photo_style_and_explains_entry(
     finally:
         style.close()
         spatial.close()
+
+
+def test_runtime_flux_gs_card_reports_preview_boundary_and_contributor(
+    tmp_path: Path,
+) -> None:
+    service, secrets = build_feishu_settings(tmp_path)
+    secrets.set("app-secret")
+    settings = StoredFeishuSettings(
+        enabled=True,
+        app_id="cli_test",
+        allowed_open_ids=["ou_allowed"],
+    )
+    service.repository.save(settings)
+    channel = FakeChannel()
+    flux = FluxGSService(
+        LocalFluxGSPreviewProvider(),
+        dataset_root=tmp_path / "datasets",
+        provider_dataset_root=tmp_path / "datasets",
+    )
+    runtime = FeishuChannelRuntime(
+        service,
+        FakeRunner(),  # type: ignore[arg-type]
+        SQLiteChannelStore(tmp_path / "channel.sqlite3"),
+        channel_factory=lambda **_: channel,
+        flux_gs_service=flux,
+    )
+    event = SimpleNamespace(
+        chat_id="oc_chat",
+        message_id="om_flux_card",
+        operator=SimpleNamespace(open_id="ou_allowed"),
+        action=SimpleNamespace(value={"command": "flux_gs_demo"}),
+    )
+
+    async def scenario() -> None:
+        await runtime.apply_settings(settings)
+        await channel.handlers["cardAction"](event)
+        await asyncio.sleep(0)
+        while runtime._tasks:
+            await asyncio.gather(*list(runtime._tasks))
+            await asyncio.sleep(0)
+
+    try:
+        asyncio.run(scenario())
+        payload = json.dumps(
+            next(item[1]["card"] for item in channel.sent if "card" in item[1]),
+            ensure_ascii=False,
+        )
+        assert "预览校验模式" in payload
+        assert "dataset_id" in payload
+        assert "Zuheng Zhao" in payload
+    finally:
+        flux.close()
 
 
 def test_runtime_natural_style_request_auto_menu_and_single_image_routing(

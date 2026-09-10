@@ -1,0 +1,49 @@
+{
+  "id": "flux-gs-demo",
+  "name": "Flux-GS Web Demo",
+  "version": "0.3.0",
+  "author": "Zuheng Zhao",
+  "entrypoint": "create_flux_gs_demo",
+  "provider": {
+    "type": "http",
+    "service_url_env": "FLUX_GS_SERVICE_URL",
+    "default_service_url": "http://127.0.0.1:18100",
+    "tenant_env": "FLUX_GS_TENANT_ID",
+    "api_key_env": "FLUX_GS_API_KEY",
+    "timeout_env": "FLUX_GS_TIMEOUT_SECONDS"
+  },
+  "dataset": {
+    "local_root_env": "FLUX_GS_DATASET_ROOT",
+    "provider_root_env": "FLUX_GS_PROVIDER_DATASET_ROOT",
+    "agent_input": "dataset_id",
+    "path_input_allowed": false
+  },
+  "training_profiles": {
+    "quick": {
+      "iterations": 4000,
+      "description": "Smoke test profile for dataset and deployment checks."
+    },
+    "default": {
+      "iterations": 30000,
+      "description": "Default production profile."
+    },
+    "tandt": {
+      "iterations": 30000,
+      "description": "Tanks and Temples style scenes."
+    },
+    "mipnerf360": {
+      "iterations": 30000,
+      "description": "MipNeRF360 style scenes."
+    }
+  },
+  "requirements": {
+    "cuda": "CUDA 12.x",
+    "gpu": "NVIDIA GPU, 12GB+ VRAM recommended",
+    "python": "3.10 or 3.11",
+    "native_tools": [
+      "Flux-GS CUDA extensions",
+      "GPCC/TMC13 encoder and browser decoder"
+    ],
+    "git_policy": "Do not commit datasets, model outputs, API keys, or user files."
+  }
+}

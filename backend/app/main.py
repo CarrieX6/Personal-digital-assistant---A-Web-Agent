@@ -41,6 +41,7 @@ from .channel_settings import (
     create_default_feishu_settings_service,
 )
 from .feishu import FeishuChannelRuntime, SQLiteChannelStore
+from .flux_gs import FluxGSService, create_flux_gs_router, register_flux_gs_tools
 from .identity import IdentityBinding, IdentityBindingError, IdentityBindingRegistry
 from .lan_viewer import LanViewerService, ViewerLinkError
 from .models import (
@@ -216,6 +217,7 @@ def create_app(
     settings_service: SettingsService | None = None,
     spatial_service: SpatialSceneService | None = None,
     style_service: PhotoStyleService | None = None,
+    flux_gs_service: FluxGSService | None = None,
     feishu_settings_service: FeishuSettingsService | None = None,
     feishu_runtime: FeishuChannelRuntime | None = None,
     viewer_service: LanViewerService | None = None,
@@ -230,6 +232,8 @@ def create_app(
         selected_spatial_service
     )
     register_style_tools(registry, selected_style_service)
+    selected_flux_gs_service = flux_gs_service or FluxGSService()
+    register_flux_gs_tools(registry, selected_flux_gs_service)
     selected_settings_service = settings_service or create_default_settings_service(
         DEFAULT_SETTINGS_PATH
     )
@@ -272,6 +276,7 @@ def create_app(
         selected_channel_store,
         spatial_service=selected_spatial_service,
         style_service=selected_style_service,
+        flux_gs_service=selected_flux_gs_service,
         viewer_link_factory=selected_viewer_service.create_link,
         identity_registry=selected_identity_registry,
     )
@@ -292,6 +297,7 @@ def create_app(
             runner.close()
             llm_runtime.close()
             selected_style_service.close()
+            selected_flux_gs_service.close()
             selected_spatial_service.close()
 
     app = FastAPI(
@@ -319,11 +325,13 @@ def create_app(
     app.state.llm_runtime = llm_runtime
     app.state.spatial_service = selected_spatial_service
     app.state.style_service = selected_style_service
+    app.state.flux_gs_service = selected_flux_gs_service
     app.state.feishu_settings_service = selected_feishu_settings_service
     app.state.feishu_runtime = selected_feishu_runtime
     app.state.channel_store = selected_channel_store
     app.state.viewer_service = selected_viewer_service
     app.state.identity_registry = selected_identity_registry
+    app.include_router(create_flux_gs_router())
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:

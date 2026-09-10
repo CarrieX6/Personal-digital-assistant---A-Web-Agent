@@ -157,10 +157,12 @@ FastAPI + LangGraph Agent
         ├── 本机资产：图片、深度、前景、背景、结果文件
         ├── 8766：按需启动的签名空间照片 Viewer
         ├── 飞书：出站长连接，不要求公开 Webhook
-        └── 图片风格化
+        ├── 图片风格化
               ├── macOS：本机 MPS NativeSDXLStyleProvider
               ├── Windows NVIDIA：127.0.0.1:18000 独立 pic-style
               └── 分机：受保护 HTTP(S) Provider
+        └── Flux-GS 3D（可选）
+              └── 18100：独立 Linux + NVIDIA GPU 训练与 Web 发布服务
 ```
 
 | 端口 | 组件 | 默认暴露范围 |
@@ -169,8 +171,9 @@ FastAPI + LangGraph Agent
 | `8000` | Agent API / Swagger | 仅 `127.0.0.1` |
 | `8766` | 带 HMAC 签名的空间照片 Viewer | 专用局域网或受控 HTTPS Tunnel |
 | `18000` | 独立图片风格化 API | 本机回环或 Agent→GPU 专用网络 |
+| `18100` | 独立 Flux-GS 训练 API | 本机回环、共享挂载或 Agent→GPU 专用网络 |
 
-不要把 `3000`、`8000` 或无鉴权的 `18000` 直接映射到公网。Web 控制台是本机 Root
+不要把 `3000`、`8000`、无鉴权的 `18000` 或 `18100` 直接映射到公网。Web 控制台是本机 Root
 视图，能看到全部已授权渠道会话，不是普通用户门户。
 
 ## 6. 启动、停止和健康检查
@@ -227,9 +230,18 @@ Windows 使用 `Invoke-RestMethod` 或 `.\.venv\Scripts\python.exe`。
 2. **外部接入**：填写飞书/Lark App ID、App Secret、白名单 Open ID 和群聊策略；先
    测试凭证，再启用长连接。
 3. **功能库**：确认空间照片、个人记忆、文本工具、飞书连接器和视觉理解状态；图片
-   风格化必须显示真实 SDXL 已就绪，而不是“测试模式”。
+   风格化必须显示真实 SDXL 已就绪，而不是“测试模式”。Flux-GS 属于可选重型能力，
+   未部署时必须显示“未部署”，不能把 Preview 数据校验显示为真实训练。
 4. **Agent 对话**：新建会话完成文本问答、工具调用、图片问答和异步任务测试。
 5. **记忆中心**：验证显式写入、检索、修改和删除。
+
+### 7.1 可选 Flux-GS GPU 能力
+
+Flux-GS 不纳入默认 Mac/Windows 控制台安装，因为真实训练依赖 Linux、NVIDIA GPU、
+CUDA 扩展与 `tmc3`。主项目已经包含 Provider 适配层；如需启用，按
+[Flux-GS Capability 接入与部署](flux-gs-capability.md)在独立 GPU 节点安装源仓库，
+配置 `FLUX_GS_SERVICE_URL`、API Key 和数据集根目录映射。商业环境启用前必须先通过
+其 Gaussian-Splatting 子模块的非商用许可门禁。
 
 LLM API Key 与飞书 App Secret 优先进入操作系统钥匙串；无可用钥匙串时才使用
 `backend/data/*.enc` 与 `.secret_master_key`。浏览器不保存明文 Key。
@@ -238,9 +250,9 @@ LLM API Key 与飞书 App Secret 优先进入操作系统钥匙串；无可用�
 
 ### 8.1 Web Agent 与 LangGraph
 
-当前注册 8 个 Tool：文本统计、关键词提取、当前时间、能力列表、个人资产查询、空间
-照片创建、异步任务状态和图片风格化。普通视觉问答由多模态 LLM 处理，不作为本地图像
-生成 Tool。
+当前注册 11 个 Tool：文本统计、关键词提取、当前时间、能力列表、个人资产查询、空间
+照片创建、异步任务状态、图片风格化，以及 Flux-GS 数据集校验、训练发布和任务状态
+查询。普通视觉问答由多模态 LLM 处理，不作为本地图像生成 Tool。
 
 LangGraph 执行 `plan → policy → approval（可选）→ execute_tool → observe → decide →
 finalize/fail`。Schema、owner、风险、幂等、步数、错误数和总时长由代码约束；SQLite

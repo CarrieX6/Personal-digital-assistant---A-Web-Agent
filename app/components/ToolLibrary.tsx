@@ -14,6 +14,13 @@ type PhotoStyleProviderStatus = {
   details: Record<string, unknown>;
 };
 
+type FluxGSProviderStatus = {
+  ready?: boolean;
+  production_quality?: boolean;
+  provider?: string;
+  error?: string | null;
+};
+
 type ToolLibraryProps = {
   apiBase: string;
   health: HealthInfo | null;
@@ -73,6 +80,14 @@ const catalog = [
     meta: "随已配置的多模态模型启用 · 图片按需发送",
   },
   {
+    id: "flux-gs",
+    name: "Flux-GS 3D 场景",
+    description: "用 COLMAP 多视角数据训练 3D Gaussian Splatting，并发布 WebGL 预览。",
+    status: "available" as const,
+    icon: "cube" as const,
+    meta: "独立 NVIDIA GPU 服务 · 需要人工审批",
+  },
+  {
     id: "vton",
     name: "虚拟试衣",
     description: "上传人物和衣物图片，生成保持身份一致的 2D 试衣结果。",
@@ -117,6 +132,9 @@ export function ToolLibrary({
   const [photoStyleProvider, setPhotoStyleProvider] =
     useState<PhotoStyleProviderStatus | null>(null);
   const [photoStyleChecked, setPhotoStyleChecked] = useState(false);
+  const [fluxGSProvider, setFluxGSProvider] =
+    useState<FluxGSProviderStatus | null>(null);
+  const [fluxGSChecked, setFluxGSChecked] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     void fetch(`${apiBase}/api/photo-style-transfers/provider`, {
@@ -132,6 +150,21 @@ export function ToolLibrary({
     return () => controller.abort();
   }, [apiBase]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`${apiBase}/api/flux-gs/provider`, {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error("provider status unavailable");
+        return response.json() as Promise<FluxGSProviderStatus>;
+      })
+      .then((status) => setFluxGSProvider(status))
+      .catch(() => setFluxGSProvider(null))
+      .finally(() => setFluxGSChecked(true));
+    return () => controller.abort();
+  }, [apiBase]);
+
   const resolvedCatalog = useMemo(() => {
     const details = photoStyleProvider?.details ?? {};
     const productionQuality = details.production_quality === true;
@@ -140,6 +173,38 @@ export function ToolLibrary({
         ? details.upstream_provider
         : null;
     return catalog.map((tool) => {
+      if (tool.id === "flux-gs") {
+        if (!fluxGSChecked) {
+          return {
+            ...tool,
+            status: "available" as const,
+            statusLabel: "检测中",
+            meta: "正在检查独立 Flux-GS GPU 服务",
+          };
+        }
+        if (fluxGSProvider?.ready !== true) {
+          return {
+            ...tool,
+            status: "available" as const,
+            statusLabel: "未部署",
+            meta: "独立 Flux-GS GPU 服务未连接",
+          };
+        }
+        if (fluxGSProvider.production_quality !== true) {
+          return {
+            ...tool,
+            status: "testing" as const,
+            statusLabel: "测试模式",
+            meta: "仅校验 COLMAP 数据，不执行真实训练",
+          };
+        }
+        return {
+          ...tool,
+          status: "installed" as const,
+          statusLabel: "GPU 已就绪",
+          meta: `${fluxGSProvider.provider ?? "Flux-GS"} · 独立训练服务`,
+        };
+      }
       if (tool.id !== "photo-style-transfer") return tool;
       if (!photoStyleChecked) {
         return {
@@ -172,7 +237,7 @@ export function ToolLibrary({
         meta: `${upstreamProvider ?? "SDXL + IP-Adapter"} · 独立服务`,
       };
     });
-  }, [photoStyleChecked, photoStyleProvider]);
+  }, [fluxGSChecked, fluxGSProvider, photoStyleChecked, photoStyleProvider]);
   const visible = useMemo(
     () =>
       resolvedCatalog.filter(
@@ -273,6 +338,14 @@ export function ToolLibrary({
                     配置视觉模型
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>
+                ) : tool.id === "flux-gs" ? (
+                  <span>
+                    {tool.status === "installed"
+                      ? "可从 Agent 或飞书调用"
+                      : tool.status === "testing"
+                        ? "仅可验证接入链路"
+                        : "请先部署独立 GPU 服务"}
+                  </span>
                 ) : tool.status === "coming" ? (
                   <button type="button" disabled>
                     尚未开放

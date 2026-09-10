@@ -57,6 +57,11 @@ docs/experiments/<id>.md
 [飞书图片与 2.5D 能力接入 SOP](feishu-media-capability-sop.md)，不要在渠道 Handler
 内增加新的模型分支或依赖图片顺序猜测角色。
 
+远端训练型能力还必须把用户可见 `dataset_id` 与服务端路径分开；LLM、飞书和 Web
+请求不得提交任意绝对路径。Flux-GS 的实现示例见
+[Flux-GS Capability 接入与部署](flux-gs-capability.md)：主进程只注册工具和 Provider，
+CUDA 训练留在隔离服务，创建任务使用人工审批与幂等键。
+
 ## 必须通过的验收
 
 - Tool Schema 非法参数、owner 越权、重复消息和重复执行测试；

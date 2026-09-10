@@ -997,6 +997,10 @@ class LangGraphOrchestrator:
                 "图片风格化任务已创建，正在本机后台处理。完成后可在当前对话或"
                 "个人资产库查看并下载结果。"
             ),
+            "create_flux_gs_demo": (
+                "Flux-GS 训练任务已提交到独立 GPU 服务。可使用任务 ID 查询进度；"
+                "完成后会返回 WebGL 3D 预览地址。"
+            ),
         }
         for observation in reversed(observations):
             answer = messages.get(observation.call.name)

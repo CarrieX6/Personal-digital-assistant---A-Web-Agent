@@ -36,6 +36,7 @@ Demo。
 | 结果回传适配 | 局部实现 | 富文本、状态、2.5D 封面 + Viewer 卡片、风格化预览与下载文件、两类失败重试；Outbox 与固定公网域名待实现 |
 | 会话与长期记忆 | 增强 MVP | SQLite 按用户/渠道/会话隔离；Run 与用户事件原子落库，崩溃后按 Run 独立 Checkpoint 对账恢复；上下文使用真实本地 Tokenizer 和强制 Schema 的结构化滚动摘要，正则抽取仅作可观测兜底；长期 claim 与 evidence 分表、时态化、加密并支持审计；已加入敏感召回硬门禁、词法/槽位/语义 RRF+MMR 混合召回、离线评测和效用反馈 |
 | 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
+| Flux-GS 3D 场景 | 适配层已合入、真实 GPU 待部署 | 已注册数据集校验、训练创建、状态查询与飞书卡片；训练仍需独立 Linux + NVIDIA GPU 服务 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
 ## 总体架构
@@ -79,6 +80,7 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 - 接收本地图片资产 ID，创建空间照片任务。
 - 使用内容图与一至三张参考图创建图片个性化任务（默认连接独立 SDXL + IP-Adapter 服务）。
 - 使用兼容 Chat Completions `image_url` 的多模态模型进行图片识别、描述、OCR 与连续追问。
+- 使用受控 `dataset_id` 校验 COLMAP 数据集、经人工审批提交 Flux-GS GPU 训练，并查询 WebGL 3D 预览链接。
 
 上传图片先在本机校验并转换为受限尺寸的 WebP。仅当用户进行普通看图问答时，图片
 才会作为当前请求的多模态输入发送给已配置模型；视觉输入不会写入 LangGraph
@@ -136,9 +138,18 @@ WebP 作为文件发送；直接发送多张图片时也会自动创建风格化
 阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
 用户身份认证与链接撤销仍需下一阶段完成。
 
+飞书“菜单”现已加入“Flux-GS 3D”入口，可查看独立 GPU 服务是否就绪、数据集格式和
+调用方式。Flux-GS 与单图空间照片不同：它要求预先完成 COLMAP 多视角重建，并会消耗
+较长 GPU 时间，所以训练创建属于 `external_write`，必须人工审批；飞书只接收受控
+`dataset_id`，不会把聊天中的任意路径或命令交给服务器执行。完成后的 `demo_url` 可在
+手机浏览器打开 WebGL 预览。当前版本尚未实现飞书直接上传大型 COLMAP 压缩包和训练
+完成后的持久化 Outbox 通知，这两项已进入后续计划。
+
 macOS 与 Windows 的一键安装/启动方式见
 [本地部署指南](docs/guides/deployment.md)，新能力接入约定见
 [Capability 接入指南](docs/guides/capability-integration.md)。
+Flux-GS 的独立 GPU 服务部署、数据集映射、许可门禁和飞书调用见
+[Flux-GS Capability 接入与部署](docs/guides/flux-gs-capability.md)。
 
 ### 第二阶段：结果预览
 
@@ -183,6 +194,7 @@ backend/
     assets.py                 深度模型、任务、资产与文件安全
     channel_settings.py       飞书配置与 App Secret 安全存储
     feishu.py                 长连接、鉴权、去重与 Agent 消息闭环
+    flux_gs.py                Flux-GS Provider、受控数据集 ID、工具与管理 API
     settings.py               模型配置与密钥安全存储
     main.py                   FastAPI 路由
   tests/                      后端测试
