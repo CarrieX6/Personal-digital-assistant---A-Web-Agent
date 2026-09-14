@@ -309,8 +309,8 @@ def prepare_real_photo_style(
         )
         return
     raise DeploymentError(
-        "本机没有受支持的真实图片风格化加速器。请在 NVIDIA GPU 电脑部署，"
-        "或用 --photo-style-url https://... 配置远程 GPU 服务。"
+        "本机没有经过验证的真实图片风格化档位。完整迁移必须在当前目标机部署"
+        "本地 Provider；--photo-style-url 只保留给开发期远程联调。"
     )
 
 

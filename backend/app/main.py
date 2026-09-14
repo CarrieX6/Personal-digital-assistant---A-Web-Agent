@@ -34,6 +34,10 @@ from .assets import (
     SpatialSceneService,
     register_asset_tools,
 )
+from .capability_setup import (
+    CapabilitySetupService,
+    create_capability_setup_router,
+)
 from .llm import LLMError
 from .channel_settings import (
     FeishuSettingsError,
@@ -222,6 +226,7 @@ def create_app(
     feishu_runtime: FeishuChannelRuntime | None = None,
     viewer_service: LanViewerService | None = None,
     identity_registry: IdentityBindingRegistry | None = None,
+    capability_setup_service: CapabilitySetupService | None = None,
 ) -> FastAPI:
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
@@ -270,6 +275,14 @@ def create_app(
         selected_spatial_service,
         data_path=channel_data_path,
     )
+    selected_capability_setup_service = (
+        capability_setup_service
+        or CapabilitySetupService(
+            channel_data_path,
+            style_probe=selected_style_service.provider_status,
+            flux_probe=selected_flux_gs_service.provider.status,
+        )
+    )
     selected_feishu_runtime = feishu_runtime or FeishuChannelRuntime(
         selected_feishu_settings_service,
         runner,
@@ -293,6 +306,7 @@ def create_app(
             yield
         finally:
             await selected_feishu_runtime.stop()
+            selected_capability_setup_service.close()
             selected_viewer_service.close()
             runner.close()
             llm_runtime.close()
@@ -331,7 +345,11 @@ def create_app(
     app.state.channel_store = selected_channel_store
     app.state.viewer_service = selected_viewer_service
     app.state.identity_registry = selected_identity_registry
+    app.state.capability_setup_service = selected_capability_setup_service
     app.include_router(create_flux_gs_router())
+    app.include_router(
+        create_capability_setup_router(selected_capability_setup_service)
+    )
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:

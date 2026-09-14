@@ -4,11 +4,16 @@
 
 适用仓库：`CarrieX6/Personal-digital-assistant---A-Web-Agent`
 
-更新日期：2026-09-04
+更新日期：2026-09-14
 
 本文是新电脑部署的主入口。目标是让安装者从 GitHub 私有仓库开始，完整复现 Web
 控制台、个人助手 Agent、功能库、本地数据、真实图片风格化、空间照片和飞书控制链路，
 并能把旧电脑的数据安全迁移到新电脑。
+
+> 2026-09-14 架构决策：正式迁移采用**单机完整节点**。Web、Agent、飞书长连接、
+> SQLite/资产、Viewer 和模型 Provider 必须在同一目标电脑上独立运行，不再把 Mac 固定为
+> 控制/数据入口、另一台设备只作计算节点。设计依据、DGX Spark 门禁和迁移顺序见
+> [单机完整节点架构与迁移方案](full-node-migration.md)。
 
 专题文档用于理解某个模块；发生命令冲突时，以本文和 `scripts/deploy.py --help` 为准。
 
@@ -32,7 +37,7 @@
 
 ## 2. 一条主路径
 
-### 2.1 macOS / Linux
+### 2.1 macOS Apple Silicon
 
 ```bash
 git clone https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent.git
@@ -52,7 +57,24 @@ chmod +x scripts/setup.sh scripts/start.sh
 .venv/bin/python scripts/deploy.py check
 ```
 
-### 2.2 Windows 10 / 11
+### 2.2 Linux x86_64 NVIDIA / DGX Spark
+
+Linux 当前先启动控制面，再从设置中心查看目标设备的真实兼容状态：
+
+```bash
+git clone https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent.git
+cd Personal-digital-assistant---A-Web-Agent
+git switch main
+chmod +x scripts/setup.sh scripts/start.sh
+./scripts/setup.sh --profile core --photo-style skip
+./scripts/start.sh
+```
+
+该命令只代表 Web、Agent、飞书和设置中心的基础部署，不代表模型已兼容。Linux x86_64
+图片风格化和 Flux-GS 当前按固定容器手动验收；DGX Spark 上的空间模型、语义记忆、SDXL
+与 Flux-GS 在 ARM64/CUDA 13 真机门禁通过前都会显示“需要适配”，不会执行 x86 安装脚本。
+
+### 2.3 Windows 10 / 11
 
 以普通用户打开 PowerShell：
 
@@ -87,7 +109,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 | Node.js | 22.13+，带 Corepack 或独立 pnpm | 同左 |
 | 内存 | 建议至少 8 GB | 需按本机模型和并发重新评测 |
 | 磁盘 | Python、Node 依赖与用户资产空间 | SDXL 套件固定下载计划约 9.84 GiB，另计环境、缓存和容器 |
-| 加速器 | CPU 可运行控制面与部分空间照片 | Apple Silicon MPS、Windows NVIDIA，或受保护远程 GPU |
+| 加速器 | CPU 可运行控制面与部分空间照片 | Apple Silicon MPS、Windows NVIDIA，或目标机上的 Linux NVIDIA |
 | Windows 真实风格化 | 不需要 | Docker Desktop、WSL2、NVIDIA 驱动，建议至少约 8 GB 显存 |
 | 网络 | GitHub、LLM、飞书 | 首次还需访问模型源；运行时模型强制本地读取 |
 
@@ -138,7 +160,7 @@ deploy install
 | `deploy.py install --skip-spatial-models` | 不预下载深度/分割权重 | 首次运行需联网，不属于完整离线部署 |
 | `deploy.py install --skip-memory-model` | 不下载本地 Transformer | 长期记忆回退词法/Hash 召回 |
 | `deploy.py install --photo-style test` | 显式部署 Fake 契约服务 | 只能测交互链路，`check` 必然不通过 |
-| `deploy.py install --photo-style-url https://...` | 使用远程真实 GPU | URL 需受保护；API Key 单独注入 |
+| `deploy.py install --photo-style-url https://...` | 仅用于开发期 Provider 联调 | 不属于完整迁移交付，正式节点应把 Provider 部署到同机 |
 
 Fake 不属于默认降级。真实 Provider 失败时，功能库应显示未部署或维护中，而不是给用户
 返回低质量调色图。
@@ -146,7 +168,7 @@ Fake 不属于默认降级。真实 Provider 失败时，功能库应显示未�
 ## 5. 服务拓扑、端口和进程
 
 ```text
-浏览器 / Root 管理员
+本机浏览器 / 手机飞书
         │ 127.0.0.1:3000
         ▼
 Web 控制台（React / vinext）
@@ -157,12 +179,12 @@ FastAPI + LangGraph Agent
         ├── 本机资产：图片、深度、前景、背景、结果文件
         ├── 8766：按需启动的签名空间照片 Viewer
         ├── 飞书：出站长连接，不要求公开 Webhook
-        ├── 图片风格化
+        ├── 图片风格化（同一目标机）
               ├── macOS：本机 MPS NativeSDXLStyleProvider
               ├── Windows NVIDIA：127.0.0.1:18000 独立 pic-style
-              └── 分机：受保护 HTTP(S) Provider
+              └── Linux NVIDIA：本机容器 Provider（需对应档位验收）
         └── Flux-GS 3D（可选）
-              └── 18100：独立 Linux + NVIDIA GPU 训练与 Web 发布服务
+              └── 18100：目标机内独立 Linux + NVIDIA GPU 训练与 Web 发布服务
 ```
 
 | 端口 | 组件 | 默认暴露范围 |
@@ -170,8 +192,8 @@ FastAPI + LangGraph Agent
 | `3000` | Root Web 控制台 | 仅 `127.0.0.1` |
 | `8000` | Agent API / Swagger | 仅 `127.0.0.1` |
 | `8766` | 带 HMAC 签名的空间照片 Viewer | 专用局域网或受控 HTTPS Tunnel |
-| `18000` | 独立图片风格化 API | 本机回环或 Agent→GPU 专用网络 |
-| `18100` | 独立 Flux-GS 训练 API | 本机回环、共享挂载或 Agent→GPU 专用网络 |
+| `18000` | 独立图片风格化 API | 仅目标机回环 |
+| `18100` | 独立 Flux-GS 训练 API | 仅目标机回环或本机容器网络 |
 
 不要把 `3000`、`8000`、无鉴权的 `18000` 或 `18100` 直接映射到公网。Web 控制台是本机 Root
 视图，能看到全部已授权渠道会话，不是普通用户门户。
@@ -225,21 +247,24 @@ Windows 使用 `Invoke-RestMethod` 或 `.\.venv\Scripts\python.exe`。
 
 打开 [http://localhost:3000/](http://localhost:3000/)，按顺序配置：
 
-1. **模型设置**：选择 DeepSeek、OpenAI、Qwen、GLM 或自定义 OpenAI 兼容服务；填写
+1. **设置**：进入全页设置中心，先确认系统、CPU 架构、GPU、内存、磁盘和容器档位。
+2. **模型设置**：选择 DeepSeek、OpenAI、Qwen、GLM 或自定义 OpenAI 兼容服务；填写
    Base URL、模型和 API Key；先“测试连接”，再“保存并启用”。
-2. **外部接入**：填写飞书/Lark App ID、App Secret、白名单 Open ID 和群聊策略；先
+3. **外部接入**：填写飞书/Lark App ID、App Secret、白名单 Open ID 和群聊策略；先
    测试凭证，再启用长连接。
-3. **功能库**：确认空间照片、个人记忆、文本工具、飞书连接器和视觉理解状态；图片
+4. **本机能力**：逐项查看模型下载量、磁盘、许可证和兼容性，再创建持久化安装任务。
+   安装器只运行仓库内白名单动作；页面刷新不丢任务，重启中断后允许人工重试。
+5. **功能库**：确认空间照片、个人记忆、文本工具、飞书连接器和视觉理解状态；图片
    风格化必须显示真实 SDXL 已就绪，而不是“测试模式”。Flux-GS 属于可选重型能力，
    未部署时必须显示“未部署”，不能把 Preview 数据校验显示为真实训练。
-4. **Agent 对话**：新建会话完成文本问答、工具调用、图片问答和异步任务测试。
-5. **记忆中心**：验证显式写入、检索、修改和删除。
+6. **Agent 对话**：新建会话完成文本问答、工具调用、图片问答和异步任务测试。
+7. **记忆中心**：验证显式写入、检索、修改和删除。
 
 ### 7.1 可选 Flux-GS GPU 能力
 
-Flux-GS 不纳入默认 Mac/Windows 控制台安装，因为真实训练依赖 Linux、NVIDIA GPU、
+Flux-GS 不纳入默认 Mac/Windows 模型安装，因为真实训练依赖 Linux、NVIDIA GPU、
 CUDA 扩展与 `tmc3`。主项目已经包含 Provider 适配层；如需启用，按
-[Flux-GS Capability 接入与部署](flux-gs-capability.md)在独立 GPU 节点安装源仓库，
+[Flux-GS Capability 接入与部署](flux-gs-capability.md)在目标节点的本机容器中安装源仓库，
 配置 `FLUX_GS_SERVICE_URL`、API Key 和数据集根目录映射。商业环境启用前必须先通过
 其 Gaussian-Splatting 子模块的非商用许可门禁。
 
@@ -330,15 +355,16 @@ readiness、部署器记录的 Host GPU Worker 存活，以及至少一次真实
 自动化还需要在目标机做 Docker、CUDA、重启和十次连续生成验收；Mac 上的单元测试不能
 证明 Windows 运行结论。
 
-#### 远程 GPU
+#### 开发期远程 Provider（不属于完整迁移）
 
 ```bash
 python scripts/deploy.py install \
   --photo-style-url https://gpu.example.com/photo-style
 ```
 
-公网必须使用 HTTPS、服务鉴权、租户隔离、限流和审计；API Key 不接受命令行参数，应
-通过本机 Secret 管理单独注入。内网 HTTP 只允许专用网/VPN 地址。
+该模式只保留给 Provider 联调和对比实验。公网必须使用 HTTPS、服务鉴权、租户隔离、
+限流和审计；API Key 不接受命令行参数，应通过本机 Secret 管理单独注入。由于它仍依赖
+另一台设备和网络，不满足“旧 Mac 可关机、目标电脑独立运行”的完整迁移验收。
 
 ### 8.5 通用视觉理解
 

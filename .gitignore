@@ -54,6 +54,7 @@ __pycache__/
 /backend/data/assets.sqlite3*
 /backend/data/agent_checkpoints.sqlite3*
 /backend/data/agent_memory.sqlite3*
+/backend/data/capability_setup.sqlite3*
 *.memory-key
 
 # local Codex runtime permissions

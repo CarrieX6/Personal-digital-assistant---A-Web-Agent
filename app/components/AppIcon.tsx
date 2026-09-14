@@ -17,7 +17,11 @@ type IconName =
   | "check"
   | "sparkles"
   | "trash"
-  | "chevron";
+  | "chevron"
+  | "refresh"
+  | "shield"
+  | "alert"
+  | "close";
 
 type AppIconProps = SVGProps<SVGSVGElement> & {
   name: IconName;
@@ -101,6 +105,26 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   chevron: <path d="m9 18 6-6-6-6" />,
+  refresh: (
+    <>
+      <path d="M20 7v5h-5" />
+      <path d="M4 17v-5h5" />
+      <path d="M6.1 8.5A7 7 0 0 1 18.3 7L20 12M4 12l1.7 5A7 7 0 0 0 17.9 15.5" />
+    </>
+  ),
+  shield: (
+    <>
+      <path d="M12 3 20 6v5c0 5-3.4 8.1-8 10-4.6-1.9-8-5-8-10V6l8-3Z" />
+      <path d="m8.5 12 2.2 2.2 4.8-5" />
+    </>
+  ),
+  alert: (
+    <>
+      <path d="M10.3 4.2 2.7 18a2 2 0 0 0 1.8 3h15a2 2 0 0 0 1.8-3L13.7 4.2a2 2 0 0 0-3.4 0Z" />
+      <path d="M12 9v4m0 4h.01" />
+    </>
+  ),
+  close: <path d="m6 6 12 12M18 6 6 18" />,
 };
 
 export function AppIcon({ name, ...props }: AppIconProps) {
