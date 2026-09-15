@@ -236,6 +236,7 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
             self.scheduler = SimpleNamespace(config={"name": "base"})
             self.to_device = None
             self.attention_slicing = False
+            self.vae_slicing = False
             self.cpu_offload = False
 
         def load_ip_adapter(self, *_args, **_kwargs) -> None:
@@ -248,7 +249,7 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
             return None
 
         def enable_vae_slicing(self) -> None:
-            return None
+            self.vae_slicing = True
 
         def enable_model_cpu_offload(self) -> None:
             self.cpu_offload = True
@@ -295,6 +296,7 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
     assert provider._resolved_accelerator == "mps"
     assert pipeline.to_device == "mps"
     assert pipeline.attention_slicing is False
+    assert pipeline.vae_slicing is True
     assert pipeline.cpu_offload is False
     provider.close()
     assert FakeMPS.empty_calls == 1
