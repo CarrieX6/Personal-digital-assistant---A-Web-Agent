@@ -1,7 +1,8 @@
 -r requirements.txt
 
 # Optional dependencies for PHOTO_STYLE_PROVIDER=sdxl-local.
-# Install a CUDA-compatible torch build for the target NVIDIA driver first.
+# Windows NVIDIA: install a CUDA-compatible torch build for the driver first.
+# Apple Silicon: use the native arm64 PyTorch wheel and validate torch.backends.mps.
 accelerate>=1.2,<2.0
 diffusers>=0.35.2,<0.36
 peft>=0.14,<0.20

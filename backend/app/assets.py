@@ -23,6 +23,11 @@ from .models import (
     SourceImagePublic,
     SpatialSceneCreateResponse,
 )
+from .spatial_segmentation import (
+    AutoForegroundSegmenter,
+    ForegroundMaskResult,
+    ForegroundSegmenter,
+)
 from .tools import ToolError, ToolRegistry, ToolSpec
 
 
@@ -81,7 +86,7 @@ def _nearest_background_fill(
     foreground_mask: Image.Image,
 ) -> Image.Image:
     working = image.copy()
-    working.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    working.thumbnail((768, 768), Image.Resampling.LANCZOS)
     mask = foreground_mask.resize(working.size, Image.Resampling.NEAREST)
     colors = np.asarray(working, dtype=np.float32).copy()
     missing = np.asarray(mask, dtype=np.uint8) > 0
@@ -92,7 +97,16 @@ def _nearest_background_fill(
             break
         neighbor_sum = np.zeros_like(colors)
         neighbor_count = np.zeros(missing.shape, dtype=np.float32)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        for dy, dx in (
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ):
             shifted_valid = np.roll(valid, (dy, dx), axis=(0, 1))
             shifted_colors = np.roll(colors, (dy, dx), axis=(0, 1))
             if dy < 0:
@@ -119,28 +133,77 @@ def _nearest_background_fill(
         fallback = colors[valid].mean(axis=0) if valid.any() else np.zeros(3)
         colors[missing] = fallback
 
+    # Relax only the originally hidden region. This removes the directional
+    # bands produced by a single nearest-neighbour wave while keeping known
+    # background pixels untouched.
+    original_missing = np.asarray(mask, dtype=np.uint8) > 0
+    for _ in range(24):
+        neighbor_sum = np.zeros_like(colors)
+        neighbor_count = np.zeros(original_missing.shape, dtype=np.float32)
+        for dy, dx in (
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ):
+            shifted = np.roll(colors, (dy, dx), axis=(0, 1))
+            available = np.ones(original_missing.shape, dtype=np.float32)
+            if dy < 0:
+                available[dy:, :] = 0
+            elif dy > 0:
+                available[:dy, :] = 0
+            if dx < 0:
+                available[:, dx:] = 0
+            elif dx > 0:
+                available[:, :dx] = 0
+            neighbor_sum += shifted * available[..., None]
+            neighbor_count += available
+        relaxed = neighbor_sum / np.maximum(neighbor_count[..., None], 1)
+        colors[original_missing] = relaxed[original_missing]
+
     filled = Image.fromarray(
         np.clip(colors, 0, 255).astype(np.uint8),
-    ).filter(ImageFilter.GaussianBlur(radius=2.4))
+    ).filter(ImageFilter.GaussianBlur(radius=1.6))
     return filled.resize(image.size, Image.Resampling.LANCZOS)
 
 
 def build_layered_scene(
     image: Image.Image,
     depth: Image.Image,
+    foreground_mask: Image.Image | None = None,
 ) -> tuple[Image.Image, Image.Image]:
-    depth_values = np.asarray(depth.convert("L"), dtype=np.uint8)
-    threshold = max(
-        _otsu_threshold(depth_values),
-        int(np.percentile(depth_values, 70)),
-    )
-    hard_mask = Image.fromarray(
-        np.where(depth_values >= threshold, 255, 0).astype(np.uint8),
-    )
-    hard_mask = hard_mask.filter(ImageFilter.MaxFilter(7)).filter(
-        ImageFilter.MinFilter(5)
-    )
-    alpha = hard_mask.filter(ImageFilter.GaussianBlur(radius=1.25))
+    if foreground_mask is None:
+        depth_values = np.asarray(depth.convert("L"), dtype=np.uint8)
+        threshold = max(
+            _otsu_threshold(depth_values),
+            int(np.percentile(depth_values, 70)),
+        )
+        hard_mask = Image.fromarray(
+            np.where(depth_values >= threshold, 255, 0).astype(np.uint8),
+        )
+        hard_mask = hard_mask.filter(ImageFilter.MaxFilter(7)).filter(
+            ImageFilter.MinFilter(5)
+        )
+        alpha = hard_mask.filter(ImageFilter.GaussianBlur(radius=1.25))
+    else:
+        alpha = foreground_mask.convert("L")
+        if alpha.size != image.size:
+            alpha = alpha.resize(image.size, Image.Resampling.BILINEAR)
+        # Preserve soft fur/hair edges from the semantic mask while closing
+        # sub-pixel pinholes that would expose the repaired background.
+        hard_mask = alpha.point(lambda value: 255 if value >= 96 else 0)
+        hard_mask = hard_mask.filter(ImageFilter.MaxFilter(5)).filter(
+            ImageFilter.MinFilter(3)
+        )
+        alpha = Image.blend(
+            alpha,
+            hard_mask.filter(ImageFilter.GaussianBlur(radius=0.8)),
+            0.35,
+        )
 
     expanded_mask = hard_mask.filter(ImageFilter.MaxFilter(15))
     filled_background = _nearest_background_fill(image, expanded_mask)
@@ -472,6 +535,11 @@ class AssetRepository:
         if error is not None:
             assignments.append("error = ?")
             values.append(error)
+        elif status in {"queued", "running", "completed"}:
+            # A recovered/retried job must not keep the failure reason from its
+            # previous lifecycle.  Leaving it behind produces contradictory
+            # API state such as ``status=completed`` with a restart error.
+            assignments.append("error = NULL")
         values.append(job_id)
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -648,6 +716,7 @@ class SpatialSceneService:
         data_dir: Path,
         *,
         estimator: DepthEstimator | None = None,
+        segmenter: ForegroundSegmenter | None = None,
         max_workers: int = 1,
     ) -> None:
         self.data_dir = data_dir
@@ -659,13 +728,16 @@ class SpatialSceneService:
         os.chmod(self.asset_dir, 0o700)
         os.chmod(self.source_image_dir, 0o700)
         self.repository = AssetRepository(data_dir / "assets.sqlite3")
-        self._upgrade_existing_assets()
         self.estimator = estimator or DepthAnythingV2Estimator(
             os.getenv(
                 "SPATIAL_DEPTH_MODEL",
                 "depth-anything/Depth-Anything-V2-Small-hf",
             )
         )
+        self.segmenter = segmenter or AutoForegroundSegmenter(
+            data_dir / "native-cache"
+        )
+        self._upgrade_existing_assets()
         self.executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="spatial-scene",
@@ -741,6 +813,8 @@ class SpatialSceneService:
             if owner_id is not None and metadata.get("owner_id", "local") != owner_id:
                 raise AssetError("图片附件不属于当前用户。")
             return SourceImagePublic(**metadata)
+        except AssetError:
+            raise
         except (OSError, ValueError, TypeError) as exc:
             raise AssetError("图片附件信息无法读取，请重新选择。") from exc
 
@@ -815,15 +889,23 @@ class SpatialSceneService:
         directory: Path,
         image: Image.Image,
         depth: Image.Image,
-    ) -> tuple[Path, Path]:
-        background, foreground = build_layered_scene(image, depth)
+        mask_result: ForegroundMaskResult,
+    ) -> tuple[Path, Path, Path]:
+        background, foreground = build_layered_scene(
+            image,
+            depth,
+            mask_result.mask,
+        )
         background_path = directory / "background.webp"
         foreground_path = directory / "foreground.webp"
+        mask_path = directory / "foreground-mask.png"
         background.save(background_path, "WEBP", quality=92, method=6)
         foreground.save(foreground_path, "WEBP", quality=94, method=6)
+        mask_result.mask.save(mask_path, "PNG", optimize=True)
         os.chmod(background_path, 0o600)
         os.chmod(foreground_path, 0o600)
-        return background_path, foreground_path
+        os.chmod(mask_path, 0o600)
+        return background_path, foreground_path, mask_path
 
     def _upgrade_existing_assets(self) -> None:
         for row in self.repository.list_asset_rows(limit=500):
@@ -844,15 +926,28 @@ class SpatialSceneService:
                     image = source.convert("RGB")
                 with Image.open(depth_path) as depth_source:
                     depth = depth_source.convert("L")
-                background_path, foreground_path = self._write_layered_assets(
+                mask_result = self.segmenter.segment(
+                    image,
+                    depth,
+                    lambda _value, _stage, _message: None,
+                )
+                background_path, foreground_path, mask_path = self._write_layered_assets(
                     directory,
                     image,
                     depth,
+                    mask_result,
                 )
                 metadata.update(
                     {
                         "background_file": background_path.name,
                         "foreground_file": foreground_path.name,
+                        "foreground_mask_file": mask_path.name,
+                        "segmentation_model": mask_result.model_name,
+                        "segmentation_quality": mask_result.quality_score,
+                        "segmentation_warnings": list(mask_result.warnings),
+                        "recommended_strength": (
+                            0.26 if mask_result.quality_score >= 0.65 else 0.14
+                        ),
                     }
                 )
                 manifest_path = directory / str(
@@ -867,9 +962,15 @@ class SpatialSceneService:
                     "depth": depth_path.name,
                     "background": background_path.name,
                     "foreground": foreground_path.name,
+                    "foreground_mask": mask_path.name,
                     "near_is_white": True,
-                    "recommended_strength": 0.26,
                     "model": metadata.get("model_name"),
+                    "segmentation_model": mask_result.model_name,
+                    "segmentation_quality": mask_result.quality_score,
+                    "segmentation_warnings": list(mask_result.warnings),
+                    "recommended_strength": (
+                        0.26 if mask_result.quality_score >= 0.65 else 0.14
+                    ),
                 }
                 manifest_path.write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -1000,14 +1101,16 @@ class SpatialSceneService:
                 image = source.convert("RGB")
             depth = self.estimator.estimate(image, progress)
 
-            progress(76, "layering", "正在分离前景并补全遮挡背景…")
             depth_path = directory / "depth.png"
             depth.save(depth_path, "PNG", optimize=True)
             os.chmod(depth_path, 0o600)
-            background_path, foreground_path = self._write_layered_assets(
+            mask_result = self.segmenter.segment(image, depth, progress)
+            progress(76, "layering", "正在分离完整主体并补全遮挡背景…")
+            background_path, foreground_path, mask_path = self._write_layered_assets(
                 directory,
                 image,
                 depth,
+                mask_result,
             )
             progress(90, "packaging", "正在打包低功耗空间场景…")
             manifest_path = directory / "scene.json"
@@ -1020,9 +1123,15 @@ class SpatialSceneService:
                 "depth": "depth.png",
                 "background": background_path.name,
                 "foreground": foreground_path.name,
+                "foreground_mask": mask_path.name,
                 "near_is_white": True,
-                "recommended_strength": 0.26,
+                "recommended_strength": (
+                    0.26 if mask_result.quality_score >= 0.65 else 0.14
+                ),
                 "model": self.estimator.model_name,
+                "segmentation_model": mask_result.model_name,
+                "segmentation_quality": mask_result.quality_score,
+                "segmentation_warnings": list(mask_result.warnings),
             }
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -1039,8 +1148,15 @@ class SpatialSceneService:
                     "depth_file": depth_path.name,
                     "background_file": background_path.name,
                     "foreground_file": foreground_path.name,
+                    "foreground_mask_file": mask_path.name,
                     "manifest_file": manifest_path.name,
                     "model_name": self.estimator.model_name,
+                    "segmentation_model": mask_result.model_name,
+                    "segmentation_quality": mask_result.quality_score,
+                    "segmentation_warnings": list(mask_result.warnings),
+                    "recommended_strength": (
+                        0.26 if mask_result.quality_score >= 0.65 else 0.14
+                    ),
                 }
             )
             self.repository.complete_asset(asset_id, metadata)
@@ -1121,6 +1237,7 @@ class SpatialSceneService:
             depth_url=url_for("depth_file"),
             background_url=url_for("background_file"),
             foreground_url=url_for("foreground_file"),
+            foreground_mask_url=url_for("foreground_mask_file"),
             manifest_url=url_for("manifest_file"),
             result_url=url_for("result_file"),
             style_reference_urls=[
@@ -1129,6 +1246,10 @@ class SpatialSceneService:
                 if isinstance(filename, str)
             ],
             model_name=metadata.get("model_name"),
+            segmentation_model=metadata.get("segmentation_model"),
+            segmentation_quality=metadata.get("segmentation_quality"),
+            segmentation_warnings=metadata.get("segmentation_warnings", []),
+            recommended_strength=metadata.get("recommended_strength"),
             provider_name=metadata.get("provider_name"),
             parameters=metadata.get("parameters", {}),
             created_at=row["created_at"],
@@ -1299,6 +1420,13 @@ def register_asset_tools(
                     "name": asset.name,
                     "kind": asset.kind,
                     "status": asset.status,
+                    "thumbnail_url": (
+                        asset.preview_url
+                        or asset.result_url
+                        or asset.source_url
+                    ),
+                    "width": asset.width,
+                    "height": asset.height,
                     "created_at": asset.created_at.isoformat(),
                 }
                 for asset in assets

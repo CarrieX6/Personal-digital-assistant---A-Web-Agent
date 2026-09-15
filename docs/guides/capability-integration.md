@@ -50,6 +50,17 @@ docs/experiments/<id>.md
    长连接回调内同步跑模型。
 9. 更新 `docs/project-board.md`、功能文档、实验记录和 README；标明事实、未验证项和
    硬件基线，不能把预览 Provider 写成真实模型效果。
+10. 在第二台干净电脑验证依赖、模型/Provider、密钥、网络、渠道和回滚；安装步骤不得
+    依赖开发机缓存、权重或系统钥匙串。
+
+图片、2.5D、视频或 3D 能力接入飞书时，继续执行
+[飞书图片与 2.5D 能力接入 SOP](feishu-media-capability-sop.md)，不要在渠道 Handler
+内增加新的模型分支或依赖图片顺序猜测角色。
+
+远端训练型能力还必须把用户可见 `dataset_id` 与服务端路径分开；LLM、飞书和 Web
+请求不得提交任意绝对路径。Flux-GS 的实现示例见
+[Flux-GS Capability 接入与部署](flux-gs-capability.md)：主进程只注册工具和 Provider，
+CUDA 训练留在隔离服务，创建任务使用人工审批与幂等键。
 
 ## 必须通过的验收
 

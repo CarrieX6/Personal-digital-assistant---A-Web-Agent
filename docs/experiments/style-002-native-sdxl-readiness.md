@@ -1,7 +1,7 @@
 # `STYLE-EXP-002` 本机 SDXL Provider 准备与失败关闭
 
-模板作者：**Zhuofan Xie**
-实验作者：**Ma Xianggang**
+实验模板：**项目统一实验模板**
+实验作者：**Xianggang Ma**
 实验日期：2026-08-13
 
 | 字段 | 内容 |
@@ -9,7 +9,7 @@
 | 任务 ID | `STYLE-001` |
 | 实验 ID | `STYLE-EXP-002` |
 | 关联调研 | [图片风格化 Skill 集成说明](../photo-style-transfer.md) |
-| 负责人 | Ma Xianggang |
+| 负责人 | Xianggang Ma |
 | Git Commit | 尚未提交；实验基线 `6b87915c05981c42a26b58ca7b440ed0260c3783` |
 
 ## 1. 目的与假设
@@ -114,4 +114,4 @@ python backend/scripts/prepare_photo_style_models.py \
 
 ---
 
-Copyright © 2026 Ma Xianggang. All rights reserved.
+Copyright © 2026 Xianggang Ma. All rights reserved.

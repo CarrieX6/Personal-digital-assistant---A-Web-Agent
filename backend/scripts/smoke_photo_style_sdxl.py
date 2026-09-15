@@ -73,6 +73,11 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--gate", type=Path, default=DEFAULT_GATE)
     parser.add_argument("--model-lock", type=Path)
+    parser.add_argument(
+        "--accelerator",
+        choices=("auto", "cuda", "mps"),
+        default="auto",
+    )
     parser.add_argument("--enable-lcm-preview", action="store_true")
     parser.add_argument("--verify-model-hashes", action="store_true")
     args = parser.parse_args()
@@ -86,6 +91,7 @@ def main() -> None:
         lock_path=args.model_lock or args.model_root / "model-lock.json",
         lcm_preview_enabled=args.enable_lcm_preview,
         verify_hashes=args.verify_model_hashes,
+        accelerator=args.accelerator,
     )
     try:
         status = provider.status()

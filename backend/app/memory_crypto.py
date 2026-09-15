@@ -67,6 +67,27 @@ _KEY_LOCK = threading.Lock()
 _KEY_CACHE: dict[str, bytes] = {}
 
 
+def _memory_keyring_service() -> str:
+    """Return a stable service name that survives moving the checkout."""
+
+    workspace_id = os.getenv(
+        "AGENT_WORKSPACE_ID",
+        "personal-digital-assistant",
+    ).strip()
+    if not workspace_id:
+        raise MemoryEncryptionError("AGENT_WORKSPACE_ID 不能为空。")
+    digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:16]
+    return f"agent-lab-memory-{digest}"
+
+
+def _legacy_memory_keyring_service() -> str:
+    """Service name used before stable workspace identities were introduced."""
+
+    workspace = str(Path(__file__).resolve().parents[2])
+    workspace_id = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:12]
+    return f"agent-lab-{workspace_id}"
+
+
 def load_memory_key(database_path: Path) -> bytes:
     """Load a workspace memory key, preferring the operating-system keyring."""
 
@@ -84,9 +105,8 @@ def load_memory_key(database_path: Path) -> bytes:
             )
         return key
 
-    workspace = str(Path(__file__).resolve().parents[2])
-    workspace_id = hashlib.sha256(workspace.encode("utf-8")).hexdigest()[:12]
-    service = f"agent-lab-{workspace_id}"
+    service = _memory_keyring_service()
+    legacy_service = _legacy_memory_keyring_service()
     account = "memory-encryption-v1"
     cache_key = f"{service}:{account}"
     fallback_cache_key = f"file:{database_path.resolve()}"
@@ -97,10 +117,17 @@ def load_memory_key(database_path: Path) -> bytes:
         fallback_cached = _KEY_CACHE.get(fallback_cache_key)
         if fallback_cached is not None:
             return fallback_cached
-        try:
-            encoded = keyring.get_password(service, account)
-        except (KeyringError, RuntimeError):
-            encoded = None
+        encoded = None
+        source_service = service
+        for candidate_service in dict.fromkeys((service, legacy_service)):
+            try:
+                encoded = keyring.get_password(candidate_service, account)
+            except (KeyringError, RuntimeError):
+                encoded = None
+                break
+            if encoded:
+                source_service = candidate_service
+                break
         if encoded:
             try:
                 key = base64.urlsafe_b64decode(encoded.encode("ascii"))
@@ -108,6 +135,11 @@ def load_memory_key(database_path: Path) -> bytes:
                 raise MemoryEncryptionError("系统钥匙串中的记忆密钥已损坏。") from exc
             if len(key) != 32:
                 raise MemoryEncryptionError("系统钥匙串中的记忆密钥长度无效。")
+            if source_service != service:
+                try:
+                    keyring.set_password(service, account, encoded)
+                except (KeyringError, RuntimeError):
+                    pass
             _KEY_CACHE[cache_key] = key
             return key
 

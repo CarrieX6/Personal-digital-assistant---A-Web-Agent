@@ -29,12 +29,14 @@ Demo。
 | Web Agent 对话工作台 | MVP | 主页为图文对话和 Root 审批队列；会话、Run 与 LangGraph 轨迹由 SQLite 持久化 |
 | LLM 供应商配置 | MVP | 预置 DeepSeek、OpenAI、Qwen、GLM 和自定义兼容接口；可用性待逐项实测 |
 | 本地工具注册表 | MVP | 文本、资产、任务、空间照片和图片个性化工具；支持 Schema、Capability Manifest、风险等级、审批与幂等声明 |
-| 本地资产与异步任务 | 局部实现 | SQLite 索引、文件资产、任务进度；目前仅空间照片专用且未验证重启恢复 |
+| 本地资产与异步任务 | 局部实现 | SQLite 索引、文件资产、任务进度；空间照片和图片风格化已接入，通用恢复/通知仍待抽象 |
 | 空间照片 | MVP 已完成 | 单图深度估计、双层 LDI、Three.js 视差 |
-| 飞书聊天入口 | 文本闭环已实测，图片权限待用户发布应用版本 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载 |
-| 结果回传适配 | 局部实现 | 富文本、状态、功能卡片、封面和短时签名 Viewer；局域网已实现，公网 HTTPS 测试隧道需用户显式启用，固定域名待实现 |
+| 飞书聊天入口 | 文本已实测、富媒体自动化闭环已完成，待真实租户回归 | 长连接、keepalive/重连、白名单、持久去重、功能卡片、双路径图片下载、owner/chat 隔离多图收集 |
+| 身份与工作区绑定 | P0 基础已实现 | 一个飞书 Open ID 一个独立工作区，绑定当前本机节点；Root 可查看和启停，OAuth 用户门户与多电脑路由待实现 |
+| 结果回传适配 | 局部实现 | 富文本、状态、2.5D 封面 + Viewer 卡片、风格化预览与下载文件、两类失败重试；Outbox 与固定公网域名待实现 |
 | 会话与长期记忆 | 增强 MVP | SQLite 按用户/渠道/会话隔离；Run 与用户事件原子落库，崩溃后按 Run 独立 Checkpoint 对账恢复；上下文使用真实本地 Tokenizer 和强制 Schema 的结构化滚动摘要，正则抽取仅作可观测兜底；长期 claim 与 evidence 分表、时态化、加密并支持审计；已加入敏感召回硬门禁、词法/槽位/语义 RRF+MMR 混合召回、离线评测和效用反馈 |
 | 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
+| Flux-GS 多视角 3D | 适配层已合入、真实 GPU 待部署 | 已注册数据集校验、训练创建、状态查询，并接入统一飞书功能菜单；训练仍需独立 Linux + NVIDIA GPU 服务，单图转 3D 前置链路尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
 ## 总体架构
@@ -78,6 +80,7 @@ Schema 校验，执行后观察结果，模型可以继续规划或完成；代�
 - 接收本地图片资产 ID，创建空间照片任务。
 - 使用内容图与一至三张参考图创建图片个性化任务（默认连接独立 SDXL + IP-Adapter 服务）。
 - 使用兼容 Chat Completions `image_url` 的多模态模型进行图片识别、描述、OCR 与连续追问。
+- 使用受控 `dataset_id` 校验 COLMAP 数据集、经人工审批提交 Flux-GS GPU 训练，并查询 WebGL 3D 预览链接。
 
 上传图片先在本机校验并转换为受限尺寸的 WebP。仅当用户进行普通看图问答时，图片
 才会作为当前请求的多模态输入发送给已配置模型；视觉输入不会写入 LangGraph
@@ -97,7 +100,8 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 
 1. 校验 JPG、PNG 或 WebP，移除 EXIF，最长边缩至 1600px；
 2. 使用 `Depth Anything V2 Small` 在本机估计相对深度；
-3. 根据深度生成前景 Alpha 和补全后的背景；
+3. 使用主体分割保护完整前景：macOS 14+ 默认 Apple Vision，Windows/Linux 可用
+   BiRefNet，本地语义分割失败后才降级为深度蒙版；
 4. 输出原图、深度图、前景、背景和 `scene.json`；
 5. Three.js 使用双层平面与小范围相机移动产生运动视差；
 6. 生成结果写入本地资产库，也可以由 Agent 直接调用。
@@ -107,7 +111,7 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 
 ## 外部聊天控制
 
-### 第一阶段：飞书文本闭环
+### 第一阶段：飞书文本与媒体闭环
 
 当前已经使用独立的 `lark-channel-sdk` 实现飞书企业自建应用长连接：
 
@@ -116,7 +120,8 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 - 使用飞书消息 ID 和本地 SQLite 双层去重；
 - 仅允许白名单 Open ID 调用，群聊默认关闭；
 - 回调快速转入后台执行，并向原消息回复“已收到”和最终文本；
-- 真实飞书应用的长连接和文本消息已经接通；断线恢复与媒体权限仍在继续实测。
+- 真实飞书应用的长连接和文本消息已经接通；媒体闭环已通过 Fake Channel 自动化测试，
+  仍需在已发布权限的真实租户回归。
 
 单张图片消息已接入本地空间照片能力：机器人下载原消息中的图片资源，复用本地图片
 安全校验并创建空间照片任务；完成后回复任务状态、封面图和同局域网短时 Viewer
@@ -126,15 +131,27 @@ WebP 作为文件发送；直接发送多张图片时也会自动创建风格化
 任务。图片随附文字、随后单独发送的文字，以及“开始风格化：……”中的文字都会合并
 为模型的补充描述。草稿按飞书会话和用户隔离、保存 30 分钟，可点击“开始生成”或
 发送“开始风格化”；完成后机器人同时返回预览图和可下载的 WebP 原始结果文件。
-发送“取消风格化”会清理临时图片。Agent 最终回答使用飞书
+发送“取消风格化”会清理临时图片。空间照片与图片风格化失败时均可复用本机规范化
+输入进行幂等重试。Agent 最终回答使用飞书
 富文本消息，首次对话或发送“菜单”会返回功能卡片，Web 控制台也会同步最近的渠道
 收发记录。手机和电脑处于同一局域网时，可点击签名链接全屏拖动；若飞书内置浏览器
 阻止明文局域网 HTTP，可显式启动只暴露签名 Viewer 的临时 HTTPS Tunnel。固定域名、
 用户身份认证与链接撤销仍需下一阶段完成。
 
+飞书唯一的统一功能菜单现已加入“3D 场景建模”入口；点击后通过普通消息返回独立 GPU
+服务状态、数据集格式和调用方式，不再创建第二张功能卡。Flux-GS 与单图空间照片不同：
+上游实现要求预先完成 COLMAP 多视角重建，并会消耗较长 GPU 时间，所以训练创建属于
+`external_write`，必须人工审批；飞书只接收受控
+`dataset_id`，不会把聊天中的任意路径或命令交给服务器执行。完成后的 `demo_url` 可在
+手机浏览器打开 WebGL 预览。当前版本尚未实现飞书直接上传大型 COLMAP 压缩包和训练
+完成后的持久化 Outbox 通知，也没有实现“单张图片→合成多视角→估计相机→Flux-GS”
+前置流水线，这三项已进入后续计划。
+
 macOS 与 Windows 的一键安装/启动方式见
 [本地部署指南](docs/guides/deployment.md)，新能力接入约定见
 [Capability 接入指南](docs/guides/capability-integration.md)。
+Flux-GS 的独立 GPU 服务部署、数据集映射、许可门禁和飞书调用见
+[Flux-GS Capability 接入与部署](docs/guides/flux-gs-capability.md)。
 
 ### 第二阶段：结果预览
 
@@ -179,6 +196,7 @@ backend/
     assets.py                 深度模型、任务、资产与文件安全
     channel_settings.py       飞书配置与 App Secret 安全存储
     feishu.py                 长连接、鉴权、去重与 Agent 消息闭环
+    flux_gs.py                Flux-GS Provider、受控数据集 ID、工具与管理 API
     settings.py               模型配置与密钥安全存储
     main.py                   FastAPI 路由
   tests/                      后端测试
@@ -205,9 +223,13 @@ tests/                        前端渲染测试
 
 ```bash
 chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh
+./scripts/setup.sh --accept-model-licenses
 ./scripts/start.sh
 ```
+
+默认安装档位为 `complete + real`：会安装空间主体分割与本地语义记忆，并根据平台准备
+真实 SDXL + IP-Adapter。完整前置条件、模型许可证、Windows Docker GPU Worker、数据
+备份/恢复和验收见[完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)。
 
 ### Windows 10 / 11 一键启动
 
@@ -215,7 +237,7 @@ chmod +x scripts/setup.sh scripts/start.sh
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
+.\scripts\setup.ps1 --accept-model-licenses
 .\scripts\start.ps1
 ```
 
@@ -230,6 +252,23 @@ Windows 机器上同时运行 Web Agent 与该服务，使主项目通过
 Worker。模型许可、约 9.84 GiB 权重准备和 Docker API + Windows Host GPU Worker
 步骤以该仓库 README 与 `docs/docker.md` 为准；服务健康检查未通过时，本项目不会
 静默降级为 CPU 调色。
+
+统一 `setup` 默认部署真实模型。以下 `deploy-test` 只保留给显式的开发链路测试，不是
+默认安装步骤，也不会冒充真实效果：
+
+```bash
+./scripts/photo-style.sh doctor
+./scripts/photo-style.sh deploy-test
+./scripts/photo-style.sh status --json
+```
+
+Windows 使用对应的 `.\scripts\photo-style.ps1`。真实模型准备必须先运行 `plan-real`
+审阅约 9.84 GiB 固定权重及许可证，再在 Windows NVIDIA 电脑显式执行
+`prepare-windows-gpu --accept-model-licenses`，或在 Apple Silicon Mac 执行
+`prepare-macos-mps --accept-model-licenses`。MPS 当前属于工程验证路径，必须继续完成固定
+样本、稳定性、统一内存、功耗和人工质量门禁，不能继承 Windows CUDA 的验证结论。
+远程 GPU 可用 `configure-remote --url https://...` 写入不含密钥的 Provider 配置。
+完整步骤见[图片风格化独立服务部署与迁移](docs/guides/photo-style-deployment.md)。
 
 ### 手机临时公网 HTTPS 预览
 
@@ -255,7 +294,21 @@ uvicorn backend.app.main:app --reload --port 8000
 
 API 文档：`http://127.0.0.1:8000/docs`
 
-首次生成空间照片会下载约 100MB 的深度模型，之后可以离线推理。
+默认完整安装会预下载并哈希锁定 Depth Anything V2 Small 与 BiRefNet，运行时使用本地
+只读路径。使用轻量安装并跳过空间模型时，首次生成才会联网下载。
+
+### 跨平台主体分割
+
+如果要在 Windows 或非 macOS 14+ 设备上保持人物、宠物等主体完整，建议额外安装
+BiRefNet 分割依赖：
+
+```bash
+python -m pip install -r backend/requirements-segmentation.txt
+```
+
+默认 `SPATIAL_FOREGROUND_SEGMENTER=auto` 会按 Apple Vision → BiRefNet → 深度蒙版
+降级顺序执行。离线部署时先预下载 `ZhengPeng7/BiRefNet` 权重，再设置
+`SPATIAL_BIREFNET_LOCAL_FILES_ONLY=true`。
 
 ### 本地长期记忆 Embedding
 
@@ -344,7 +397,7 @@ Demo 模式会分别显示，不会再静默混用。连接测试目前不验证
 如使用国际版 Lark，在 UI 中把服务区域切换为 Lark。群聊默认不接收；启用后也只有
 白名单用户通过 `@机器人` 才能触发。当前 `CHANNEL-002` 支持单图自动生成空间照片，
 也支持会话式收集一张内容图和一至三张参考图完成图片风格化，并返回预览与下载文件；
-普通文件输入、演示视频和通用多图任务仍未实现。
+普通文件输入、演示视频、持久化 Outbox 和固定公网 Viewer 尚未实现。
 
 Web 控制台是运行电脑上的 Root 管理员视图，可以查看本机记录的全部 Web 与飞书
 会话；普通飞书用户只应使用自己所在的聊天，不应获得 Web 控制台访问权。
@@ -412,11 +465,11 @@ Use $team-git-workflow in English to prepare this change for review
 
 ## 近期路线图
 
-1. 使用真实飞书应用验收长连接、断线重连、权限和文本闭环；
+1. 使用真实飞书应用验收图片下载、风格化多图收集、结果图片、Viewer 卡片和断线重连；
 2. 从当前飞书实现抽象可复用的 `ChannelAdapter` 和统一消息数据模型；
 3. 增加审计、速率限制、审批过期和费用预算；
-4. 将 Web/飞书分离的消息镜像迁移到统一事件模型，并补充跨渠道身份绑定验收；
-5. 实现空间照片缩略图、演示视频和签名预览链接；
+4. 将 Web/飞书消息镜像迁移到统一事件模型，并补充跨渠道身份绑定验收；
+5. 增加空间照片 MP4 降级预览、Viewer audience/撤销和固定 HTTPS 域名；
 6. 建立 Capability Manifest、安装器和模型依赖隔离；
 7. 接入企业微信或微信公众号；
 8. 扩展虚拟试衣、虚拟宠物和 3DGS 等本地功能。
@@ -425,6 +478,7 @@ Use $team-git-workflow in English to prepare this change for review
 
 - [调研与实现中心](docs/project-board.md)
 - [文档中心](docs/README.md)
+- [完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)
 - [从零到可运行个人数字助手](docs/learning/implementation-roadmap.md)
 - [调研证据与文档维护方法](docs/learning/research-quality.md)
 - [多人 Git 协作 Skill](.codex/skills/team-git-workflow/SKILL.md)

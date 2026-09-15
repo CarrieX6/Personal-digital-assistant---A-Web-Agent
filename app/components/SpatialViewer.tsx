@@ -9,6 +9,7 @@ type SpatialViewerProps = {
   backgroundUrl?: string;
   foregroundUrl?: string;
   title: string;
+  recommendedStrength?: number | null;
 };
 
 type LayerSet = {
@@ -30,6 +31,7 @@ export function SpatialViewer({
   backgroundUrl,
   foregroundUrl,
   title,
+  recommendedStrength,
 }: SpatialViewerProps) {
   const viewerRootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -37,9 +39,14 @@ export function SpatialViewer({
   const renderRef = useRef<(() => void) | null>(null);
   const demoRef = useRef<(() => void) | null>(null);
   const syncStrengthRef = useRef<(value: number) => void>(() => undefined);
-  const strengthRef = useRef(DEFAULT_STRENGTH);
+  const initialStrength = THREE.MathUtils.clamp(
+    recommendedStrength ?? DEFAULT_STRENGTH,
+    0.04,
+    0.46,
+  );
+  const strengthRef = useRef(initialStrength);
   const showDepthRef = useRef(false);
-  const [strength, setStrength] = useState(DEFAULT_STRENGTH);
+  const [strength, setStrength] = useState(initialStrength);
   const [showDepth, setShowDepth] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [renderError, setRenderError] = useState("");

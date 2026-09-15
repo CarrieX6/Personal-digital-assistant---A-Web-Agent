@@ -359,6 +359,38 @@ class FeishuConnectionTestResponse(BaseModel):
     message: str
 
 
+class IdentityBindingPublic(BaseModel):
+    id: str
+    provider: Literal["feishu"]
+    app_id: str
+    external_id: str
+    workspace_id: str
+    workspace_name: str
+    device_id: str
+    device_name: str
+    status: Literal["active", "suspended", "revoked"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class IdentityBindingListResponse(BaseModel):
+    bindings: list[IdentityBindingPublic]
+
+
+class IdentityBindingCreateRequest(BaseModel):
+    app_id: str | None = Field(default=None, max_length=100)
+    open_id: str = Field(min_length=1, max_length=160)
+    workspace_name: str | None = Field(default=None, max_length=80)
+
+
+class IdentityBindingStatusUpdate(BaseModel):
+    status: Literal["active", "suspended", "revoked"]
+
+
+class IdentityWorkspaceRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class ChannelMessagePublic(BaseModel):
     id: int
     platform: Literal["feishu"]
@@ -391,10 +423,15 @@ class AssetPublic(BaseModel):
     depth_url: str | None = None
     background_url: str | None = None
     foreground_url: str | None = None
+    foreground_mask_url: str | None = None
     manifest_url: str | None = None
     result_url: str | None = None
     style_reference_urls: list[str] = Field(default_factory=list)
     model_name: str | None = None
+    segmentation_model: str | None = None
+    segmentation_quality: float | None = Field(default=None, ge=0, le=1)
+    segmentation_warnings: list[str] = Field(default_factory=list)
+    recommended_strength: float | None = Field(default=None, ge=0, le=1)
     provider_name: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

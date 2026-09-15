@@ -130,7 +130,10 @@ def lcm_scheduler_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def provider_gate_local_validation_status(gate_path: Path) -> str:
+def provider_gate_local_validation_status(
+    gate_path: Path,
+    accelerator: str | None = None,
+) -> str:
     try:
         payload = json.loads(gate_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -139,7 +142,24 @@ def provider_gate_local_validation_status(gate_path: Path) -> str:
     if not isinstance(local_validation, dict):
         return "pending"
     status = local_validation.get("status")
-    return status if status == "engineering_smoke_passed" else "pending"
+    if status != "engineering_smoke_passed":
+        return "pending"
+    if accelerator is None:
+        return status
+    validated_accelerator = str(local_validation.get("accelerator") or "").lower()
+    if not validated_accelerator:
+        runtime = local_validation.get("runtime")
+        torch_version = (
+            str(runtime.get("torch") or "").lower()
+            if isinstance(runtime, dict)
+            else ""
+        )
+        device = str(local_validation.get("device") or "").lower()
+        if "nvidia" in device or "+cu" in torch_version:
+            validated_accelerator = "cuda"
+        elif "apple" in device or "mps" in torch_version:
+            validated_accelerator = "mps"
+    return status if validated_accelerator == accelerator else "pending"
 
 
 def style_layer_scale(scale: float) -> dict[str, dict[str, list[float]]]:
@@ -149,14 +169,27 @@ def style_layer_scale(scale: float) -> dict[str, dict[str, list[float]]]:
     }
 
 
-def probe_cuda_runtime() -> tuple[bool, int | None]:
-    """Probe Torch/CUDA in a short-lived process so importing Torch cannot bloat the API."""
+def probe_accelerator_runtime(requested: str = "auto") -> dict[str, Any]:
+    """Probe Torch accelerators without importing Torch into the API process."""
+    if requested not in {"auto", "cuda", "mps"}:
+        raise ValueError("accelerator must be auto, cuda or mps")
     script = (
         "import json, torch; "
-        "available = bool(torch.cuda.is_available()); "
-        "total = (round(torch.cuda.get_device_properties(0).total_memory / 1024**2) "
-        "if available else None); "
-        "print(json.dumps({'available': available, 'total_mib': total}))"
+        "cuda = bool(torch.cuda.is_available()); "
+        "mps_backend = getattr(torch.backends, 'mps', None); "
+        "mps = bool(mps_backend is not None and mps_backend.is_available()); "
+        "cuda_total = (round(torch.cuda.get_device_properties(0).total_memory / 1024**2) "
+        "if cuda else None); "
+        "mps_api = getattr(torch, 'mps', None); "
+        "mps_total_fn = getattr(mps_api, 'recommended_max_memory', None); "
+        "mps_total = (round(mps_total_fn() / 1024**2) if callable(mps_total_fn) else None); "
+        f"requested = {requested!r}; "
+        "resolved = ('cuda' if cuda else ('mps' if mps else None)) if requested == 'auto' "
+        "else (requested if (cuda if requested == 'cuda' else mps) else None); "
+        "print(json.dumps({'requested': requested, 'resolved': resolved, "
+        "'available': resolved is not None, 'cuda_available': cuda, "
+        "'mps_available': mps, 'memory_mib': cuda_total if resolved == 'cuda' "
+        "else (mps_total if resolved == 'mps' else None)}))"
     )
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
@@ -171,13 +204,72 @@ def probe_cuda_runtime() -> tuple[bool, int | None]:
             creationflags=creationflags,
         )
         if completed.returncode != 0:
-            return False, None
+            return {
+                "requested": requested,
+                "resolved": None,
+                "available": False,
+                "cuda_available": False,
+                "mps_available": False,
+                "memory_mib": None,
+            }
         payload = json.loads(completed.stdout.strip().splitlines()[-1])
-        available = bool(payload.get("available"))
-        total_mib = payload.get("total_mib")
-        return available, int(total_mib) if total_mib is not None else None
+        return payload if isinstance(payload, dict) else {}
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, IndexError):
-        return False, None
+        return {
+            "requested": requested,
+            "resolved": None,
+            "available": False,
+            "cuda_available": False,
+            "mps_available": False,
+            "memory_mib": None,
+        }
+
+
+def probe_cuda_runtime() -> tuple[bool, int | None]:
+    """Backward-compatible CUDA-only probe used by older diagnostics."""
+    payload = probe_accelerator_runtime("cuda")
+    memory_mib = payload.get("memory_mib")
+    return bool(payload.get("available")), (
+        int(memory_mib) if memory_mib is not None else None
+    )
+
+
+def resolve_torch_accelerator(torch_module: Any, requested: str) -> str | None:
+    if requested not in {"auto", "cuda", "mps"}:
+        return None
+    cuda_available = bool(torch_module.cuda.is_available())
+    mps_backend = getattr(torch_module.backends, "mps", None)
+    mps_available = bool(mps_backend is not None and mps_backend.is_available())
+    if requested == "cuda":
+        return "cuda" if cuda_available else None
+    if requested == "mps":
+        return "mps" if mps_available else None
+    if cuda_available:
+        return "cuda"
+    if mps_available:
+        return "mps"
+    return None
+
+
+def accelerator_memory_mib(torch_module: Any, accelerator: str) -> int | None:
+    if accelerator == "cuda":
+        return round(torch_module.cuda.max_memory_reserved() / 1024**2)
+    if accelerator == "mps":
+        memory = getattr(torch_module, "mps", None)
+        allocated = getattr(memory, "driver_allocated_memory", None)
+        if callable(allocated):
+            return round(allocated() / 1024**2)
+    return None
+
+
+def is_accelerator_oom(torch_module: Any, accelerator: str, exc: Exception) -> bool:
+    api = (
+        torch_module.cuda
+        if accelerator == "cuda"
+        else getattr(torch_module, "mps", None)
+    )
+    error_type = getattr(api, "OutOfMemoryError", None)
+    return isinstance(error_type, type) and isinstance(exc, error_type)
 
 
 def map_native_parameters(parameters: StyleParameters) -> dict[str, Any]:
@@ -329,7 +421,7 @@ def harmonize_style_palette(
 
 
 class NativeSDXLStyleProvider:
-    """Pinned, local-only SDXL img2img + IP-Adapter provider for an 8 GB GPU."""
+    """Pinned local SDXL img2img + IP-Adapter provider for CUDA or Apple MPS."""
 
     name = "sdxl_ip_adapter_8gb_v1"
     model_name = "Stable Diffusion XL 1.0 + IP-Adapter SDXL ViT-H"
@@ -346,7 +438,11 @@ class NativeSDXLStyleProvider:
         verify_hashes: bool = False,
         embedding_cache_entries: int = 16,
         unload_after_generation: bool = True,
+        accelerator: str = "auto",
     ) -> None:
+        normalized_accelerator = accelerator.strip().lower()
+        if normalized_accelerator not in {"auto", "cuda", "mps"}:
+            raise ValueError("accelerator must be auto, cuda or mps")
         self.model_root = model_root
         self.manifest_path = manifest_path
         self.gate_path = gate_path
@@ -355,6 +451,8 @@ class NativeSDXLStyleProvider:
         self.verify_hashes = verify_hashes
         self.embedding_cache_entries = max(1, min(128, embedding_cache_entries))
         self.unload_after_generation = unload_after_generation
+        self.accelerator = normalized_accelerator
+        self._resolved_accelerator: str | None = None
         self._pipeline: Any | None = None
         self._torch: Any | None = None
         self._manifest: ModelManifest | None = None
@@ -385,10 +483,16 @@ class NativeSDXLStyleProvider:
             )
         except (OSError, ValueError, TypeError) as exc:
             gate_errors.append(f"manifest invalid: {type(exc).__name__}")
-        cuda_available = False
-        cuda_memory_mib: int | None = None
+        accelerator_status: dict[str, Any] = {
+            "requested": self.accelerator,
+            "resolved": None,
+            "available": False,
+            "cuda_available": False,
+            "mps_available": False,
+            "memory_mib": None,
+        }
         if importlib.util.find_spec("torch") is not None:
-            cuda_available, cuda_memory_mib = probe_cuda_runtime()
+            accelerator_status = probe_accelerator_runtime(self.accelerator)
         dependencies_ready = all(
             importlib.util.find_spec(module) is not None
             for module in ("torch", "accelerate", "diffusers", "peft", "safetensors")
@@ -398,7 +502,12 @@ class NativeSDXLStyleProvider:
             not gate_errors
             and models_ready
             and dependencies_ready
-            and cuda_available
+            and bool(accelerator_status.get("available"))
+        )
+        resolved_accelerator = accelerator_status.get("resolved")
+        local_validation = provider_gate_local_validation_status(
+            self.gate_path,
+            str(resolved_accelerator) if resolved_accelerator else None,
         )
         return {
             "name": self.name,
@@ -407,13 +516,22 @@ class NativeSDXLStyleProvider:
             "ready": ready,
             "models_ready": models_ready,
             "dependencies_ready": dependencies_ready,
-            "cuda_available": cuda_available,
-            "cuda_memory_mib": cuda_memory_mib,
+            "accelerator_requested": self.accelerator,
+            "accelerator": resolved_accelerator,
+            "accelerator_available": bool(accelerator_status.get("available")),
+            "accelerator_memory_mib": accelerator_status.get("memory_mib"),
+            "cuda_available": bool(accelerator_status.get("cuda_available")),
+            "cuda_memory_mib": (
+                accelerator_status.get("memory_mib")
+                if resolved_accelerator == "cuda"
+                else None
+            ),
+            "mps_available": bool(accelerator_status.get("mps_available")),
+            "accelerator_probe": "isolated_process",
             "cuda_probe": "isolated_process",
             "gate": "accepted_upstream" if not gate_errors else "unverified",
-            "local_quality_validation": (
-                provider_gate_local_validation_status(self.gate_path)
-            ),
+            "local_quality_validation": local_validation,
+            "production_quality": False,
             "lcm_preview_enabled": self.lcm_preview_enabled,
             "lcm_loaded": self._lcm_loaded,
             "load_seconds": self._load_seconds,
@@ -474,6 +592,7 @@ class NativeSDXLStyleProvider:
                             "lcm_preview_enabled": self.lcm_preview_enabled,
                             "verify_hashes": self.verify_hashes,
                             "embedding_cache_entries": self.embedding_cache_entries,
+                            "accelerator": self.accelerator,
                             "content_path": str(content_path),
                             "style_paths": [str(path) for path in style_paths],
                             "result_path": str(result_path),
@@ -625,7 +744,11 @@ class NativeSDXLStyleProvider:
                 style_layer_scale(float(mapped["style_scale"]))
             )
             try:
-                progress(30, "encoding_style", "正在编码风格参考并准备 SDXL 潜空间。")
+                progress(
+                    30,
+                    "encoding_style",
+                    "正在编码风格参考并准备 SDXL 潜空间。",
+                )
                 embeddings = self._weighted_style_embeddings(
                     prepared_styles,
                     do_classifier_free_guidance=guidance > 1.0,
@@ -648,7 +771,10 @@ class NativeSDXLStyleProvider:
                     )
                     return callback_kwargs
 
-                if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                if (
+                    self._resolved_accelerator == "cuda"
+                    and hasattr(torch.cuda, "reset_peak_memory_stats")
+                ):
                     torch.cuda.reset_peak_memory_stats()
                 started = time.perf_counter()
                 generator = torch.Generator(device="cpu").manual_seed(
@@ -676,7 +802,10 @@ class NativeSDXLStyleProvider:
                     prepared_styles,
                     parameters,
                 )
-                peak_vram_mib = round(torch.cuda.max_memory_reserved() / 1024**2)
+                accelerator_memory = accelerator_memory_mib(
+                    torch,
+                    self._resolved_accelerator or "cpu",
+                )
                 manifest = self._require_manifest()
                 return ProviderResult(
                     image=generated,
@@ -688,7 +817,10 @@ class NativeSDXLStyleProvider:
                         "production_quality": False,
                         "quality_gate": "accepted_upstream",
                         "local_quality_validation": (
-                            provider_gate_local_validation_status(self.gate_path)
+                            provider_gate_local_validation_status(
+                                self.gate_path,
+                                self._resolved_accelerator,
+                            )
                         ),
                         "model_download_required": True,
                         "model_versions": {
@@ -727,9 +859,22 @@ class NativeSDXLStyleProvider:
                                 time.perf_counter() - started,
                                 3,
                             ),
-                            "peak_reserved_vram_mib": peak_vram_mib,
+                            "accelerator": self._resolved_accelerator,
+                            "accelerator_memory_mib": accelerator_memory,
+                            "peak_reserved_vram_mib": (
+                                accelerator_memory
+                                if self._resolved_accelerator == "cuda"
+                                else None
+                            ),
                             "model_cpu_offload_sequence": (
                                 "text_encoder->text_encoder_2->unet->vae"
+                                if self._resolved_accelerator == "cuda"
+                                else None
+                            ),
+                            "mps_cpu_fallback_enabled": (
+                                os.getenv("PYTORCH_ENABLE_MPS_FALLBACK", "0") == "1"
+                                if self._resolved_accelerator == "mps"
+                                else False
                             ),
                             "unload_after_generation": self.unload_after_generation,
                         },
@@ -739,10 +884,15 @@ class NativeSDXLStyleProvider:
             except AssetError:
                 raise
             except Exception as exc:
-                if isinstance(exc, torch.cuda.OutOfMemoryError):
-                    torch.cuda.empty_cache()
+                accelerator = self._resolved_accelerator or "cpu"
+                if is_accelerator_oom(torch, accelerator, exc):
+                    if accelerator == "cuda":
+                        torch.cuda.empty_cache()
+                    elif accelerator == "mps":
+                        torch.mps.empty_cache()
                     raise AssetError(
-                        "SDXL 生成时显存不足，请改用预览质量或缩小图片。"
+                        "SDXL 生成时加速器内存不足，"
+                        "请改用预览质量或缩小图片。"
                     ) from exc
                 LOGGER.exception("Native SDXL style generation failed")
                 raise AssetError("本机 SDXL Provider 生成失败。") from exc
@@ -764,6 +914,8 @@ class NativeSDXLStyleProvider:
             self._manifest = None
             self._base_scheduler_config = None
             self._lcm_loaded = False
+            resolved_accelerator = self._resolved_accelerator
+            self._resolved_accelerator = None
             self._embedding_cache.clear()
             if pipeline is not None:
                 try:
@@ -777,6 +929,11 @@ class NativeSDXLStyleProvider:
                 ipc_collect = getattr(torch.cuda, "ipc_collect", None)
                 if callable(ipc_collect):
                     ipc_collect()
+            if torch is not None and resolved_accelerator == "mps":
+                mps = getattr(torch, "mps", None)
+                empty_cache = getattr(mps, "empty_cache", None)
+                if callable(empty_cache):
+                    empty_cache()
             if had_runtime:
                 self._unload_count += 1
                 self._last_unload_seconds = time.perf_counter() - started
@@ -791,7 +948,11 @@ class NativeSDXLStyleProvider:
             if self._pipeline is not None:
                 return
             started = time.perf_counter()
-            progress(14, "verifying_models", "正在校验固定版本模型、许可记录与质量门禁。")
+            progress(
+                14,
+                "verifying_models",
+                "正在校验固定版本模型、许可记录与质量门禁。",
+            )
             try:
                 manifest = load_model_manifest(self.manifest_path)
                 errors = verify_provider_gate(manifest, self.gate_path)
@@ -812,15 +973,24 @@ class NativeSDXLStyleProvider:
                     from diffusers import AutoPipelineForImage2Image
                 except ImportError as exc:
                     raise AssetError(
-                        "缺少 SDXL GPU 依赖，请安装 backend/requirements-gpu.txt。"
+                        "缺少 SDXL 加速器依赖，请安装 backend/requirements-gpu.txt。"
                     ) from exc
-                if not torch.cuda.is_available():
-                    raise AssetError("本机 SDXL Provider 需要可用的 NVIDIA CUDA GPU。")
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                if total_memory < 7 * 1024**3:
-                    raise AssetError("本机 SDXL Provider 至少需要约 8 GB 显存。")
+                accelerator = resolve_torch_accelerator(torch, self.accelerator)
+                if accelerator is None:
+                    raise AssetError(
+                        "本机没有满足配置的 CUDA 或 Apple MPS 加速器。"
+                    )
+                if accelerator == "cuda":
+                    total_memory = torch.cuda.get_device_properties(0).total_memory
+                    if total_memory < 7 * 1024**3:
+                        raise AssetError("本机 SDXL Provider 至少需要约 8 GB 显存。")
+                self._resolved_accelerator = accelerator
 
-                progress(20, "loading_models", "正在加载 SDXL 与 IP-Adapter 到本机 GPU。")
+                progress(
+                    20,
+                    "loading_models",
+                    f"正在加载 SDXL 与 IP-Adapter 到 {accelerator.upper()}。",
+                )
                 base = resolve_component_dir(self.model_root, manifest.base)
                 adapter = resolve_component_dir(self.model_root, manifest.ip_adapter)
                 pipeline = AutoPipelineForImage2Image.from_pretrained(
@@ -858,10 +1028,17 @@ class NativeSDXLStyleProvider:
                     pipeline.disable_lora()
                     self._lcm_loaded = True
                 pipeline.enable_vae_tiling()
-                pipeline.model_cpu_offload_seq = (
-                    "text_encoder->text_encoder_2->unet->vae"
-                )
-                pipeline.enable_model_cpu_offload()
+                if accelerator == "cuda":
+                    pipeline.model_cpu_offload_seq = (
+                        "text_encoder->text_encoder_2->unet->vae"
+                    )
+                    pipeline.enable_model_cpu_offload()
+                else:
+                    # Diffusers' MPS guidance recommends attention slicing under
+                    # unified-memory pressure. Keep all modules on MPS instead of
+                    # combining slicing with CUDA-oriented model CPU offload.
+                    pipeline.to("mps")
+                    pipeline.enable_attention_slicing()
                 self._pipeline = pipeline
                 self._torch = torch
                 self._manifest = manifest
@@ -870,9 +1047,11 @@ class NativeSDXLStyleProvider:
                 self._load_error = None
             except AssetError as exc:
                 self._load_error = str(exc)
+                self._resolved_accelerator = None
                 raise
             except Exception as exc:
                 self._load_error = type(exc).__name__
+                self._resolved_accelerator = None
                 LOGGER.exception("Native SDXL model load failed")
                 raise AssetError("无法加载固定版本的本机 SDXL 模型。") from exc
 
@@ -985,7 +1164,7 @@ class NativeSDXLStyleProvider:
 
     def _require_torch(self) -> Any:
         if self._torch is None:
-            raise AssetError("本机 Torch CUDA 运行时尚未加载。")
+            raise AssetError("本机 Torch 加速器运行时尚未加载。")
         return self._torch
 
     def _require_manifest(self) -> ModelManifest:

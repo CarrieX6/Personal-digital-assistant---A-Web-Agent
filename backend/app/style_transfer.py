@@ -22,6 +22,7 @@ from .assets import AssetError, MAX_UPLOAD_BYTES, SpatialSceneService
 from .models import (
     CapabilityInfo,
     CapabilityRequirements,
+    JobPublic,
     PhotoStyleCreateResponse,
 )
 from .tools import ToolError, ToolRegistry, ToolSpec, current_tool_context
@@ -408,6 +409,14 @@ class PicStyleHttpProvider:
                 if status == "completed":
                     result = payload["result"]
                     output = result["outputs"][0]
+                    upstream_provider = str(
+                        result.get("provider") or self.model_name
+                    )
+                    production_quality = upstream_provider not in {
+                        "fake",
+                        "local-preview",
+                        "preview",
+                    }
                     output_url = urljoin(f"{self.base_url}/", str(output["url"]))
                     download = self.client.get(output_url, headers=self._headers())
                     download.raise_for_status()
@@ -424,7 +433,7 @@ class PicStyleHttpProvider:
                     return ProviderResult(
                         image=image,
                         provider_name=self.name,
-                        model_name=str(result.get("provider", self.model_name)),
+                        model_name=upstream_provider,
                         metadata={
                             "upstream_job_id": job_id,
                             "provider_version": result.get("provider_version"),
@@ -437,7 +446,7 @@ class PicStyleHttpProvider:
                                 "content_contract_plus_style_preset_v1"
                             ),
                             "palette_harmonization_mix": palette_mix,
-                            "production_quality": True,
+                            "production_quality": production_quality,
                         },
                     )
                 if status in {"failed", "cancelled", "timed_out"}:
@@ -469,6 +478,29 @@ class PicStyleHttpProvider:
                 upstream_status = response.json()
             except ValueError:
                 upstream_status = None
+            upstream_provider_status: Any = None
+            if ready:
+                try:
+                    provider_response = self.client.get(
+                        f"{self.base_url}/health/provider",
+                        headers=self._headers(),
+                        timeout=3,
+                    )
+                    if provider_response.status_code == 200:
+                        upstream_provider_status = provider_response.json()
+                except (httpx.HTTPError, ValueError):
+                    upstream_provider_status = None
+            upstream_provider = (
+                str(upstream_provider_status.get("provider") or "")
+                if isinstance(upstream_provider_status, dict)
+                else ""
+            )
+            production_quality = bool(
+                ready
+                and upstream_provider
+                and upstream_provider
+                not in {"fake", "local-preview", "preview"}
+            )
             return {
                 "ready": ready,
                 "loaded": ready,
@@ -476,6 +508,9 @@ class PicStyleHttpProvider:
                 "configured": True,
                 "gate": "managed_by_remote_service",
                 "upstream_status": upstream_status,
+                "upstream_provider_status": upstream_provider_status,
+                "upstream_provider": upstream_provider or None,
+                "production_quality": production_quality,
                 "error": None if ready else "service_not_ready",
             }
         except httpx.HTTPError:
@@ -486,6 +521,9 @@ class PicStyleHttpProvider:
                 "configured": True,
                 "gate": "managed_by_remote_service",
                 "upstream_status": None,
+                "upstream_provider_status": None,
+                "upstream_provider": None,
+                "production_quality": False,
                 "error": "service_unreachable",
             }
 
@@ -550,6 +588,7 @@ def build_style_provider_from_env() -> StyleTransferProvider:
                 "PHOTO_STYLE_UNLOAD_AFTER_GENERATION",
                 "true",
             ),
+            accelerator=os.getenv("PHOTO_STYLE_ACCELERATOR", "auto"),
         )
     raise AssetError(f"未知图片风格化 Provider：{selected}")
 
@@ -743,16 +782,63 @@ class PhotoStyleService:
             )
         except OSError as exc:
             raise AssetError("图片附件无法读取，请重新选择。") from exc
-        self.asset_library.delete_source_image(
-            content_image_id,
+        for source_id in (content_image_id, *style_image_ids):
+            try:
+                self.asset_library.delete_source_image(
+                    source_id,
+                    owner_id=owner_id,
+                )
+            except AssetError:
+                LOGGER.warning(
+                    "Unable to remove consumed source image %s",
+                    source_id,
+                )
+        return created
+
+    def retry_job(
+        self,
+        job_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> tuple[JobPublic, bool]:
+        """Retry one failed style job using its persisted sanitized inputs."""
+        job = self.asset_library.get_job(job_id, owner_id=owner_id)
+        if job.kind != "photo_style_transfer":
+            raise AssetError("这个任务不支持图片风格化重试。")
+        if job.status in {"queued", "running", "completed"}:
+            return job, False
+
+        asset_row = self.repository.get_asset_row(job.asset_id, owner_id)
+        if asset_row is None:
+            raise AssetError("找不到这个任务对应的风格化资产。")
+        metadata = json.loads(asset_row["metadata_json"])
+        filenames = [metadata.get("source_file")]
+        style_files = metadata.get("style_files")
+        if not isinstance(style_files, list) or not style_files:
+            raise AssetError("风格参考图已经丢失，请重新上传。")
+        filenames.extend(style_files)
+        directory = self.asset_dir / job.asset_id
+        if any(
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or not (directory / filename).is_file()
+            for filename in filenames
+        ):
+            raise AssetError("原始图片已经丢失，请重新上传。")
+
+        started = self.repository.claim_failed_job_retry(
+            job_id,
             owner_id=owner_id,
         )
-        for source_id in style_image_ids:
-            self.asset_library.delete_source_image(
-                source_id,
-                owner_id=owner_id,
-            )
-        return created
+        refreshed = self.asset_library.get_job(job_id, owner_id=owner_id)
+        if not started:
+            return refreshed, False
+
+        future = self.executor.submit(self._process, job.asset_id, job_id)
+        with self._future_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
+        return refreshed, True
 
     @staticmethod
     def _idempotent_transfer_ids(
@@ -825,7 +911,7 @@ class PhotoStyleService:
             manifest = {
                 "schema": "personal-agent.photo-style-transfer",
                 "version": 1,
-                "author": "Ma Xianggang",
+                "author": "Xianggang Ma",
                 "content": metadata["source_file"],
                 "styles": metadata["style_files"],
                 "result": result_path.name,
@@ -999,7 +1085,7 @@ def register_style_tools(
                 id="photo-style-transfer",
                 name="图片风格化",
                 version="1.3.0",
-                author="Ma Xianggang",
+                author="Xianggang Ma",
                 description="将一至三张参考图的视觉风格迁移到内容图，并可调节结构与细节保持程度。",
                 entrypoint="create_photo_style_transfer",
                 input_schema=input_schema,

@@ -213,8 +213,23 @@ class DemoPlanner:
             r"style_image_id=([A-Za-z0-9-]{1,100})",
             message,
         )
+        flux_dataset_match = re.search(
+            r"dataset_id\s*=\s*([A-Za-z0-9][A-Za-z0-9._-]{0,99})",
+            message,
+            flags=re.IGNORECASE,
+        )
 
-        if source_match and style_matches and any(
+        if flux_dataset_match and any(
+            keyword in lowered
+            for keyword in ("flux-gs", "fluxgs", "3dgs", "3d 高斯", "3d高斯")
+        ):
+            calls = [
+                ToolCall(
+                    name="create_flux_gs_demo",
+                    arguments={"dataset_id": flux_dataset_match.group(1)},
+                )
+            ]
+        elif source_match and style_matches and any(
             keyword in lowered
             for keyword in ("图片风格", "风格化", "风格迁移", "style transfer")
         ):
@@ -338,6 +353,11 @@ class DemoPlanner:
                 sections.append(
                     "图片个性化任务已创建，正在按参考图迁移视觉风格。"
                     "完成后会写入本地个人资产库。"
+                )
+            elif name == "create_flux_gs_demo":
+                sections.append(
+                    "Flux-GS 训练与 Web 发布任务已提交到独立 GPU 服务。"
+                    "完成后可通过任务状态工具取得 3D WebGL 预览链接。"
                 )
             elif name == "list_capabilities":
                 examples = "\n".join(f"- {item}" for item in output["examples"])

@@ -36,8 +36,22 @@ def test_signed_lan_viewer_token_and_mobile_page(tmp_path: Path) -> None:
         asset = spatial.get_asset(created.asset.id)
         token = service._issue_token(asset.id)
         page = service._viewer_html(token, asset)
-        assert "拖动或轻微转动手机" in page
+        assert "拖动画面" in page
         assert "deviceorientation" in page
+        assert 'id="motion"' in page
+        assert "requestPermission" in page
+        assert "baseGamma" in page
+        assert "screenAngle" in page
+        assert "deadzone" in page
+        assert 'data-mode="fit"' in page
+        assert "完整" in page
+        assert "铺满" in page
+        assert "100dvh" in page
+        assert "aspect-ratio:180/120" in page
+        assert "180 × 120" in page
+        assert "requestAnimationFrame" in page
+        assert "prefers-reduced-motion" in page
+        assert 'width="180" height="120"' in page
         assert service.verify_token(token) == created.asset.id
         with pytest.raises(ViewerLinkError):
             service.verify_token(token[:-1] + ("A" if token[-1] != "A" else "B"))
@@ -84,6 +98,31 @@ def test_runtime_public_url_overrides_lan_address(tmp_path: Path) -> None:
         service.start = lambda: None  # type: ignore[method-assign]
         link = service.create_link(created.asset.id)
         assert link.startswith("https://example.trycloudflare.com/v/")
+    finally:
+        service.close()
+        spatial.close()
+
+
+def test_runtime_public_url_ignores_disconnected_state(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    public_path = tmp_path / "viewer-public-url.json"
+    public_path.write_text(
+        json.dumps(
+            {
+                "url": "https://stale.trycloudflare.com",
+                "created_at": time.time(),
+                "status": "disconnected",
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = LanViewerService(
+        spatial,
+        secret_path=tmp_path / "viewer-secret.key",
+        runtime_public_base_path=public_path,
+    )
+    try:
+        assert service._runtime_public_base_url() is None
     finally:
         service.close()
         spatial.close()

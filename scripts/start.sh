@@ -2,9 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
-backend_pid=$!
-trap 'kill "$backend_pid" 2>/dev/null || true' EXIT INT TERM
-echo "控制台: http://localhost:3000"
-echo "空间照片局域网 Viewer 会按需监听 8766 端口。"
-pnpm run dev
+if [ ! -x .venv/bin/python ]; then
+  echo "未找到 .venv，请先运行 ./scripts/setup.sh。" >&2
+  exit 2
+fi
+
+exec .venv/bin/python scripts/deploy.py start "$@"

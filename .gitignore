@@ -46,12 +46,18 @@ __pycache__/
 /backend/data/viewer-secret.key
 /backend/data/viewer-public-url.json
 /backend/data/channel.sqlite3*
+/backend/data/identity.sqlite3*
 /backend/data/assets/
 /backend/data/source-images/
+/backend/data/flux-gs-datasets/
+/backend/data/native-cache/
 /backend/data/assets.sqlite3*
 /backend/data/agent_checkpoints.sqlite3*
 /backend/data/agent_memory.sqlite3*
 *.memory-key
+
+# local Codex runtime permissions
+/.codex/config.toml
 
 # vercel
 .vercel
@@ -63,4 +69,5 @@ next-env.d.ts
 /outputs/
 /work/
 /backend/models/
+/.capabilities/
 /.idea/

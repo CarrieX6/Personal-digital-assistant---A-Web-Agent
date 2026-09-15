@@ -187,43 +187,116 @@ D8   = uint8(255 × clip((D - low) / (high - low), 0, 1))
 或相机标定深度。当前清单约定高值/白色为近景；替换成其他模型时必须先验证深度
 方向，必要时执行 `255 - depth`。
 
-### 3.5 前景蒙版不是另一个 AI 模型
+### 3.5 深度与主体分割已经解耦
 
-当前没有使用 SAM、人体分割或显著性检测网络。前景来自深度图的自适应阈值：
+当前不再把“深度较近”直接等同于“完整主体”。生成阶段使用可插拔的
+`ForegroundSegmenter`：
 
-```text
-T = max(Otsu(D8), percentile(D8, 70))
-M = D8 >= T
+1. macOS 14 及以上默认调用 Apple Vision 的
+   `VNGenerateForegroundInstanceMaskRequest`，获得完整显著实例蒙版；
+2. Windows、Linux、旧版 macOS 或原生能力失败时，优先调用本地 BiRefNet
+   (`ZhengPeng7/BiRefNet`) 做跨平台主体分割；
+3. BiRefNet 不可用、权重缺失或推理失败时，进入明确标记的深度降级模式；
+4. 深度降级仍使用 `max(Otsu(D8), percentile(D8, 70))`，但结果质量分最高只记为
+   `0.52`，防止系统误把启发式蒙版当成高质量语义分割；
+5. 主体蒙版保存为 `foreground-mask.png`，便于回归测试和未来人工修正；
+6. `scene.json` 记录 `segmentation_model`、`segmentation_quality` 和
+   `segmentation_warnings`。
+
+系统会检查蒙版面积、主要连通域占比和碎片数。如果质量低于 `0.65`，资产仍可生成，
+但推荐视差从 `0.26` 降到 `0.14`，避免放大边缘和补洞缺陷。
+
+环境配置：
+
+```bash
+# 推荐。macOS 14+ 使用 Apple Vision；其他系统优先 BiRefNet，再自动降级。
+SPATIAL_FOREGROUND_SEGMENTER=auto
+
+# Windows/Linux 常用：强制验证 BiRefNet 链路。
+SPATIAL_FOREGROUND_SEGMENTER=birefnet
+SPATIAL_BIREFNET_MODEL=ZhengPeng7/BiRefNet
+SPATIAL_BIREFNET_SIZE=1024
+
+# 离线或生产部署：先预下载权重，再禁止运行时联网。
+SPATIAL_BIREFNET_LOCAL_FILES_ONLY=true
+
+# 仅用于兼容性排查，强制使用旧深度蒙版。
+SPATIAL_FOREGROUND_SEGMENTER=depth
 ```
 
-随后进行：
+BiRefNet 官方模型卡给出的 Transformers 接入方式需要
+`AutoModelForImageSegmentation.from_pretrained(..., trust_remote_code=True)`，
+输入通常 resize 到 `1024x1024`，输出 mask 再 resize 回原图。它是通用显著主体/二值
+分割模型，适合解决“猫、人物、商品被深度阈值切碎”的第一阶段问题；如果未来要按
+文字指定多个实例或做精细交互修正，再把 SAM2 / Grounded-SAM2 接到同一个
+`ForegroundSegmenter` 边界内。
 
-1. `MaxFilter(7)`：扩大近景区域，连接小孔和断裂；
-2. `MinFilter(5)`：回收部分扩张，清除细小毛刺；
-3. `GaussianBlur(1.25)`：把硬边变成柔和 Alpha；
-4. 原图转 RGBA，使用该 Alpha 得到 `foreground.webp`。
+Windows 本地部署推荐顺序：
 
-使用第 70 百分位意味着候选近景通常不会超过画面的近侧约 30%，再与 Otsu 阈值
-取较大值，避免整张图被错误选为前景。这是一种低成本启发式方法，不理解“人物”
-或“宠物”的语义。因此可能出现：
+1. NVIDIA 显卡：PyTorch CUDA；
+2. 无 NVIDIA 显卡：CPU 可跑但较慢，适合低频个人生成；
+3. 后续优化：将 BiRefNet 导出 ONNX，并通过 ONNX Runtime DirectML / Windows ML 接
+   通用 GPU/NPU 加速。
 
-- 地面、石头等近处区域和人物一起进入前景；
-- 头发、透明物、栏杆等细结构被截断；
-- 深度接近背景的主体部位没有完全被选中。
+#### Windows + NVIDIA 当前兼容状态
+
+当前代码可以在 Windows + NVIDIA 上本机运行，不需要改动 Viewer 或资产格式：
+
+- `DepthAnythingV2Estimator` 在 MPS 不可用时自动选择 `torch.cuda`；
+- `BiRefNetForegroundSegmenter` 同样优先 CUDA，再回退 MPS/CPU；
+- 深度、mask、前景、补全背景和 `manifest.json` 都是平台无关文件；
+- Three.js Viewer 在浏览器运行，不依赖生成端是 macOS 还是 Windows。
+
+Windows 新机需要先安装与驱动匹配的官方 CUDA PyTorch，再安装主体分割依赖：
+
+```powershell
+.\scripts\setup.ps1
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-segmentation.txt
+$env:SPATIAL_FOREGROUND_SEGMENTER = "birefnet"
+.\scripts\start.ps1
+```
+
+这只是代码兼容结论，尚不能替代 Windows 真机验收。必须至少验证 CUDA 可见、Depth
+Anything V2 Small、BiRefNet 完整主体、同一固定图集的耗时/显存/系统内存、十次稳定性和
+CPU 降级行为。当前 `SPATIAL-001` 看板仍保留 Windows 真机任务。
+
+#### 远程 GPU 当前边界
+
+空间照片**目前还不能像图片风格化一样只改一个 URL 就调用远程 GPU**。原因不是模型
+不能在远端运行，而是当前 `SpatialSceneService` 把深度、分割、背景补全、资产落盘和 Job
+状态放在同一进程里，尚无稳定的远程 Provider 契约。
+
+产品化远程方案应新增 `SpatialSceneProvider`，而不是让 Agent 通过 SSH 执行脚本：
+
+```text
+Web / 飞书
+  → Agent 上传并清洗源图
+  → POST /v1/spatial-scenes（tenant + owner + idempotency key）
+  → GPU Worker：Depth Anything V2 + BiRefNet
+  → 返回 depth / mask / background / foreground / manifest / cover
+  → Agent 校验哈希和 owner 后写入本地资产库
+  → 现有签名 Viewer 继续提供手机预览
+```
+
+远程服务必须具备：API 鉴权、租户/owner 隔离、幂等、异步 Job、取消/超时、文件哈希、
+结果契约版本、重试对账、保留期、审计和 HTTPS。输入输出都属于私人媒体；不能把未鉴权
+的模型端口直接暴露公网。完成这一 Provider 边界后，Windows NVIDIA、局域网 GPU 主机和
+云 GPU 才能共用同一 Agent 工具契约。
 
 ### 3.6 背景补全做了什么
 
 为了防止前景移动后立刻露出原图中被遮挡的区域，代码会对硬蒙版再执行
 `MaxFilter(15)`，得到更大的待补区域，然后进行传统颜色传播：
 
-1. 将图像和蒙版等比缩小到不超过 512×512；
+1. 将图像和蒙版等比缩小到不超过 768×768；
 2. 把蒙版区域标记为缺失；
-3. 每轮从上、下、左、右四个已知邻居计算平均颜色；
+3. 每轮从八邻域已知像素计算平均颜色；
 4. 从边界向内逐圈填充，直到没有缺失像素；
 5. 无法传播的位置退回到有效区域平均色；
-6. 做半径 2.4 的高斯模糊；
-7. Lanczos 放回原输出尺寸；
-8. 只在扩大后的遮挡蒙版内使用补全结果，其余位置保留原图。
+6. 只在原缺失区域执行 24 轮邻域松弛，降低方向性条带；
+7. 做半径 1.6 的轻度模糊；
+8. Lanczos 放回原输出尺寸；
+9. 只在扩大后的遮挡蒙版内使用补全结果，其余位置保留原图。
 
 这不是生成式 inpainting，不会真正推断被人物遮挡的建筑、衣物或风景。它的优点是
 完全本地、确定性强、速度快、无额外模型和显存占用；缺点是大幅移动时可能出现颜色
@@ -302,7 +375,7 @@ foreground.z =  0.42 × s
 当前版本应准确称为：
 
 ```text
-预训练单目相对深度 + 启发式双层 LDI + 传统背景补全 + 实时运动视差
+预训练单目相对深度 + 语义主体蒙版/深度降级 + 双层 LDI + 传统背景补全 + 实时运动视差
 ```
 
 它不是：
@@ -385,6 +458,36 @@ flowchart LR
 
 因此，PNG、HEIC、WebP 或 MP4 只是数据载体。真正的“随设备移动而改变视角”是一
 个运行时能力，不是某个静态图片扩展名自带的能力。
+
+### 5.1 当前项目的移动视差实现
+
+项目有两种渲染路径，都不是“陀螺仪直接拖动前景”：
+
+- Web 控制台使用 Three.js，把背景层、前景层放在不同 Z 深度，再让透视相机在 X/Y
+  方向小范围移动；鼠标、键盘和演示轨迹只负责更新相机目标；
+- 手机公网/局域网 Viewer 为降低功耗，不启动 Three.js，而是用同一个归一化输入
+  `(x, y)` 驱动两层做**反向、不同幅度**的 CSS transform：
+
+  - 背景层向输入反方向移动，完整模式最大约 `7px × 5px`；
+  - 前景层向输入正方向移动，完整模式最大约 `15px × 10px`；
+  - 铺满模式把幅度提高到背景 `10px × 7px`、前景 `22px × 15px`；
+  - 前后层的相对位移形成运动视差，扩大后的背景蒙版和补洞结果负责遮住新露出的区域。
+
+手机 Viewer 提供显式“体感”按钮；用户点击后才申请 `DeviceOrientation` 权限，不会
+在页面载入时请求传感器权限。启用后会：
+
+1. 把第一次姿态记录为零点，避免一打开画面就跳动；
+2. 根据屏幕旋转角度重新映射 `beta/gamma` 轴；
+3. 使用 `1.4°` 死区过滤手抖；
+4. 使用指数移动平均做低通平滑；
+5. 把约 `18°` 的姿态差映射到 `[-1, 1]`，并限制最大视差；
+6. 页面不可见时忽略传感器事件，屏幕旋转时重新校准；
+7. 系统启用“减少动态效果”时关闭视差，始终保留拖动作为无传感器回退路径。
+
+因此，陀螺仪/方向传感器只是**运动输入**；画面变化由手机浏览器按层执行 CSS
+transform，并不是传感器直接修改图片。当前采用双层 LDI，运行时不再执行深度推理，
+性能和功耗低于每帧运行深度网络或神经渲染，但可观察视角仍应保持小范围，否则会
+暴露补洞误差和缺失侧面几何。
 
 ## 6. 各平台能否作为锁屏
 

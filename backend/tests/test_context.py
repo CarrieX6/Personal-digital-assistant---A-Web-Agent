@@ -484,6 +484,10 @@ def test_agent_runner_uses_real_planner_as_summary_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AGENT_RECENT_HISTORY_MESSAGES", "2")
+    # This test verifies the LLM-backed provider itself. Production defaults to
+    # auto shadow gating, which intentionally serves the baseline until the
+    # configured sample threshold is reached.
+    monkeypatch.setenv("AGENT_SESSION_SUMMARY_MODE", "structured")
     requests: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

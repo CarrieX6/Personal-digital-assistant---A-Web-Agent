@@ -1,6 +1,6 @@
 # 图片风格化 Skill 集成说明
 
-作者：**Ma Xianggang**
+实现与文档作者：**Xianggang Ma**
 更新日期：2026-08-20
 任务：`STYLE-001`
 
@@ -17,6 +17,11 @@
 离线链路验证，并在 UI 明确标注“非生成模型”；不能再作为默认产品效果。也可显式选择
 `sdxl-local`，但不建议让主 Agent 与约 10GB 的生成模型共享进程生命周期。集成参考
 版本为提交 `c8e0b641f7f334faf73167211b5f0a8033e3b1dc`。
+
+跨平台安装、自动启动、Windows GPU 准备、迁移与真实验收统一见
+[图片风格化独立服务部署与迁移](guides/photo-style-deployment.md)。工具库会区分“未部署”、
+“测试模式”和“SDXL 已就绪”；独立服务使用 Fake Provider 时，结果 Metadata 固定标记
+`production_quality=false`。
 
 ## 用户链路
 
@@ -45,7 +50,7 @@ Agent 控制台为内容图和风格参考图提供独立上传入口：内容�
 
 - ID：`photo-style-transfer`；
 - 入口：`create_photo_style_transfer`；
-- 作者：Ma Xianggang；
+- 作者：Xianggang Ma；
 - 输入 Schema：内容图 ID、1–3 个风格图 ID、模式、质量、强度、提示词和种子；
 - 本地模型、存储、权限与下载要求。
 
@@ -84,16 +89,16 @@ PHOTO_STYLE_PROVIDER=local-preview
 
 ### 本机 SDXL Provider
 
-本机路径使用参考仓库已经过 8 GB 工程门禁的参数映射：SDXL img2img latent 保持内容，
+本机路径使用参考仓库已经过 8 GB CUDA 工程门禁的参数映射：SDXL img2img latent 保持内容，
 IP-Adapter 只向选定风格层注入等权参考 embedding，标准档使用
-DPMSolverMultistepScheduler；可选 LCM-LoRA 预览默认关闭。模型 CPU offload、VAE
-tiling 和单并发用于控制约 8 GB 显存占用。默认在单次隔离子进程中加载 Pipeline、
-IP-Adapter embedding 和 CUDA 运行时；生成完成或失败后子进程退出，由操作系统确定性
-回收约 10 GB 的 CPU offload 权重，避免 Windows/PyTorch 原生分配器长期保留工作集。
+DPMSolverMultistepScheduler；可选 LCM-LoRA 预览默认关闭。CUDA 使用模型 CPU offload，
+MPS 使用整条 Pipeline 上卡和 attention slicing；两者都启用 VAE tiling、单并发和单次
+隔离子进程。生成完成或失败后子进程退出，由操作系统确定性回收权重，避免桌面 Agent
+长期占用统一内存或 Windows/PyTorch 原生分配器保留工作集。
 
 安装与准备：
 
-先安装与当前 NVIDIA 驱动兼容的 CUDA 版 PyTorch，并确认
+Windows NVIDIA 先安装与当前驱动兼容的 CUDA 版 PyTorch，并确认
 `torch.cuda.is_available()` 为 `True`，再安装其余 GPU 依赖。RTX 4060 Laptop 的本机
 验证组合为 PyTorch 2.11.0、Torchvision 0.26.0 与 CUDA 12.8 wheel：
 
@@ -115,6 +120,7 @@ PHOTO_STYLE_MODEL_ROOT=backend/models/photo-style
 PHOTO_STYLE_MODEL_MANIFEST=backend/config/photo-style-models.json
 PHOTO_STYLE_PROVIDER_GATE=backend/config/photo-style-provider-gate.json
 PHOTO_STYLE_MODEL_LOCK=backend/models/photo-style/model-lock.json
+PHOTO_STYLE_ACCELERATOR=cuda
 PHOTO_STYLE_LCM_PREVIEW_ENABLED=false
 PHOTO_STYLE_VERIFY_MODEL_HASHES=false
 PHOTO_STYLE_UNLOAD_AFTER_GENERATION=true
@@ -123,9 +129,25 @@ PHOTO_STYLE_UNLOAD_AFTER_GENERATION=true
 `PHOTO_STYLE_UNLOAD_AFTER_GENERATION=true` 适合个人桌面 Agent，代价是下一次任务需要重新
 加载权重。只有需要连续批处理且能够接受约 10 GB 常驻内存时，才建议显式改为 `false`。
 Provider 状态接口会返回 `loaded`、`execution_mode`、`unload_count` 和最近一次进程退出
-耗时；CUDA 预检也在短生命周期子进程中执行，不会因查看状态而把 Torch 常驻到 API 进程。
+耗时；加速器预检也在短生命周期子进程中执行，不会因查看状态而把 Torch 常驻到 API
+进程。
 
-`GET /api/photo-style-transfers/provider` 只执行预检并返回依赖、CUDA、模型、门禁和加载
+Apple Silicon 可改用一键准备：
+
+```bash
+./scripts/photo-style.sh doctor
+./scripts/photo-style.sh prepare-macos-mps
+# 审阅许可证后才显式执行：
+./scripts/photo-style.sh prepare-macos-mps --accept-model-licenses
+```
+
+MPS 使用 `pipeline.to("mps") + attention slicing`，不使用 CUDA 路径的 model CPU
+offload；同时单独处理 MPS OOM、allocator 清理和 CPU fallback 元数据。当前 MPS 只完成
+代码与预检兼容，真实权重、质量、统一内存和功耗尚未在本机验收，状态必须保持
+`production_quality=false`。完整门禁见
+[macOS MPS 验收模板](experiments/style-004-macos-mps-validation.md)。
+
+`GET /api/photo-style-transfers/provider` 只执行预检并返回依赖、CUDA/MPS、模型、门禁和加载
 状态，不会加载权重或联网。真正开始任务时仍会再次验证许可证明、固定 revision、文件
 尺寸、model lock 和可选 SHA-256；所有 Diffusers 调用均设置 `local_files_only=True`。
 

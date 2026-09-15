@@ -19,23 +19,41 @@
 - [实验记录](experiments/README.md)：模型、Agent、平台和性能实验索引。
 - [技术决策记录](decisions/README.md)：已经生效或被替代的 ADR 索引。
 
+### 阶段汇报与审计
+
+- [个人数字助手项目阶段汇报（2026-08）](reports/personal-digital-assistant-stage-report-2026-08.md)：
+  面向公司和团队评审的 10 页结果型汇报、故事主线、贡献边界、数据证据与下一阶段。
+- [阶段汇报索引](reports/README.md)：汇报文档的归属和证据要求。
+
 ### 架构设计
 
 - [系统架构](architecture/system-architecture.md)：最终目标、模块边界、消息链路、
   数据模型、安全边界和分阶段路线图。
 - [LangGraph 循环 Agent 设计](architecture/langgraph-agent-loop.md)：已实现的循环
   节点与代码硬边界，以及待完成的人工确认、异步恢复和幂等控制。
+- [飞书身份、个人工作区与电脑节点绑定](architecture/identity-workspace-device-binding.md)：
+  一个外部账号一个隔离工作区、Root 管理、本机节点绑定与多电脑 Control Plane 演进。
 - [分层长短期记忆设计](architecture/layered-memory.md)：工作记忆、滚动摘要、
   类型化长期记忆、混合检索、时间有效性、证据追踪与结果反馈闭环。
 
 ### 配置指南
 
+- [个人数字助手完整本地部署与迁移手册](guides/complete-local-deployment.md)：从 GitHub
+  克隆到一键安装、真实模型、Web/Agent/功能库/飞书配置、加密数据迁移和完整验收。
 - [飞书机器人配置与使用指南](guides/feishu-setup.md)：企业自建应用、权限、长连接、
   Open ID、私聊、群聊、图片、卡片回调、Root 可见性与故障排查。
 - [macOS / Windows 本地部署](guides/deployment.md)：原生一键安装、启动、GPU 边界与
   局域网签名 Viewer。
+- [图片风格化独立服务部署与迁移](guides/photo-style-deployment.md)：跨平台部署管理器、
+  Fake 链路测试、macOS MPS、Windows NVIDIA、远程 GPU、自动启动、迁移和验收。
+- [Flux-GS Capability 接入与部署](guides/flux-gs-capability.md)：受控数据集 ID、独立
+  Linux/NVIDIA GPU 服务、Agent 工具、飞书卡片、WebGL 结果和非商用许可门禁。
+- [macOS MPS 真实风格化验收模板](experiments/style-004-macos-mps-validation.md)：固定样本、
+  十次稳定性、统一内存、功耗、fallback 和质量门禁。
 - [新功能 / Capability 接入指南](guides/capability-integration.md)：服务、Provider、
   Tool Manifest、渠道适配、测试和旧分支迁移约定。
+- [飞书图片与 2.5D 能力接入 SOP](guides/feishu-media-capability-sop.md)：多图角色
+  收集、异步 Job、空间 Viewer、风格化结果图、Outbox、新电脑安装和发布验收流程。
 
 ### 平台与技术调研
 

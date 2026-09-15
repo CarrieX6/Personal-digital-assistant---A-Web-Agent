@@ -8,7 +8,9 @@ from typing import Any
 from fastapi.testclient import TestClient
 import httpx
 from PIL import Image
+import pytest
 
+from backend.app.assets import AssetError
 from backend.app.agent import PlanningResult, ToolObservation
 from backend.app.main import create_app
 from backend.app.models import ToolCall
@@ -187,6 +189,69 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         assert client.get(style_preview).status_code == 200
         assert not (spatial.source_image_dir / content.id).exists()
         assert not (spatial.source_image_dir / reference.id).exists()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_photo_style_source_owner_isolation_and_failed_job_retry(
+    tmp_path: Path,
+) -> None:
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    content = spatial.stage_source_image(
+        _png("#b88d72"),
+        original_name="content.png",
+        owner_id="user-a",
+    )
+    reference = spatial.stage_source_image(
+        _png("#315a84"),
+        original_name="reference.png",
+        owner_id="user-a",
+    )
+    try:
+        with pytest.raises(AssetError, match="不属于当前用户"):
+            style.create_transfer_from_sources(
+                content.id,
+                [reference.id],
+                owner_id="user-b",
+            )
+        assert (spatial.source_image_dir / content.id).is_dir()
+        assert (spatial.source_image_dir / reference.id).is_dir()
+
+        created = style.create_transfer_from_sources(
+            content.id,
+            [reference.id],
+            owner_id="user-a",
+        )
+        style.wait_for_idle()
+        assert spatial.get_job(
+            created.job.id,
+            owner_id="user-a",
+        ).status == "completed"
+
+        spatial.repository.update_job(
+            created.job.id,
+            status="failed",
+            progress=100,
+            stage="interrupted",
+            message="任务因本地服务重启而中断，可以重新生成。",
+            error="本地服务重启中断任务。",
+        )
+        spatial.repository.fail_asset(created.asset.id)
+        retried, started = style.retry_job(
+            created.job.id,
+            owner_id="user-a",
+        )
+        assert started is True
+        assert retried.status == "queued"
+        style.wait_for_idle()
+        assert spatial.get_job(
+            created.job.id,
+            owner_id="user-a",
+        ).status == "completed"
+        with pytest.raises(AssetError, match="找不到这个任务"):
+            style.retry_job(created.job.id, owner_id="user-b")
     finally:
         style.close()
         spatial.close()
@@ -459,9 +524,15 @@ def test_generic_attachment_router_clarifies_spatial_image_choice(
 
 def test_pic_style_http_provider_reports_real_readiness() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/health/ready"
         assert request.headers["X-Tenant-ID"] == "personal-agent"
-        return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/health/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/health/provider":
+            return httpx.Response(
+                200,
+                json={"ready": True, "provider": "sdxl_ip_adapter_8gb_v1"},
+            )
+        raise AssertionError(f"unexpected request: {request.url.path}")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     provider = PicStyleHttpProvider(
@@ -472,6 +543,30 @@ def test_pic_style_http_provider_reports_real_readiness() -> None:
         status = provider.status()
         assert status["ready"] is True
         assert status["upstream_status"] == {"status": "ready"}
+        assert status["upstream_provider"] == "sdxl_ip_adapter_8gb_v1"
+        assert status["production_quality"] is True
+    finally:
+        client.close()
+
+
+def test_pic_style_http_provider_labels_fake_as_test_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/health/provider":
+            return httpx.Response(
+                200,
+                json={"ready": True, "provider": "fake", "version": "1.0.0"},
+            )
+        raise AssertionError(f"unexpected request: {request.url.path}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = PicStyleHttpProvider("http://style-service.local", client=client)
+    try:
+        status = provider.status()
+        assert status["ready"] is True
+        assert status["upstream_provider"] == "fake"
+        assert status["production_quality"] is False
     finally:
         client.close()
 
@@ -487,7 +582,17 @@ def test_pic_style_http_is_product_default(monkeypatch) -> None:
     provider.close()
 
 
-def test_pic_style_http_provider_contract() -> None:
+@pytest.mark.parametrize(
+    ("provider_name", "production_quality"),
+    [
+        ("sdxl_ip_adapter_8gb_v1", True),
+        ("fake", False),
+    ],
+)
+def test_pic_style_http_provider_contract(
+    provider_name: str,
+    production_quality: bool,
+) -> None:
     upload_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -518,7 +623,7 @@ def test_pic_style_http_provider_contract() -> None:
                     "status": "completed",
                     "progress": 100,
                     "result": {
-                        "provider": "sdxl_ip_adapter_8gb_v1",
+                        "provider": provider_name,
                         "provider_version": "1",
                         "outputs": [{"url": "/v1/assets/result-1"}],
                     },
@@ -541,8 +646,8 @@ def test_pic_style_http_provider_contract() -> None:
             parameters=StyleParameters(seed=1701),
             progress=lambda *_args: None,
         )
-        assert result.model_name == "sdxl_ip_adapter_8gb_v1"
-        assert result.metadata["production_quality"] is True
+        assert result.model_name == provider_name
+        assert result.metadata["production_quality"] is production_quality
         assert result.image.size == (128, 96)
     finally:
         client.close()
