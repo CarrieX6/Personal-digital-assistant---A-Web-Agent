@@ -310,6 +310,8 @@
 .style-sliders input { width: 100%; accent-color: #9b5935; }
 .style-form-actions { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
 .style-clear-button { padding: 0 14px; border: 1px solid var(--line); border-radius: 12px; background: transparent; }
+.style-submit-status { display: flex; align-items: center; gap: 8px; min-height: 36px; margin: -7px 0 0; padding: 8px 10px; border: 1px solid rgba(68, 124, 100, .22); border-radius: 10px; background: rgba(68, 124, 100, .08); color: var(--green-dark); font-size: 12px; line-height: 1.5; }
+.style-submit-spinner { width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid rgba(68, 124, 100, .25); border-top-color: var(--green); border-radius: 50%; animation: style-submit-spin .8s linear infinite; }
 .style-retain-note { margin: -8px 0 0; color: var(--muted); font-size: 12px; }
 .style-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .style-comparison figure { min-width: 0; margin: 0; }
@@ -327,6 +329,8 @@
 @media (max-width: 980px) { .style-workspace { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .style-select-row-three { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .style-input-grid, .style-select-row, .style-comparison, .style-form-actions { grid-template-columns: 1fr; } .style-download { grid-column: auto; } }
+
+@keyframes style-submit-spin { to { transform: rotate(360deg); } }
 
 * {
   box-sizing: border-box;

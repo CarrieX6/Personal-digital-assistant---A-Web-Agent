@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import json
 from pathlib import Path
@@ -189,6 +190,105 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         assert client.get(style_preview).status_code == 200
         assert not (spatial.source_image_dir / content.id).exists()
         assert not (spatial.source_image_dir / reference.id).exists()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_photo_style_web_upload_reuses_idempotency_key(tmp_path: Path) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=spatial,
+            style_service=style,
+        )
+    )
+
+    def submit(content_color: str = "#b88d72"):
+        return client.post(
+            "/api/photo-style-transfers",
+            headers={"Idempotency-Key": "web-submit-1"},
+            files=[
+                ("content_file", ("content.png", _png(content_color), "image/png")),
+                ("style_files", ("style.png", _png("#315a84"), "image/png")),
+            ],
+            data={"title": "幂等风格任务", "style_preset": "ink_wash"},
+        )
+
+    try:
+        first = submit()
+        replay = submit()
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert first.json()["reused"] is False
+        assert replay.json()["reused"] is True
+        assert replay.json()["asset"]["id"] == first.json()["asset"]["id"]
+        assert replay.json()["job"]["id"] == first.json()["job"]["id"]
+        assert len(spatial.list_assets(owner_id="local")) == 1
+
+        mismatched = submit("#112233")
+        assert mismatched.status_code == 422
+        assert "已经用于另一组图片或参数" in mismatched.json()["detail"]
+
+        invalid = client.post(
+            "/api/photo-style-transfers",
+            headers={"Idempotency-Key": "contains spaces"},
+            files=[
+                ("content_file", ("content.png", _png("#b88d72"), "image/png")),
+                ("style_files", ("style.png", _png("#315a84"), "image/png")),
+            ],
+        )
+        assert invalid.status_code == 422
+        assert invalid.json()["detail"] == "幂等键格式无效。"
+
+        preflight = client.options(
+            "/api/photo-style-transfers",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "idempotency-key",
+            },
+        )
+        assert preflight.status_code == 200
+        assert "idempotency-key" in preflight.headers[
+            "access-control-allow-headers"
+        ].lower()
+    finally:
+        style.close()
+        spatial.close()
+
+
+def test_photo_style_concurrent_replay_creates_one_job(tmp_path: Path) -> None:
+    spatial = build_test_spatial(tmp_path)
+    style = PhotoStyleService(spatial, provider=LocalColorStyleProvider())
+
+    def submit():
+        return style.create_transfer(
+            _png("#b88d72"),
+            [_png("#315a84")],
+            original_name="content.png",
+            title="并发幂等任务",
+            owner_id="user-a",
+            idempotency_key="concurrent-submit-1",
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(submit),
+                executor.submit(submit),
+            ]
+            first, replay = [future.result() for future in futures]
+
+        assert first.asset.id == replay.asset.id
+        assert first.job.id == replay.job.id
+        assert {first.reused, replay.reused} == {False, True}
+        assert len(spatial.list_assets(owner_id="user-a")) == 1
     finally:
         style.close()
         spatial.close()

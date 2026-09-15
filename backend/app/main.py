@@ -128,6 +128,7 @@ DEFAULT_IDENTITY_REGISTRY_PATH = (
 DEFAULT_ASSET_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 WEB_OWNER_ID = "local"
 WEB_SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
 def _web_thread_id(session_id: str) -> str:
@@ -135,6 +136,16 @@ def _web_thread_id(session_id: str) -> str:
     if not WEB_SESSION_PATTERN.fullmatch(safe_session_id):
         raise HTTPException(status_code=422, detail="会话 ID 格式无效。")
     return f"web:{safe_session_id}"
+
+
+def _request_idempotency_key(request: Request) -> str | None:
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is None:
+        return None
+    key = raw_key.strip()
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+        raise HTTPException(status_code=422, detail="幂等键格式无效。")
+    return key
 
 
 def _public_session_id(thread_id: str) -> str:
@@ -338,7 +349,7 @@ def create_app(
         ),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Idempotency-Key"],
     )
     app.state.registry = registry
     app.state.runner = runner
@@ -875,6 +886,7 @@ def create_app(
                     prompt=prompt,
                     seed=seed,
                 ),
+                idempotency_key=_request_idempotency_key(request),
             )
         except AssetError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

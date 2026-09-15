@@ -141,10 +141,11 @@ Apple Silicon 可改用一键准备：
 ./scripts/photo-style.sh prepare-macos-mps --accept-model-licenses
 ```
 
-MPS 使用 `pipeline.to("mps") + attention slicing`，不使用 CUDA 路径的 model CPU
-offload；同时单独处理 MPS OOM、allocator 清理和 CPU fallback 元数据。当前 MPS 只完成
-代码与预检兼容，真实权重、质量、统一内存和功耗尚未在本机验收，状态必须保持
-`production_quality=false`。完整门禁见
+MPS 使用 `pipeline.to("mps") + PyTorch 2 SDPA`，不使用 CUDA 路径的 model CPU
+offload；在加载 IP-Adapter 后不得启用 attention slicing，否则 Diffusers 0.35 会替换
+IP-Adapter attention processor 并使真实推理失败。当前仍启用 VAE tiling/slicing，并单独
+处理 MPS OOM、allocator 清理和 CPU fallback 元数据。M4 已完成真实权重工程烟测，但
+真实用户图质量、统一内存和功耗尚未验收，状态必须保持 `production_quality=false`。完整门禁见
 [macOS MPS 验收模板](experiments/style-004-macos-mps-validation.md)。
 
 `GET /api/photo-style-transfers/provider` 只执行预检并返回依赖、CUDA/MPS、模型、门禁和加载
@@ -183,6 +184,17 @@ python backend/scripts/smoke_photo_style_sdxl.py \
 
 所有图片都执行格式验证、像素上限检查、EXIF 方向规范化和元数据剥离。支持 JPG、PNG、
 WebP，单文件最大 20 MB；文件下载仍经过资产清单允许列表，不能用路径参数读取任意文件。
+
+### 重复提交与结果不确定
+
+Web 点击提交后会立即取得一次性 `Idempotency-Key`、锁定按钮并显示上传状态；任务处于
+`queued/running` 时不能再次提交。若网络在收到服务端响应前中断，下一次点击会复用同一
+Key，而不是创建新任务。服务端按 owner 与 Key 生成确定性的资产/任务 ID，以分片锁保证
+单进程内同 Key 的并发请求只执行一次，并用图片、标题和参数的 SHA-256 指纹拒绝“同 Key、
+不同请求体”。重放响应返回 `reused=true`，前端会复用已有卡片并提示用户。
+
+当前本地部署固定为单个 FastAPI 进程；若未来扩展为多 API 进程或多节点，需要把 Key、
+payload fingerprint 和任务 ID 写入带唯一约束的数据库幂等表，不能依赖进程内锁。
 
 ## 参数对应
 
