@@ -131,6 +131,7 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
                 ("content_file", ("content.png", _png("#b88d72"), "image/png")),
                 ("style_files", ("style.png", _png("#315a84"), "image/png")),
             ],
+            data={"style_preset": "ink_wash"},
         )
         assert created.status_code == 202
         style.wait_for_idle()
@@ -139,6 +140,7 @@ def test_photo_style_api_manifest_and_agent_tool(tmp_path: Path) -> None:
         ).json()
         assert direct_asset["status"] == "ready"
         assert direct_asset["result_url"]
+        assert direct_asset["parameters"]["style_preset"] == "ink_wash"
 
         content = spatial.stage_source_image(
             _png("#b88d72"), original_name="content.png"
@@ -503,6 +505,8 @@ def test_pic_style_http_provider_contract() -> None:
             assert payload["style_images"] == [
                 {"image": {"asset_id": "asset-2"}}
             ]
+            assert "style_preset" not in payload
+            assert "never for its people, objects, or layout" in payload["prompt"]
             return httpx.Response(202, json={"job_id": "job-1"})
         if (
             request.method == "GET"

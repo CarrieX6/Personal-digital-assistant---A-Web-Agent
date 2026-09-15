@@ -295,6 +295,7 @@
 .style-form-card, .style-result-card { min-width: 0; padding: 22px; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow-sm); }
 .style-form-card { display: grid; gap: 17px; }
 .style-input-grid, .style-select-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.style-select-row-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .style-input-block > span, .style-select-row label > span, .style-sliders label > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .style-input-block > button { width: 100%; min-height: 150px; padding: 0; overflow: hidden; border: 1px dashed var(--line-strong); border-radius: 15px; background: #faf9f7; }
 .style-input-block img { width: 100%; height: 150px; object-fit: cover; }
@@ -303,6 +304,7 @@
 .style-preview-stack[data-count="1"] { grid-template-columns: 1fr; }
 .style-preview-stack[data-count="2"] { grid-template-columns: repeat(2, 1fr); }
 .style-select-row select { width: 100%; min-height: 42px; padding: 0 11px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.style-preset-note { margin: -7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .style-sliders { display: grid; gap: 12px; }
 .style-sliders label > span { display: flex; justify-content: space-between; }
 .style-sliders input { width: 100%; accent-color: #9b5935; }
@@ -323,6 +325,7 @@
 .style-lightbox img { max-width: 100%; max-height: 84vh; object-fit: contain; }
 .style-lightbox-close { position: fixed; top: 18px; right: 22px; width: 42px; height: 42px; border: 1px solid rgba(255,255,255,.35); border-radius: 50%; background: rgba(0,0,0,.45); color: #fff; font-size: 28px; }
 @media (max-width: 980px) { .style-workspace { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .style-select-row-three { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .style-input-grid, .style-select-row, .style-comparison, .style-form-actions { grid-template-columns: 1fr; } .style-download { grid-column: auto; } }
 
 * {
