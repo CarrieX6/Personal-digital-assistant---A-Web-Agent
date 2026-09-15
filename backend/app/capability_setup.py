@@ -589,7 +589,8 @@ class CapabilitySetupService:
     ) -> CapabilityInstallJob:
         plan = self.plan(capability_id)
         installed, _ = self._installed_state(capability_id)
-        if installed:
+        partially_installed, _ = self._partial_installed_state(capability_id)
+        if installed or partially_installed:
             raise CapabilitySetupError("这项能力已经就绪，无需重复安装。")
         if not request.confirm_install:
             raise CapabilitySetupError("请先查看安装计划并确认磁盘、网络和运行影响。")
@@ -694,11 +695,16 @@ class CapabilitySetupService:
         plan = self._plan(capability_id)
         active = self.store.active_for(capability_id)
         installed, runtime_reason = self._installed_state(capability_id)
+        partially_installed, partial_reason = self._partial_installed_state(
+            capability_id
+        )
         state: CapabilityState = plan.state
         if active is not None:
             state = active.status if active.status != "queued" else "checking"
         elif installed:
             state = "ready"
+        elif partially_installed:
+            state = "degraded"
         elif plan.compatibility == "blocked":
             state = "incompatible"
         elif (
@@ -771,14 +777,15 @@ class CapabilitySetupService:
             state_label=labels[state],
             runtime=runtime,
             model=model,
-            installed=installed,
+            installed=installed or partially_installed,
             can_install=(
                 not installed
+                and not partially_installed
                 and plan.supported
                 and plan.compatibility not in {"manual", "blocked"}
             ),
             compatibility=plan.compatibility,
-            reason=plan.reason or runtime_reason,
+            reason=partial_reason if partially_installed else plan.reason or runtime_reason,
             guide_path=plan.guide_path,
             active_job_id=active.id if active else None,
         )
@@ -818,6 +825,32 @@ class CapabilitySetupService:
             status = {}
         ready = bool(status.get("ready") and status.get("production_quality"))
         return ready, None if ready else "真实 Flux-GS 训练 Provider 尚未就绪。"
+
+    def _partial_installed_state(
+        self, capability_id: str
+    ) -> tuple[bool, str | None]:
+        if capability_id != "photo-style-transfer":
+            return False, None
+        try:
+            status = self.style_probe() or {}
+        except Exception:
+            return False, None
+        details = status.get("details") or {}
+        smoke_passed = (
+            details.get("local_quality_validation") == "engineering_smoke_passed"
+        )
+        ready = bool(
+            status.get("ready")
+            and details.get("models_ready")
+            and details.get("dependencies_ready")
+            and smoke_passed
+            and not details.get("production_quality")
+        )
+        reason = (
+            "真实模型已下载并通过当前设备的 MPS 工程冒烟；"
+            "尚未完成真实图片质量验收，因此按部分可用展示。"
+        )
+        return ready, reason if ready else None
 
     def _plan(self, capability_id: str) -> CapabilityInstallPlan:
         profile = self.host.profile

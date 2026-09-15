@@ -153,6 +153,44 @@ def test_ready_capability_cannot_be_installed_again(tmp_path: Path) -> None:
         service.close()
 
 
+def test_mps_engineering_smoke_overrides_stale_failed_install(tmp_path: Path) -> None:
+    service = CapabilitySetupService(
+        tmp_path,
+        host=host(),
+        style_probe=lambda: {
+            "ready": True,
+            "details": {
+                "models_ready": True,
+                "dependencies_ready": True,
+                "local_quality_validation": "engineering_smoke_passed",
+                "production_quality": False,
+            },
+        },
+    )
+    try:
+        failed = service.store.create("photo-style-transfer")
+        service.store.update(
+            failed.id,
+            status="failed",
+            stage="failed",
+            error="old_failure",
+        )
+
+        style = next(
+            item
+            for item in service.list_capabilities()
+            if item.id == "photo-style-transfer"
+        )
+
+        assert style.state == "degraded"
+        assert style.state_label == "部分可用"
+        assert style.installed is True
+        assert style.can_install is False
+        assert "质量验收" in (style.reason or "")
+    finally:
+        service.close()
+
+
 def test_installations_are_serialized_across_capabilities(tmp_path: Path) -> None:
     service = CapabilitySetupService(tmp_path, host=host())
     try:

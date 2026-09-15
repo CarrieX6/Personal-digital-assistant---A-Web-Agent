@@ -306,7 +306,7 @@ class NativeSDXLStyleProvider:
 
     name = "sdxl_ip_adapter_8gb_v1"
     model_name = "Stable Diffusion XL 1.0 + IP-Adapter SDXL ViT-H"
-    version = "1.3.0"
+    version = "1.3.1"
 
     def __init__(
         self,
@@ -914,14 +914,15 @@ class NativeSDXLStyleProvider:
                     )
                     pipeline.enable_model_cpu_offload()
                 else:
-                    # Diffusers' MPS guidance recommends attention slicing under
-                    # unified-memory pressure. Keep all modules on MPS instead of
-                    # combining slicing with CUDA-oriented model CPU offload.
+                    # Keep all modules on MPS instead of combining it with the
+                    # CUDA-oriented CPU offload path. Do not call
+                    # enable_attention_slicing() after load_ip_adapter():
+                    # Diffusers 0.35 replaces the IP-Adapter attention processors
+                    # with SlicedAttnProcessor, which cannot consume the adapter's
+                    # tuple conditioning and fails before the first denoising step.
+                    # PyTorch 2 SDPA plus the 640 px preview budget is the compatible
+                    # MPS path; VAE tiling/slicing remains enabled above.
                     pipeline.to("mps")
-                    memory_mib = accelerator_memory_mib(torch, "mps")
-                    pipeline.enable_attention_slicing(
-                        "max" if memory_mib is not None and memory_mib <= 18 * 1024 else "auto"
-                    )
                 self._pipeline = pipeline
                 self._torch = torch
                 self._manifest = manifest

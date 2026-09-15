@@ -1,7 +1,7 @@
 # 调研与实现中心
 
 作者：**Zhuofan Xie**
-更新日期：2026-09-14
+更新日期：2026-09-15
 
 本文件是项目技术调研与实现进度的统一入口。它回答四个问题：
 
@@ -148,7 +148,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `MESSAGE-001` | P0 | Web、飞书与未来微信如何共享统一消息模型 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | Web Conversation/Message 已以 SQLite 为唯一数据源；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书 `channel_events` 的 `message_id` 与受控 `media_url` 增量；待正式增加 Attachment、ChannelIdentity、Reply/引用关系并迁入统一消息表 |
 | `MEMORY-002` | P1 | FTS、向量检索、摘要和上下文压缩如何组合 | `✅ 已决策` | `✅ 已完成` | Xianggang Ma | Xianggang Ma 实现结构化/词法/本地向量混合召回、证据加权、真实模型结构化滚动摘要、完整请求 Token 硬门禁和 old/new shadow 自动切换；经 [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 合入，[硬验收](acceptance/context-memory-hard-acceptance-2026-08-27.md) 覆盖 500/1000/2000 轮与 128-owner 隔离 |
 | `CAP-001` | P0 | Capability Manifest、权限和调用接口如何定义 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 工具库已接入图片个性化，运行时可查询 Manifest；新增 [Capability 接入指南](guides/capability-integration.md)和通用设置/安装中心，统一展示空间照片、语义记忆、图片风格化与 Flux-GS 的运行状态、兼容性和安装计划；待把旧工具全部迁入统一 Manifest 与角色权限模型 |
-| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟠 初步结论` | `🧱 局部实现` | Xianggang Ma | 图片风格化能力由 Xianggang Ma 实现；其跨平台管理器、固定源码/API 归档、许可门禁和 MPS/Windows 工程路径已接入 Zhuofan Xie 实现的通用安装任务层。当前分支进一步增加 M4/16GB 的 VAE slicing、内存自适应 attention slicing、非个人真实 smoke 与设备级验证记录。待用户接受模型许可后完成本机权重下载、真实图质量/功耗验收，以及 Windows/Spark 实机、可恢复卸载、升级、签名制品和 SBOM |
+| `CAP-002` | P1 | 模型安装、升级、卸载、依赖隔离和哈希校验 | `🟠 初步结论` | `🧱 局部实现` | Xianggang Ma | 图片风格化能力由 Xianggang Ma 实现；其跨平台管理器、固定源码/API 归档、许可门禁和 MPS/Windows 工程路径已接入 Zhuofan Xie 实现的通用安装任务层。2026-09-15 用户已接受三项模型许可，本机以固定 revision 下载约 9.9 GiB 权重并通过 SHA-256 锁定；Zhuofan Xie 修复 Diffusers 0.35.2 中 attention slicing 覆盖 IP-Adapter processor 的兼容问题，Apple M4/16GB MPS 工程冒烟已生成 512×384 结果（单次执行 107.83s，其中模型加载 36.88s、扩散生成 55.80s，MPS 驱动已分配内存快照约 11.6 GiB）。待真实图质量/功耗验收、统计性基准，以及 Windows/Spark 实机、可恢复卸载、升级、签名制品和 SBOM |
 | `CAP-003` | P0 | 如何把完整 Web Agent、数据与模型迁移到同一目标节点，并用 UI 完成模型部署 | `✅ 已决策` | `👀 评审中` | Zhuofan Xie | [PR #19](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/19) 提交[单机完整节点架构](guides/full-node-migration.md)首版实现：目标机同时承载 Web、Agent、飞书、SQLite/资产、Viewer 和本机隔离 Provider；设置中心已覆盖主机预检、安装计划、许可确认、白名单执行、持久化状态、取消/失败重试与安装后验证，并新增运行时缺失项、逐步修复、复制命令、macOS/Windows 启动器和可生成 Release 安装包的工作流。DGX Spark ARM64/CUDA 扩展仍须经真机门禁，不把当前 PR 标记为硬件验收完成 |
 | `DATA-001` | P1 | 用户、任务、资产和派生关系的数据模型 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 2026-08-26 新增外部身份、个人工作区、设备节点和审计表，沿用既有 owner key 保持数据兼容；见[身份、工作区与节点绑定](architecture/identity-workspace-device-binding.md)。待正式迁移工具、生命周期、备份恢复和多设备路由 |
 
@@ -170,7 +170,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `SPATIAL-003` | P1 | Web、手机与桌面 Viewer 如何分级渲染 | `🟠 初步结论` | `🧱 局部实现` | 待领取 | 帧率、内存、发热与降级策略实测 |
 | `SPATIAL-004` | P2 | 场景适用性和生成质量如何自动判断 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | 已记录蒙版面积、连通性、质量分和降级告警，并按质量降低推荐视差；待失败样本集和人工标注评测 |
 | `SPATIAL-005` | P2 | Flux-GS 多视角 3D 场景如何作为独立能力接入 Agent 与飞书 | `🟠 初步结论` | `🧱 局部实现` | Zuheng Zhao | [PR #17](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/17) 完成适配，[PR #18](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/18) 修正为单一飞书菜单并明确 Flux-GS 只覆盖多视角训练后半段。待单图多视角/相机前置链路、Linux NVIDIA 实机训练、跨节点上传、完成通知与许可确认 |
-| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Xianggang Ma | Xianggang Ma 实现图片风格化主链路，包括独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键，并扩展 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。待 M4 真实权重/质量/功耗验收、Windows GPU 服务和真实手机联调 |
+| `STYLE-001` | P2 | 图片个性化如何在 CPU 预览、SDXL 本机与远端 Provider 间切换 | `🟠 初步结论` | `🟡 开发中` | Xianggang Ma | Xianggang Ma 实现图片风格化主链路，包括独立 `pic-style-http`、owner 隔离、结果图/参数卡片、重试、草稿与稳定幂等键，并扩展 `sdxl-local` 的 MPS 设备兼容、设备级门禁、`prepare-macos-mps` 和安全 `configure-remote`。2026-09-15 已在 M4 使用真实 SDXL + IP-Adapter 权重完成离线 MPS 工程冒烟，控制台状态改为“部分可用”而非误报安装失败。待使用真实用户图做风格保持与内容保真度验收、性能/功耗基准、Windows GPU 服务和真实手机联调 |
 
 ## 9. 虚拟试衣与数字人
 

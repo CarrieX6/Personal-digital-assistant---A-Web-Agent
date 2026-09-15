@@ -154,8 +154,9 @@ SDXL、IP-Adapter、LCM-LoRA 许可证后，才能显式运行：
 ./scripts/photo-style.sh validate-macos-mps
 ```
 
-M4/16GB 适配额外启用 VAE tiling+slicing，并在检测到较小统一内存预算时使用最大粒度的
-attention slicing。每个任务仍在隔离 Worker 中执行并于完成后退出，避免 SDXL 常驻影响
+M4/16GB 适配额外启用 VAE tiling+slicing 与 640 像素预览预算，并保留 PyTorch 2 SDPA。
+Diffusers 0.35 在 IP-Adapter 加载后启用 attention slicing 会覆盖适配器专用 processor，
+因此该组合不启用 attention slicing。每个任务仍在隔离 Worker 中执行并于完成后退出，避免 SDXL 常驻影响
 Agent、飞书和 Viewer。工程 smoke 通过只会写入本机忽略目录中的
 `device-validation.json`，不会自动宣称达到生产质量。
 

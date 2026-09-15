@@ -94,7 +94,7 @@ SQLite；页面刷新不会丢失，服务重启后未完成任务会进入可�
   → SDXL img2img 保留内容结构
   → IP-Adapter SDXL ViT-H 注入风格图特征
   → 640/768 像素档位、FP16、VAE tiling/slicing
-  → PyTorch MPS + attention slicing
+  → PyTorch MPS + PyTorch 2 SDPA attention
   → 单任务隔离 Worker，生成后退出并回收统一内存
 ```
 
@@ -138,7 +138,9 @@ corepack pnpm --version
 ### M4 16GB 内存不足
 
 关闭其他重型应用，先使用 `preview` 档位。项目默认最长边 640/768、单并发、VAE
-tiling/slicing、MPS attention slicing，并在每个任务后退出隔离 Worker。若仍然 OOM，不应
+tiling/slicing、640 像素预览预算，并在每个任务后退出隔离 Worker。Diffusers 0.35 中
+`enable_attention_slicing()` 会覆盖 IP-Adapter 的专用 attention processor，因此当前 MPS
+路径保留 PyTorch 2 SDPA，不在加载 IP-Adapter 后启用 attention slicing。若仍然 OOM，不应
 通过关闭 PyTorch 内存保护强行运行，应记录输入尺寸和系统内存后降级到 NVIDIA 节点或更小
 模型；模型路线变化必须重新做质量对照。
 

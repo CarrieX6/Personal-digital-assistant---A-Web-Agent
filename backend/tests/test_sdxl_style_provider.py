@@ -217,9 +217,6 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
             self.to_device = device
             return self
 
-        def enable_attention_slicing(self, _slice_size="auto") -> None:
-            self.attention_slicing = True
-
         def maybe_free_model_hooks(self) -> None:
             return None
 
@@ -257,7 +254,7 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
 
     assert provider._resolved_accelerator == "mps"
     assert pipeline.to_device == "mps"
-    assert pipeline.attention_slicing is True
+    assert pipeline.attention_slicing is False
     assert pipeline.cpu_offload is False
     provider.close()
     assert FakeMPS.empty_calls == 1
