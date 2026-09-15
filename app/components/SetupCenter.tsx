@@ -192,21 +192,23 @@ export function SetupCenter({
 
   useEffect(() => {
     const controller = new AbortController();
-    void refresh(controller.signal)
-      .catch((error) => {
-        if (
-          controller.signal.aborted ||
-          (error instanceof DOMException && error.name === "AbortError")
-        ) {
-          return;
-        }
-        setFeedback(
-          error instanceof Error ? error.message : "无法读取本机安装状态。",
-        );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+    queueMicrotask(() => {
+      void refresh(controller.signal)
+        .catch((error) => {
+          if (
+            controller.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError")
+          ) {
+            return;
+          }
+          setFeedback(
+            error instanceof Error ? error.message : "无法读取本机安装状态。",
+          );
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
+    });
     return () => controller.abort();
   }, [refresh]);
 

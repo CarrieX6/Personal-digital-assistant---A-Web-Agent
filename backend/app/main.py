@@ -108,6 +108,7 @@ from .settings import (
     create_default_settings_service,
 )
 from .style_transfer import PhotoStyleService, StyleParameters, register_style_tools
+from .tokenization import ContextWindowExceededError
 from .tools import ToolError, ToolRegistry, build_default_registry
 
 
@@ -329,6 +330,12 @@ def create_app(
             "http://localhost:3000",
             "http://127.0.0.1:3000",
         ],
+        # Vinext/Vite automatically selects another free development port when
+        # 3000 is occupied.  Keep the API local-only while allowing that normal
+        # fallback (3001, 5173, and similar localhost ports).
+        allow_origin_regex=(
+            r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$"
+        ),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type"],
@@ -840,6 +847,7 @@ def create_app(
         prompt: str = Form(default=""),
         mode: str = Form(default="preserve_layout"),
         quality: str = Form(default="standard"),
+        style_preset: str = Form(default="auto"),
         style_strength: float = Form(default=0.7),
         content_strength: float = Form(default=0.8),
         detail_strength: float = Form(default=0.7),
@@ -860,6 +868,7 @@ def create_app(
                 parameters=StyleParameters(
                     mode=mode,
                     quality=quality,
+                    style_preset=style_preset,
                     style_strength=style_strength,
                     content_strength=content_strength,
                     detail_strength=detail_strength,
@@ -1219,6 +1228,8 @@ def create_app(
                     pass
             return response
         except AssetError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ContextWindowExceededError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

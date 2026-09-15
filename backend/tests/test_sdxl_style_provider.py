@@ -13,6 +13,7 @@ from backend.app.sdxl_style_provider import (
     accelerator_memory_mib,
     content_dimensions,
     device_validation_status,
+    harmonize_style_palette,
     lcm_scheduler_config,
     map_native_parameters,
     provider_gate_local_validation_status,
@@ -27,6 +28,8 @@ from backend.app.style_model_manifest import (
 from backend.app.style_transfer import (
     StyleParameters,
     build_style_provider_from_env,
+    compose_style_negative_prompt,
+    compose_style_prompt,
 )
 
 
@@ -115,7 +118,7 @@ def test_native_parameter_mapping_matches_accepted_8gb_path() -> None:
     mapped = map_native_parameters(StyleParameters(seed=1701))
 
     assert mapped["path"] == "base_sdxl_v1"
-    assert mapped["steps"] == 16
+    assert mapped["steps"] == 20
     assert mapped["style_scale"] == 0.854
     assert mapped["denoise_strength"] == 0.418
     assert mapped["guidance_scale"] == 5.98
@@ -123,7 +126,7 @@ def test_native_parameter_mapping_matches_accepted_8gb_path() -> None:
         int(mapped["steps"]),
         float(mapped["denoise_strength"]),
     )
-    assert int(scheduler_steps * float(mapped["denoise_strength"])) == 16
+    assert int(scheduler_steps * float(mapped["denoise_strength"])) == 20
     assert style_layer_scale(0.85) == {
         "down": {"block_2": [0.0, 0.85]},
         "up": {"block_0": [0.0, 0.85, 0.0]},
@@ -141,9 +144,46 @@ def test_native_content_dimensions_are_sdxl_safe() -> None:
         pixel_budget=600_000,
     )
 
-    assert (width, height) == (768, 448)
-    assert width % 64 == height % 64 == 0
+    assert (width, height) == (768, 432)
+    assert width % 8 == height % 8 == 0
     assert width * height <= 600_000
+
+
+def test_style_presets_add_medium_contract_without_copying_reference_content() -> None:
+    parameters = StyleParameters(
+        style_preset="cyberpunk",
+        prompt="保留原图招牌位置",
+        seed=1701,
+    ).validated()
+
+    mapped = map_native_parameters(parameters)
+    prompt = compose_style_prompt(parameters)
+    negative = compose_style_negative_prompt(parameters)
+
+    assert mapped["style_scale"] == 0.1025
+    assert mapped["denoise_strength"] == 0.488
+    assert mapped["guidance_scale"] == 6.23
+    assert mapped["palette_mix"] == 0.28
+    assert "cyan and magenta neon" in prompt
+    assert "never for its people, objects, or layout" in prompt
+    assert "保留原图招牌位置" in prompt
+    assert "subject copied from the style reference" in negative
+    assert "bright natural daylight" in negative
+
+
+def test_ink_palette_harmonization_is_deterministic_and_desaturates() -> None:
+    source = Image.new("RGB", (80, 48), "#1b82d1")
+    style = Image.new("RGB", (60, 60), "#b8aa98")
+    parameters = StyleParameters(style_preset="ink_wash", seed=1701)
+
+    first, mix = harmonize_style_palette(source, [style], parameters)
+    second, _ = harmonize_style_palette(source, [style], parameters)
+
+    assert first.size == source.size
+    assert first.tobytes() == second.tobytes()
+    assert mix == 0.2941
+    red, green, blue = first.getpixel((0, 0))
+    assert max(red, green, blue) - min(red, green, blue) < 80
 
 
 def test_native_provider_preflight_does_not_load_or_download(tmp_path: Path) -> None:
@@ -422,9 +462,9 @@ def test_native_provider_executes_diffusers_contract_without_weights(
     )
 
     assert result.provider_name == "sdxl_ip_adapter_8gb_v1"
-    assert result.image.size == (320, 256)
+    assert result.image.size == (320, 224)
     inference = result.metadata["inference_parameters"]
-    assert inference["actual_steps"] == 16
+    assert inference["actual_steps"] == 20
     assert inference["style_reference_count"] == 2
     assert result.metadata["runtime"]["peak_reserved_vram_mib"] == 512
     assert result.metadata["runtime"]["accelerator"] == "cuda"

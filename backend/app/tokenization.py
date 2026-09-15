@@ -27,6 +27,58 @@ class RequestTokenGateResult:
     serialized_byte_upper_bound: int
     reserved_output_tokens: int
     context_window_tokens: int
+    inline_image_count: int = 0
+    estimated_vision_tokens: int = 0
+
+
+_INLINE_IMAGE_PREFIXES = (
+    "data:image/jpeg;base64,",
+    "data:image/png;base64,",
+    "data:image/webp;base64,",
+)
+_TOKENS_PER_INLINE_IMAGE = 8_192
+
+
+def _redact_inline_images(value: object) -> tuple[object, int]:
+    """Remove transport-only base64 bytes from a model context estimate.
+
+    Vision APIs decode data URLs before constructing model tokens. Counting the
+    base64 characters as text rejects ordinary images even though they fit the
+    model context. A deliberately conservative fixed reserve still accounts for
+    visual tokens while keeping unrelated large strings fully covered.
+    """
+
+    if isinstance(value, list):
+        items: list[object] = []
+        count = 0
+        for item in value:
+            redacted, nested_count = _redact_inline_images(item)
+            items.append(redacted)
+            count += nested_count
+        return items, count
+    if isinstance(value, dict):
+        items: dict[object, object] = {}
+        count = 0
+        for key, item in value.items():
+            if (
+                key == "image_url"
+                and value.get("type") == "image_url"
+                and isinstance(item, dict)
+                and isinstance(item.get("url"), str)
+                and item["url"].startswith(_INLINE_IMAGE_PREFIXES)
+            ):
+                media_type = item["url"][5 : item["url"].index(";base64,")]
+                items[key] = {
+                    **item,
+                    "url": f"[inline-{media_type}-payload]",
+                }
+                count += 1
+                continue
+            redacted, nested_count = _redact_inline_images(item)
+            items[key] = redacted
+            count += nested_count
+        return items, count
+    return value, 0
 
 
 def enforce_request_token_gate(
@@ -37,18 +89,22 @@ def enforce_request_token_gate(
 ) -> RequestTokenGateResult:
     """Reject a request unless a serialization-level upper bound fits.
 
-    The ASCII-escaped JSON byte count is deliberately conservative: common
-    subword tokenizers cannot emit more content tokens than the bytes supplied,
-    and counting the entire body also covers message/tool wrapper overhead.
+    The ASCII-escaped JSON byte count is deliberately conservative for textual
+    content: common subword tokenizers cannot emit more content tokens than the
+    bytes supplied, and counting the entire body also covers wrapper overhead.
+    Inline image base64 is transport data rather than text tokens, so it is
+    replaced by a marker and charged a conservative visual-token reserve.
     """
 
+    gate_payload, inline_image_count = _redact_inline_images(payload)
     serialized = json.dumps(
-        payload,
+        gate_payload,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    upper_bound = len(serialized) + 64
+    estimated_vision_tokens = inline_image_count * _TOKENS_PER_INLINE_IMAGE
+    upper_bound = len(serialized) + 64 + estimated_vision_tokens
     total = upper_bound + max(0, int(reserved_output_tokens))
     if total > int(context_window_tokens):
         raise ContextWindowExceededError(
@@ -60,6 +116,8 @@ def enforce_request_token_gate(
         serialized_byte_upper_bound=upper_bound,
         reserved_output_tokens=int(reserved_output_tokens),
         context_window_tokens=int(context_window_tokens),
+        inline_image_count=inline_image_count,
+        estimated_vision_tokens=estimated_vision_tokens,
     )
 
 
