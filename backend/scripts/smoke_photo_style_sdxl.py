@@ -51,6 +51,20 @@ def main() -> None:
         choices=("preview", "standard", "high"),
         default="standard",
     )
+    parser.add_argument(
+        "--style-preset",
+        choices=(
+            "auto",
+            "ink_wash",
+            "cyberpunk",
+            "oil_painting",
+            "post_impressionist",
+            "watercolor",
+            "anime",
+            "cinematic",
+        ),
+        default="auto",
+    )
     parser.add_argument("--style-strength", type=float, default=0.7)
     parser.add_argument("--content-strength", type=float, default=0.8)
     parser.add_argument("--detail-strength", type=float, default=0.7)
@@ -92,6 +106,7 @@ def main() -> None:
             StyleParameters(
                 mode=args.mode,
                 quality=args.quality,
+                style_preset=args.style_preset,
                 style_strength=args.style_strength,
                 content_strength=args.content_strength,
                 detail_strength=args.detail_strength,
@@ -114,6 +129,7 @@ def main() -> None:
                     "parameters": {
                         "mode": args.mode,
                         "quality": args.quality,
+                        "style_preset": args.style_preset,
                         "style_strength": args.style_strength,
                         "content_strength": args.content_strength,
                         "detail_strength": args.detail_strength,

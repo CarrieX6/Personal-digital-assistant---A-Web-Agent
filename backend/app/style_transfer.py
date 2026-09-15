@@ -32,12 +32,106 @@ LOGGER = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, str, str], None]
 STYLE_MODES = {"preserve_layout", "recompose"}
 STYLE_QUALITIES = {"preview", "standard", "high"}
+STYLE_PRESETS = {
+    "auto",
+    "ink_wash",
+    "cyberpunk",
+    "oil_painting",
+    "post_impressionist",
+    "watercolor",
+    "anime",
+    "cinematic",
+}
+
+_STYLE_PRESET_PROMPTS = {
+    "auto": (
+        "Infer only the visual medium, palette, brushwork, lighting, and surface "
+        "texture from the style reference"
+    ),
+    "ink_wash": (
+        "traditional Chinese shui-mo ink wash painting on warm xuan rice paper, "
+        "expressive xieyi brushwork, layered black ink values, controlled ink "
+        "bleeding, dry-brush edges, restrained mineral color, atmospheric mist, "
+        "and intentional negative space"
+    ),
+    "cyberpunk": (
+        "cinematic cyberpunk night aesthetic, deep indigo shadows, cyan and magenta "
+        "neon accents, emissive practical lights, wet reflective surfaces, crisp "
+        "futuristic materials, subtle holographic details, and volumetric haze"
+    ),
+    "oil_painting": (
+        "traditional oil painting on textured canvas, layered opaque pigment, visible "
+        "confident brushstrokes, restrained impasto highlights, painterly color "
+        "transitions, and coherent hand-painted detail"
+    ),
+    "post_impressionist": (
+        "post-impressionist oil painting, energetic directional impasto, rhythmic "
+        "swirling brushstrokes that follow the scene geometry, cobalt blue and golden "
+        "ochre accents, expressive but structurally coherent forms"
+    ),
+    "watercolor": (
+        "professional transparent watercolor on cold-pressed cotton paper, luminous "
+        "layered washes, soft wet-on-wet transitions, selective crisp dry-brush "
+        "detail, granulating pigment, and natural reserved paper highlights"
+    ),
+    "anime": (
+        "polished cinematic anime illustration, clean intentional linework, controlled "
+        "cel shading, expressive color design, crisp silhouettes, and detailed but "
+        "uncluttered backgrounds"
+    ),
+    "cinematic": (
+        "cinematic film still, motivated practical lighting, shaped contrast, subtle "
+        "film grain, natural highlight roll-off, rich production design, and a "
+        "cohesive color grade"
+    ),
+}
+
+_STYLE_PRESET_NEGATIVE_PROMPTS = {
+    "auto": "",
+    "ink_wash": (
+        "photorealistic rendering, glossy 3d, neon lighting, oil impasto, acrylic "
+        "paint, oversaturated colors, dense edge-to-edge detail"
+    ),
+    "cyberpunk": (
+        "bright natural daylight, rustic earth-tone palette, pastel watercolor, "
+        "traditional ink painting, flat lighting, weak contrast"
+    ),
+    "oil_painting": (
+        "flat vector art, cel shading, plastic 3d rendering, photographic smoothness, "
+        "watercolor bleeding"
+    ),
+    "post_impressionist": (
+        "photorealistic smoothness, flat digital fill, airbrushed gradients, plastic "
+        "3d rendering, random strokes unrelated to form"
+    ),
+    "watercolor": (
+        "oil impasto, acrylic paint, plastic 3d rendering, hard digital gradients, "
+        "muddy opaque color"
+    ),
+    "anime": (
+        "photorealism, painterly smearing, malformed linework, noisy hatching, plastic "
+        "3d rendering"
+    ),
+    "cinematic": (
+        "flat lighting, oversaturated digital look, crushed shadows, clipped highlights, "
+        "illustration, painting"
+    ),
+}
+
+_COMMON_NEGATIVE_PROMPT = (
+    "subject copied from the style reference, composition copied from the style "
+    "reference, new foreground character, new central subject, changed identity, "
+    "changed pose, warped perspective, warped geometry, duplicate subject, extra "
+    "limbs, missing limbs, melted architecture, unreadable text, watermark, signature, "
+    "logo, blur, low detail"
+)
 
 
 @dataclass(frozen=True)
 class StyleParameters:
     mode: str = "preserve_layout"
     quality: str = "standard"
+    style_preset: str = "auto"
     style_strength: float = 0.7
     content_strength: float = 0.8
     detail_strength: float = 0.7
@@ -49,6 +143,8 @@ class StyleParameters:
             raise AssetError("风格化模式必须是保留布局或重新构图。")
         if self.quality not in STYLE_QUALITIES:
             raise AssetError("质量档位必须是预览、标准或高质量。")
+        if self.style_preset not in STYLE_PRESETS:
+            raise AssetError("请选择受支持的风格预设。")
         for label, value in (
             ("风格强度", self.style_strength),
             ("内容保持", self.content_strength),
@@ -66,12 +162,61 @@ class StyleParameters:
         return {
             "mode": self.mode,
             "quality": self.quality,
+            "style_preset": self.style_preset,
             "style_strength": self.style_strength,
             "content_strength": self.content_strength,
             "detail_strength": self.detail_strength,
             "prompt": self.prompt,
             "seed": self.seed,
         }
+
+    def provider_dict(self) -> dict[str, Any]:
+        """Return the backward-compatible payload understood by pic-style services."""
+        payload = self.public_dict()
+        payload.pop("style_preset")
+        style_prompt, content_prompt = compose_style_prompt_parts(self)
+        style_budget = max(0, 999 - len(content_prompt))
+        payload["prompt"] = f"{style_prompt[:style_budget]} {content_prompt}".strip()
+        return payload
+
+
+def compose_style_prompt_parts(parameters: StyleParameters) -> tuple[str, str]:
+    if parameters.mode == "preserve_layout":
+        content_contract = (
+            "Apply this medium to the content image while preserving its subject, "
+            "identity, pose, composition, perspective, silhouette, and geometry"
+        )
+    else:
+        content_contract = (
+            "Keep the content image's subject and identity recognizable while allowing "
+            "a deliberate recomposition"
+        )
+    reference_contract = (
+        "Use the reference only for medium, palette, materials, brushwork, lighting, "
+        "and texture, never for its people, objects, or layout; add no new foreground "
+        "subject"
+    )
+    style_parts = [_STYLE_PRESET_PROMPTS[parameters.style_preset]]
+    if parameters.prompt.strip():
+        style_parts.append(parameters.prompt.strip())
+    style_prompt = ". ".join(style_parts) + "."
+    content_prompt = ". ".join(
+        (content_contract, reference_contract, "coherent high-detail finished artwork")
+    ) + "."
+    return style_prompt, content_prompt
+
+
+def compose_style_prompt(parameters: StyleParameters) -> str:
+    return " ".join(
+        compose_style_prompt_parts(parameters)
+    )
+
+
+def compose_style_negative_prompt(parameters: StyleParameters) -> str:
+    preset_negative = _STYLE_PRESET_NEGATIVE_PROMPTS[parameters.style_preset]
+    return ", ".join(
+        part for part in (_COMMON_NEGATIVE_PROMPT, preset_negative) if part
+    )
 
 
 @dataclass(frozen=True)
@@ -240,7 +385,7 @@ class PicStyleHttpProvider:
                     "style_images": [
                         {"image": {"asset_id": style_id}} for style_id in style_ids
                     ],
-                    **parameters.public_dict(),
+                    **parameters.provider_dict(),
                     "num_outputs": 1,
                 },
                 headers={**self._headers(), "Idempotency-Key": str(uuid4())},
@@ -276,6 +421,15 @@ class PicStyleHttpProvider:
                     download = self.client.get(output_url, headers=self._headers())
                     download.raise_for_status()
                     image = SpatialSceneService._decode_image(download.content)
+                    palette_mix = 0.0
+                    if parameters.style_preset != "auto":
+                        from .sdxl_style_provider import harmonize_style_palette
+
+                        image, palette_mix = harmonize_style_palette(
+                            image,
+                            styles,
+                            parameters,
+                        )
                     return ProviderResult(
                         image=image,
                         provider_name=self.name,
@@ -287,6 +441,11 @@ class PicStyleHttpProvider:
                             "normalized_parameters": result.get(
                                 "normalized_parameters", {}
                             ),
+                            "style_preset": parameters.style_preset,
+                            "prompt_strategy": (
+                                "content_contract_plus_style_preset_v1"
+                            ),
+                            "palette_harmonization_mix": palette_mix,
                             "production_quality": production_quality,
                         },
                     )
@@ -835,6 +994,7 @@ def register_style_tools(
             parameters = StyleParameters(
                 mode=str(arguments.get("mode", "preserve_layout")),
                 quality=str(arguments.get("quality", "standard")),
+                style_preset=str(arguments.get("style_preset", "auto")),
                 style_strength=float(arguments.get("style_strength", 0.7)),
                 content_strength=float(arguments.get("content_strength", 0.8)),
                 detail_strength=float(arguments.get("detail_strength", 0.7)),
@@ -887,6 +1047,21 @@ def register_style_tools(
                 "enum": ["preview", "standard", "high"],
                 "default": "standard",
             },
+            "style_preset": {
+                "type": "string",
+                "enum": [
+                    "auto",
+                    "ink_wash",
+                    "cyberpunk",
+                    "oil_painting",
+                    "post_impressionist",
+                    "watercolor",
+                    "anime",
+                    "cinematic",
+                ],
+                "default": "auto",
+                "description": "典型风格预设；与参考图共同约束媒介、笔触、光色和纹理",
+            },
             "style_strength": {"type": "number", "minimum": 0, "maximum": 1},
             "content_strength": {"type": "number", "minimum": 0, "maximum": 1},
             "detail_strength": {"type": "number", "minimum": 0, "maximum": 1},
@@ -909,7 +1084,7 @@ def register_style_tools(
             capability=CapabilityInfo(
                 id="photo-style-transfer",
                 name="图片风格化",
-                version="1.2.0",
+                version="1.3.0",
                 author="Xianggang Ma",
                 description="将一至三张参考图的视觉风格迁移到内容图，并可调节结构与细节保持程度。",
                 entrypoint="create_photo_style_transfer",

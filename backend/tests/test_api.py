@@ -122,6 +122,40 @@ def test_health_and_tools(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://localhost:3001",
+        "http://127.0.0.1:5173",
+        "http://[::1]:3002",
+    ],
+)
+def test_cors_accepts_local_frontend_fallback_ports(
+    tmp_path: Path,
+    origin: str,
+) -> None:
+    settings, _ = build_test_settings(tmp_path)
+    client = TestClient(
+        create_app(
+            tmp_path / "runs.jsonl",
+            settings_service=settings,
+            spatial_service=build_test_spatial(tmp_path),
+        )
+    )
+
+    response = client.options(
+        "/api/agent/run",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_analysis_runs_multiple_tools_and_writes_trace(tmp_path: Path) -> None:
     trace_path = tmp_path / "runs.jsonl"
     settings, _ = build_test_settings(tmp_path)

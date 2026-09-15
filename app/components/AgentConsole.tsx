@@ -823,6 +823,7 @@ export function AgentConsole({
     setJob(null);
 
     const stagedImages: SourceImage[] = [];
+    let requestStage = "上传图片";
     try {
       for (const pending of pendingAttachments) {
         const uploadPayload = new FormData();
@@ -837,6 +838,7 @@ export function AgentConsole({
         stagedImages.push((await uploadResponse.json()) as SourceImage);
       }
 
+      requestStage = "提交任务";
       const response = await fetch(`${apiBase}/api/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -919,10 +921,7 @@ export function AgentConsole({
           method: "DELETE",
         });
       });
-      const detail =
-        requestError instanceof Error
-          ? requestError.message
-          : "无法连接本地后端。";
+      const detail = requestFailureDetail(requestError, apiBase, requestStage);
       setError(detail);
       updateThread(threadId, (thread) => ({
         ...thread,
@@ -1979,6 +1978,22 @@ function resolveApiMediaUrl(apiBase: string, value: string | undefined) {
   if (!value) return undefined;
   if (value.startsWith("/")) return `${apiBase}${value}`;
   return /^https?:\/\//i.test(value) ? value : undefined;
+}
+
+function requestFailureDetail(
+  requestError: unknown,
+  apiBase: string,
+  requestStage: string,
+) {
+  const message =
+    requestError instanceof Error ? requestError.message.trim() : "";
+  if (
+    requestError instanceof TypeError ||
+    /failed to fetch|networkerror|network request failed/i.test(message)
+  ) {
+    return `${requestStage}失败：无法连接本地服务（${apiBase}）。请确认后端已启动，然后直接重试；图片仍保留在输入框中。`;
+  }
+  return message || `${requestStage}失败：本地服务没有返回可识别的错误。`;
 }
 
 function formatRelative(value: string) {

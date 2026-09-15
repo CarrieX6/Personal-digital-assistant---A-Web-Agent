@@ -58,6 +58,30 @@ type ImagePreview = {
 };
 
 const supportedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+const stylePresetHints: Record<string, string> = {
+  auto: "自动读取参考图的色彩、材质与笔触。",
+  ink_wash: "强化宣纸、墨色层次、飞白与留白，抑制写实和油画质感。",
+  cyberpunk: "强化青紫霓虹、湿地反射、暗部层次与未来材质。",
+  oil_painting: "强化画布纹理、分层颜料和自然厚涂笔触。",
+  post_impressionist: "强化顺应结构的旋转笔触、钴蓝与金黄厚涂。",
+  watercolor: "强化透明叠染、纸张颗粒和自然水痕。",
+  anime: "强化清晰轮廓、可控赛璐璐明暗与动画配色。",
+  cinematic: "强化动机光、电影反差、胶片颗粒与统一调色。",
+};
+
+function inferStylePreset(files: File[]) {
+  const names = files.map((file) => file.name.toLowerCase()).join(" ");
+  if (/(水墨|国画|ink.?wash|sumi)/i.test(names)) return "ink_wash";
+  if (/(赛博|cyber|neon|霓虹)/i.test(names)) return "cyberpunk";
+  if (/(梵高|van.?gogh|后印象|post.?impression)/i.test(names)) {
+    return "post_impressionist";
+  }
+  if (/(水彩|watercolor|watercolour)/i.test(names)) return "watercolor";
+  if (/(油画|oil.?paint)/i.test(names)) return "oil_painting";
+  if (/(动漫|动画|anime|manga)/i.test(names)) return "anime";
+  if (/(电影|cinematic|film.?still)/i.test(names)) return "cinematic";
+  return "auto";
+}
 
 function resolveUrl(apiBase: string, path: string | null) {
   if (!path) return "";
@@ -96,6 +120,7 @@ export function PhotoStyleStudio({
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState("preserve_layout");
   const [quality, setQuality] = useState("standard");
+  const [stylePreset, setStylePreset] = useState("auto");
   const [styleStrength, setStyleStrength] = useState(0.7);
   const [contentStrength, setContentStrength] = useState(0.8);
   const [detailStrength, setDetailStrength] = useState(0.7);
@@ -249,6 +274,7 @@ export function PhotoStyleStudio({
     setError("");
     setStyleFiles(selected);
     setStylePreviews(selected.map(rememberUrl));
+    setStylePreset(inferStylePreset(selected));
   }
 
   async function createTransfer(event: FormEvent<HTMLFormElement>) {
@@ -263,6 +289,7 @@ export function PhotoStyleStudio({
     payload.append("prompt", prompt.trim());
     payload.append("mode", mode);
     payload.append("quality", quality);
+    payload.append("style_preset", stylePreset);
     payload.append("style_strength", String(styleStrength));
     payload.append("content_strength", String(contentStrength));
     payload.append("detail_strength", String(detailStrength));
@@ -292,6 +319,7 @@ export function PhotoStyleStudio({
     setStylePreviews([]);
     setTitle("");
     setPrompt("");
+    setStylePreset("auto");
     if (contentInputRef.current) contentInputRef.current.value = "";
     if (styleInputRef.current) styleInputRef.current.value = "";
   }
@@ -434,7 +462,23 @@ export function PhotoStyleStudio({
             />
           </label>
 
-          <div className="style-select-row">
+          <div className="style-select-row style-select-row-three">
+            <label>
+              <span>风格预设</span>
+              <select
+                value={stylePreset}
+                onChange={(event) => setStylePreset(event.target.value)}
+              >
+                <option value="auto">自动识别</option>
+                <option value="ink_wash">中国水墨</option>
+                <option value="cyberpunk">赛博朋克</option>
+                <option value="oil_painting">经典油画</option>
+                <option value="post_impressionist">后印象派笔触</option>
+                <option value="watercolor">透明水彩</option>
+                <option value="anime">动漫插画</option>
+                <option value="cinematic">电影质感</option>
+              </select>
+            </label>
             <label>
               <span>构图模式</span>
               <select value={mode} onChange={(event) => setMode(event.target.value)}>
@@ -454,6 +498,7 @@ export function PhotoStyleStudio({
               </select>
             </label>
           </div>
+          <p className="style-preset-note">{stylePresetHints[stylePreset]}</p>
 
           <div className="style-sliders">
             {[

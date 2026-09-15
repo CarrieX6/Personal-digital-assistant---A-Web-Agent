@@ -16,7 +16,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .assets import AssetError
 from .style_model_manifest import (
@@ -26,18 +27,16 @@ from .style_model_manifest import (
     verify_prepared_models,
     verify_provider_gate,
 )
-from .style_transfer import ProgressCallback, ProviderResult, StyleParameters
+from .style_transfer import (
+    ProgressCallback,
+    ProviderResult,
+    StyleParameters,
+    compose_style_negative_prompt,
+    compose_style_prompt_parts,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_PROMPT = (
-    "faithful stylization of the same subject and composition, preserve identity, "
-    "layout, geometry and important details, adopt the reference visual style"
-)
-DEFAULT_NEGATIVE_PROMPT = (
-    "warped geometry, changed identity, duplicate subject, extra limbs, text, letters, "
-    "numbers, watermark, signature, logo, blur, low detail"
-)
 _QUALITY_DEFAULTS: dict[str, dict[str, int | str]] = {
     "preview": {
         "path": "base_preview_fallback_v1",
@@ -47,15 +46,66 @@ _QUALITY_DEFAULTS: dict[str, dict[str, int | str]] = {
     },
     "standard": {
         "path": "base_sdxl_v1",
-        "steps": 16,
+        "steps": 20,
         "max_long_edge": 768,
         "pixel_budget": 600_000,
     },
     "high": {
         "path": "base_sdxl_v1",
-        "steps": 22,
-        "max_long_edge": 768,
-        "pixel_budget": 600_000,
+        "steps": 28,
+        "max_long_edge": 896,
+        "pixel_budget": 800_000,
+    },
+}
+
+_PRESET_TUNING: dict[str, dict[str, float]] = {
+    "auto": {
+        "adapter_multiplier": 1.0,
+        "denoise_offset": 0.0,
+        "guidance_offset": 0.0,
+        "palette_mix": 0.0,
+    },
+    "ink_wash": {
+        "adapter_multiplier": 0.12,
+        "denoise_offset": 0.08,
+        "guidance_offset": 0.30,
+        "palette_mix": 0.34,
+    },
+    "cyberpunk": {
+        "adapter_multiplier": 0.12,
+        "denoise_offset": 0.07,
+        "guidance_offset": 0.25,
+        "palette_mix": 0.28,
+    },
+    "oil_painting": {
+        "adapter_multiplier": 0.55,
+        "denoise_offset": 0.04,
+        "guidance_offset": 0.15,
+        "palette_mix": 0.16,
+    },
+    "post_impressionist": {
+        "adapter_multiplier": 0.45,
+        "denoise_offset": 0.06,
+        "guidance_offset": 0.20,
+        "palette_mix": 0.20,
+    },
+    "watercolor": {
+        "adapter_multiplier": 0.42,
+        "denoise_offset": 0.05,
+        "guidance_offset": 0.20,
+        "palette_mix": 0.20,
+    },
+    "anime": {
+        "adapter_multiplier": 0.50,
+        "denoise_offset": 0.07,
+        "guidance_offset": 0.20,
+        "palette_mix": 0.08,
+    },
+    "cinematic": {
+        "adapter_multiplier": 0.60,
+        "denoise_offset": 0.03,
+        "guidance_offset": 0.15,
+        "palette_mix": 0.12,
     },
 }
 
@@ -224,7 +274,9 @@ def is_accelerator_oom(torch_module: Any, accelerator: str, exc: Exception) -> b
 
 def map_native_parameters(parameters: StyleParameters) -> dict[str, Any]:
     mapped: dict[str, Any] = dict(_QUALITY_DEFAULTS[parameters.quality])
+    tuning = _PRESET_TUNING[parameters.style_preset]
     style_scale = _clip(0.35 + 0.72 * parameters.style_strength, 0.35, 1.07)
+    style_scale *= tuning["adapter_multiplier"]
     if parameters.mode == "preserve_layout":
         denoise = (
             0.24
@@ -240,15 +292,20 @@ def map_native_parameters(parameters: StyleParameters) -> dict[str, Any]:
             + 0.08 * parameters.style_strength
         )
         denoise = _clip(denoise, 0.45, 0.82)
+    denoise = _clip(denoise + tuning["denoise_offset"], 0.24, 0.82)
+    guidance = _clip(
+        5.0 + 1.4 * parameters.style_strength + tuning["guidance_offset"],
+        5.0,
+        6.7,
+    )
     mapped.update(
         {
-            "mapping_version": "business_to_sdxl_v2_fixed_pair_tuned",
+            "mapping_version": "business_to_sdxl_v3_style_aware",
+            "style_preset": parameters.style_preset,
             "style_scale": round(style_scale, 4),
             "denoise_strength": round(denoise, 4),
-            "guidance_scale": round(
-                _clip(5.0 + 1.4 * parameters.style_strength, 5.0, 6.4),
-                4,
-            ),
+            "guidance_scale": round(guidance, 4),
+            "palette_mix": tuning["palette_mix"],
             "controlnet_enabled": False,
             "lcm_preview_requested": parameters.quality == "preview",
         }
@@ -271,21 +328,96 @@ def content_dimensions(
     scaled_width = max(64, round(width * scale))
     scaled_height = max(64, round(height * scale))
     if scaled_width >= scaled_height:
-        target_width = max(64, min(max_long_edge, round(scaled_width / 64) * 64))
+        target_width = max(64, min(max_long_edge, round(scaled_width / 8) * 8))
         target_height = max(
             64,
-            round((target_width * height / width) / 64) * 64,
+            round((target_width * height / width) / 8) * 8,
         )
     else:
         target_height = max(
             64,
-            min(max_long_edge, round(scaled_height / 64) * 64),
+            min(max_long_edge, round(scaled_height / 8) * 8),
         )
         target_width = max(
             64,
-            round((target_height * width / height) / 64) * 64,
+            round((target_height * width / height) / 8) * 8,
         )
-    return min(768, target_width), min(768, target_height)
+    while target_width * target_height > pixel_budget:
+        if target_width >= target_height and target_width > 64:
+            target_width -= 8
+        elif target_height > 64:
+            target_height -= 8
+        else:
+            break
+    return target_width, target_height
+
+
+def harmonize_style_palette(
+    image: Image.Image,
+    styles: list[Image.Image],
+    parameters: StyleParameters,
+) -> tuple[Image.Image, float]:
+    """Apply a restrained palette match without changing content geometry."""
+    tuning = _PRESET_TUNING[parameters.style_preset]
+    mix = tuning["palette_mix"] * (0.55 + 0.45 * parameters.style_strength)
+    if mix <= 0 or not styles:
+        return image.convert("RGB"), 0.0
+
+    source = np.asarray(image.convert("RGB"), dtype=np.float32)
+    samples = [
+        np.asarray(
+            style.convert("RGB").resize((192, 192), Image.Resampling.LANCZOS),
+            dtype=np.float32,
+        ).reshape(-1, 3)
+        for style in styles
+    ]
+    target_pixels = np.concatenate(samples, axis=0)
+    source_pixels = source.reshape(-1, 3)
+    source_mean = source_pixels.mean(axis=0)
+    source_std = np.maximum(source_pixels.std(axis=0), 1.0)
+    target_mean = target_pixels.mean(axis=0)
+    target_std = np.maximum(target_pixels.std(axis=0), 1.0)
+    variance_ratio = np.clip(target_std / source_std, 0.65, 1.6)
+    matched = (source - source_mean) * variance_ratio + target_mean
+    matched_image = Image.fromarray(
+        np.clip(matched, 0, 255).astype(np.uint8),
+        "RGB",
+    )
+    result = Image.blend(image.convert("RGB"), matched_image, mix)
+    if parameters.style_preset == "ink_wash":
+        gray = ImageOps.grayscale(result)
+        wash = ImageOps.autocontrast(
+            gray.filter(ImageFilter.GaussianBlur(radius=0.9)),
+            cutoff=1,
+        )
+        wash = wash.point(lambda value: min(255, round(value / 16) * 16))
+        wash = ImageEnhance.Brightness(wash).enhance(1.08)
+        ink_render = ImageOps.colorize(
+            wash,
+            black="#282724",
+            white="#f4efe3",
+        )
+        edges = ImageOps.autocontrast(
+            gray.filter(ImageFilter.FIND_EDGES).filter(
+                ImageFilter.GaussianBlur(radius=0.35)
+            ),
+            cutoff=2,
+        )
+        edge_mask = edges.point(
+            lambda value: max(0, min(96, round((value - 32) * 0.85)))
+        )
+        ink_render.paste(Image.new("RGB", result.size, "#242321"), mask=edge_mask)
+        result = Image.blend(
+            result,
+            ink_render,
+            0.54 + 0.22 * parameters.style_strength,
+        )
+    elif parameters.style_preset == "cyberpunk":
+        result = ImageEnhance.Color(result).enhance(
+            1.0 + 0.16 * parameters.style_strength
+        )
+        result = ImageEnhance.Contrast(result).enhance(1.06)
+    return result, round(mix, 4)
 
 
 class NativeSDXLStyleProvider:
@@ -648,9 +780,12 @@ class NativeSDXLStyleProvider:
                 generator = torch.Generator(device="cpu").manual_seed(
                     int(parameters.seed or 0)
                 )
+                style_prompt, content_prompt = compose_style_prompt_parts(parameters)
                 generated = pipeline(
-                    prompt=parameters.prompt.strip() or DEFAULT_PROMPT,
-                    negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                    prompt=style_prompt,
+                    prompt_2=content_prompt,
+                    negative_prompt=compose_style_negative_prompt(parameters),
+                    negative_prompt_2=compose_style_negative_prompt(parameters),
                     image=prepared_content,
                     ip_adapter_image_embeds=embeddings,
                     strength=denoise,
@@ -662,18 +797,23 @@ class NativeSDXLStyleProvider:
                 ).images[0]
                 if actual_steps != effective_steps:
                     raise AssetError("SDXL 调度器未执行预期的有效步数。")
+                generated, palette_mix = harmonize_style_palette(
+                    generated.convert("RGB"),
+                    prepared_styles,
+                    parameters,
+                )
                 accelerator_memory = accelerator_memory_mib(
                     torch,
                     self._resolved_accelerator or "cpu",
                 )
                 manifest = self._require_manifest()
                 return ProviderResult(
-                    image=generated.convert("RGB"),
+                    image=generated,
                     provider_name=self.name,
                     model_name=self.model_name,
                     metadata={
                         "provider_version": self.version,
-                        "algorithm": "sdxl_img2img_ip_adapter_style_layers_v1",
+                        "algorithm": "sdxl_img2img_ip_adapter_style_layers_v2",
                         "production_quality": False,
                         "quality_gate": "accepted_upstream",
                         "local_quality_validation": (
@@ -710,6 +850,8 @@ class NativeSDXLStyleProvider:
                             "actual_height": generated.height,
                             "style_reference_count": len(prepared_styles),
                             "style_embedding_mode": "equal_weighted_mean_v1",
+                            "prompt_strategy": "dual_encoder_style_and_content_v2",
+                            "palette_harmonization_mix": palette_mix,
                             "controlnet_enabled": False,
                         },
                         "runtime": {
@@ -1001,23 +1143,12 @@ class NativeSDXLStyleProvider:
 
     @staticmethod
     def _prepare_style(style: Image.Image, square_size: int = 512) -> Image.Image:
-        source = style.convert("RGB")
-        scale = min(square_size / source.width, square_size / source.height)
-        resized = source.resize(
-            (
-                max(1, round(source.width * scale)),
-                max(1, round(source.height * scale)),
-            ),
-            Image.Resampling.LANCZOS,
+        return ImageOps.fit(
+            style.convert("RGB"),
+            (square_size, square_size),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
         )
-        average = resized.resize((1, 1), Image.Resampling.BOX).getpixel((0, 0))
-        canvas = Image.new("RGB", (square_size, square_size), average)
-        offset = (
-            (square_size - resized.width) // 2,
-            (square_size - resized.height) // 2,
-        )
-        canvas.paste(resized, offset)
-        return canvas
 
     def _warnings_for_path(self, path: str) -> list[str]:
         if path == "base_preview_fallback_v1":
