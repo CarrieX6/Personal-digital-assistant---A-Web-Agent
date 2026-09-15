@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -612,6 +613,7 @@ class PhotoStyleService:
         )
         self._futures: set[Future[None]] = set()
         self._future_lock = threading.Lock()
+        self._idempotency_locks = tuple(threading.Lock() for _ in range(64))
 
     def create_transfer(
         self,
@@ -624,17 +626,42 @@ class PhotoStyleService:
         owner_id: str = "local",
         idempotency_key: str | None = None,
     ) -> PhotoStyleCreateResponse:
-        existing = self._existing_idempotent_transfer(
-            owner_id=owner_id,
-            idempotency_key=idempotency_key,
-        )
-        if existing is not None:
-            return existing
-        provider_status = self.provider_status()
-        if provider_status["ready"] is False:
-            raise AssetError(
-                "独立 SDXL + IP-Adapter 服务尚未就绪，请先启动 GPU 服务并通过健康检查。"
+        if idempotency_key is None:
+            return self._create_transfer_unlocked(
+                content_bytes,
+                style_bytes,
+                original_name=original_name,
+                title=title,
+                parameters=parameters,
+                owner_id=owner_id,
+                idempotency_key=None,
             )
+        lock_index = uuid5(
+            NAMESPACE_URL,
+            f"agent-photo-style:{owner_id}:{idempotency_key}:lock",
+        ).int % len(self._idempotency_locks)
+        with self._idempotency_locks[lock_index]:
+            return self._create_transfer_unlocked(
+                content_bytes,
+                style_bytes,
+                original_name=original_name,
+                title=title,
+                parameters=parameters,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+            )
+
+    def _create_transfer_unlocked(
+        self,
+        content_bytes: bytes,
+        style_bytes: list[bytes],
+        *,
+        original_name: str,
+        title: str | None = None,
+        parameters: StyleParameters | None = None,
+        owner_id: str = "local",
+        idempotency_key: str | None = None,
+    ) -> PhotoStyleCreateResponse:
         if not 1 <= len(style_bytes) <= 3:
             raise AssetError("请选择一至三张风格参考图。")
         if not content_bytes or any(not item for item in style_bytes):
@@ -644,6 +671,26 @@ class PhotoStyleService:
         ):
             raise AssetError("每张图片不能超过 20MB。")
         selected_parameters = (parameters or StyleParameters()).validated()
+        fallback = Path(original_name).stem or "图片风格化"
+        safe_title = " ".join((title or fallback).strip().split())[:80]
+        request_fingerprint = self._request_fingerprint(
+            content_bytes,
+            style_bytes,
+            title=safe_title,
+            parameters=selected_parameters,
+        )
+        existing = self._existing_idempotent_transfer(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+            expected_fingerprint=request_fingerprint,
+        )
+        if existing is not None:
+            return existing
+        provider_status = self.provider_status()
+        if provider_status["ready"] is False:
+            raise AssetError(
+                "独立 SDXL + IP-Adapter 服务尚未就绪，请先启动 GPU 服务并通过健康检查。"
+            )
         if selected_parameters.seed is None:
             generated_seed = (
                 uuid5(
@@ -687,8 +734,6 @@ class PhotoStyleService:
                 os.chmod(style_path, 0o600)
                 style_files.append(style_path.name)
 
-            fallback = Path(original_name).stem or "图片风格化"
-            safe_title = " ".join((title or fallback).strip().split())[:80]
             metadata = {
                 "width": content.width,
                 "height": content.height,
@@ -700,6 +745,7 @@ class PhotoStyleService:
                 "model_name": self.provider.model_name,
                 "provider_name": self.provider.name,
                 "parameters": selected_parameters.public_dict(),
+                "idempotency_fingerprint": request_fingerprint,
             }
             self.repository.create_asset_and_job(
                 asset_id=asset_id,
@@ -856,6 +902,7 @@ class PhotoStyleService:
         *,
         owner_id: str,
         idempotency_key: str | None,
+        expected_fingerprint: str | None = None,
     ) -> PhotoStyleCreateResponse | None:
         if not idempotency_key:
             return None
@@ -867,10 +914,51 @@ class PhotoStyleService:
         job_row = self.repository.get_job_row(job_id, owner_id)
         if asset_row is None or job_row is None:
             return None
+        if expected_fingerprint is not None:
+            metadata = json.loads(asset_row["metadata_json"])
+            stored_fingerprint = metadata.get("idempotency_fingerprint")
+            if (
+                isinstance(stored_fingerprint, str)
+                and not secrets.compare_digest(
+                    stored_fingerprint,
+                    expected_fingerprint,
+                )
+            ):
+                raise AssetError("这个幂等键已经用于另一组图片或参数。")
         return PhotoStyleCreateResponse(
             asset=self.asset_library.get_asset(asset_id, owner_id=owner_id),
             job=self.asset_library.get_job(job_id, owner_id=owner_id),
+            reused=True,
         )
+
+    @staticmethod
+    def _request_fingerprint(
+        content_bytes: bytes,
+        style_bytes: list[bytes],
+        *,
+        title: str,
+        parameters: StyleParameters,
+    ) -> str:
+        digest = hashlib.sha256()
+        for label, payload in (
+            ("content", content_bytes),
+            *((f"style-{index}", value) for index, value in enumerate(style_bytes)),
+        ):
+            digest.update(label.encode("utf-8"))
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        digest.update(
+            json.dumps(
+                {
+                    "title": title,
+                    "parameters": parameters.public_dict(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        return digest.hexdigest()
 
     def _forget_future(self, future: Future[None]) -> None:
         with self._future_lock:
