@@ -112,6 +112,19 @@ def provider_gate_local_validation_status(
     return status if validated_accelerator == accelerator else "pending"
 
 
+def device_validation_status(path: Path, accelerator: str | None = None) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "pending"
+    if payload.get("status") != "engineering_smoke_passed":
+        return "pending"
+    validated_accelerator = str(payload.get("accelerator") or "").lower()
+    if accelerator and validated_accelerator != accelerator:
+        return "pending"
+    return "engineering_smoke_passed"
+
+
 def style_layer_scale(scale: float) -> dict[str, dict[str, list[float]]]:
     return {
         "down": {"block_2": [0.0, scale]},
@@ -312,6 +325,7 @@ class NativeSDXLStyleProvider:
         if normalized_accelerator not in {"auto", "cuda", "mps"}:
             raise ValueError("accelerator must be auto, cuda or mps")
         self.model_root = model_root
+        self.device_validation_path = model_root / "device-validation.json"
         self.manifest_path = manifest_path
         self.gate_path = gate_path
         self.lock_path = lock_path
@@ -373,9 +387,8 @@ class NativeSDXLStyleProvider:
             and bool(accelerator_status.get("available"))
         )
         resolved_accelerator = accelerator_status.get("resolved")
-        local_validation = provider_gate_local_validation_status(
-            self.gate_path,
-            str(resolved_accelerator) if resolved_accelerator else None,
+        local_validation = self._local_validation_status(
+            str(resolved_accelerator) if resolved_accelerator else None
         )
         return {
             "name": self.name,
@@ -414,6 +427,15 @@ class NativeSDXLStyleProvider:
             "load_error": self._load_error,
             "preflight_errors": [*gate_errors, *model_errors][:8],
         }
+
+    def _local_validation_status(self, accelerator: str | None) -> str:
+        status = provider_gate_local_validation_status(self.gate_path, accelerator)
+        if status == "pending":
+            status = device_validation_status(
+                self.device_validation_path,
+                accelerator,
+            )
+        return status
 
     def stylize(
         self,
@@ -676,11 +698,8 @@ class NativeSDXLStyleProvider:
                         "algorithm": "sdxl_img2img_ip_adapter_style_layers_v1",
                         "production_quality": False,
                         "quality_gate": "accepted_upstream",
-                        "local_quality_validation": (
-                            provider_gate_local_validation_status(
-                                self.gate_path,
-                                self._resolved_accelerator,
-                            )
+                        "local_quality_validation": self._local_validation_status(
+                            self._resolved_accelerator
                         ),
                         "model_download_required": True,
                         "model_versions": {
@@ -873,12 +892,12 @@ class NativeSDXLStyleProvider:
                 )
                 pipeline.set_ip_adapter_scale(style_layer_scale(0.85))
                 if self.lcm_preview_enabled:
-                    accelerator = resolve_component_dir(
+                    preview_accelerator = resolve_component_dir(
                         self.model_root,
                         manifest.preview_accelerator,
                     )
                     pipeline.load_lora_weights(
-                        accelerator,
+                        preview_accelerator,
                         weight_name=manifest.preview_accelerator.weight_name,
                         adapter_name="lcm-preview",
                         local_files_only=True,
@@ -886,6 +905,9 @@ class NativeSDXLStyleProvider:
                     pipeline.disable_lora()
                     self._lcm_loaded = True
                 pipeline.enable_vae_tiling()
+                enable_vae_slicing = getattr(pipeline, "enable_vae_slicing", None)
+                if callable(enable_vae_slicing):
+                    enable_vae_slicing()
                 if accelerator == "cuda":
                     pipeline.model_cpu_offload_seq = (
                         "text_encoder->text_encoder_2->unet->vae"
@@ -896,7 +918,10 @@ class NativeSDXLStyleProvider:
                     # unified-memory pressure. Keep all modules on MPS instead of
                     # combining slicing with CUDA-oriented model CPU offload.
                     pipeline.to("mps")
-                    pipeline.enable_attention_slicing()
+                    memory_mib = accelerator_memory_mib(torch, "mps")
+                    pipeline.enable_attention_slicing(
+                        "max" if memory_mib is not None and memory_mib <= 18 * 1024 else "auto"
+                    )
                 self._pipeline = pipeline
                 self._torch = torch
                 self._manifest = manifest

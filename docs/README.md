@@ -38,6 +38,8 @@
 
 ### 配置指南
 
+- [从 GitHub 下载到一键运行](guides/installation.md)：运行时检测、缺失依赖修复命令、
+  macOS/Windows 启动器、Release 安装包和 Apple Silicon SDXL + IP-Adapter 适配。
 - [Web Agent 单机完整节点架构与迁移方案](guides/full-node-migration.md)：目标电脑同时
   承载 Web、Agent、飞书、数据、Viewer 和隔离模型 Provider；包含安装状态机、DGX
   Spark ARM64 门禁、备份恢复与真实验收。

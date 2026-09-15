@@ -35,6 +35,21 @@ type HostFacts = {
   disk_free_gb: number;
   is_dgx_spark: boolean;
   validation_note: string;
+  runtime_dependencies: HostDependency[];
+  quickstart_command: string;
+};
+
+type HostDependency = {
+  id: string;
+  name: string;
+  status: "ready" | "missing" | "outdated" | "optional";
+  detected?: string | null;
+  required: string;
+  required_for: string;
+  blocking: boolean;
+  repair_command?: string | null;
+  repair_steps: string[];
+  docs_url?: string | null;
 };
 
 type Capability = {
@@ -157,6 +172,7 @@ export function SetupCenter({
   const [confirmed, setConfirmed] = useState(false);
   const [licensesAccepted, setLicensesAccepted] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const [hostResponse, capabilitiesResponse, jobsResponse] = await Promise.all([
@@ -277,6 +293,16 @@ export function SetupCenter({
     }
   }
 
+  async function copyCommand(id: string, command: string) {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedCommand(id);
+      window.setTimeout(() => setCopiedCommand((current) => current === id ? null : current), 1800);
+    } catch {
+      setFeedback("浏览器没有允许复制，请手动选中命令复制到终端。 ");
+    }
+  }
+
   return (
     <section className="setup-center" aria-labelledby="setup-center-title">
       <header className="setup-hero">
@@ -341,6 +367,47 @@ export function SetupCenter({
               <AppIcon name={host.is_dgx_spark ? "alert" : "shield"} width="18" height="18" />
               {host.validation_note}
             </p>
+            <div className="runtime-checks" aria-labelledby="runtime-checks-title">
+              <div className="runtime-checks-heading">
+                <div>
+                  <strong id="runtime-checks-title">启动环境</strong>
+                  <p>缺失项会显示对应系统的修复命令；安装完成后点击“重新检测”。</p>
+                </div>
+                <code>{host.quickstart_command}</code>
+              </div>
+              <div className="runtime-check-list">
+                {host.runtime_dependencies.map((dependency) => {
+                  const ready = dependency.status === "ready";
+                  return (
+                    <article key={dependency.id} className={ready ? "ready" : "needs-action"}>
+                      <span className="runtime-check-icon" aria-hidden="true">
+                        <AppIcon name={ready ? "check" : "alert"} width="15" height="15" />
+                      </span>
+                      <div className="runtime-check-copy">
+                        <div>
+                          <strong>{dependency.name}</strong>
+                          <em>{ready ? "已就绪" : dependency.status === "outdated" ? "版本需更新" : "缺失"}</em>
+                        </div>
+                        <p>{dependency.required_for}</p>
+                        <small>当前：{dependency.detected || "未检测到"} · 要求：{dependency.required}</small>
+                        {!ready && dependency.repair_steps.length > 0 && (
+                          <ol>{dependency.repair_steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                        )}
+                        {!ready && dependency.repair_command && (
+                          <div className="repair-command">
+                            <code>{dependency.repair_command}</code>
+                            <button type="button" onClick={() => void copyCommand(dependency.id, dependency.repair_command!)}>
+                              {copiedCommand === dependency.id ? "已复制" : "复制命令"}
+                            </button>
+                          </div>
+                        )}
+                        {!ready && dependency.docs_url && <a href={dependency.docs_url} target="_blank" rel="noreferrer">查看官方安装说明</a>}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
           </>
         ) : (
           <p className="setup-empty">{loading ? "正在检测设备…" : "设备信息不可用。"}</p>

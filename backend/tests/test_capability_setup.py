@@ -67,6 +67,50 @@ def test_spark_plan_blocks_unverified_cuda_installers(tmp_path: Path) -> None:
         service.close()
 
 
+def test_host_contract_can_explain_runtime_repairs() -> None:
+    dependencies = capability_setup_module._runtime_dependencies(
+        system="Darwin",
+        python_version="3.12.8",
+        node_version=None,
+    )
+    by_id = {item.id: item for item in dependencies}
+
+    assert by_id["python"].status == "ready"
+    assert by_id["node"].status == "missing"
+    assert "brew install node@22" in (by_id["node"].repair_command or "")
+    assert by_id["node"].repair_steps
+
+
+def test_keg_only_homebrew_node_can_be_detected(tmp_path: Path, monkeypatch) -> None:
+    node = tmp_path / "bin" / "node"
+    node.parent.mkdir(parents=True)
+    node.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(capability_setup_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        capability_setup_module.shutil,
+        "which",
+        lambda command: "/opt/homebrew/bin/brew" if command == "brew" else None,
+    )
+
+    def fake_capture(command: list[str], timeout: float = 4) -> str | None:
+        del timeout
+        if command[1:] == ["--prefix", "node@22"]:
+            return str(tmp_path)
+        if command == [str(node), "--version"]:
+            return "v22.23.2"
+        return None
+
+    monkeypatch.setattr(capability_setup_module, "_capture", fake_capture)
+
+    assert (
+        capability_setup_module._homebrew_binary_version(
+            "node@22", "node", "--version"
+        )
+        == "v22.23.2"
+    )
+
+
 def test_model_license_and_explicit_confirmation_are_hard_gates(tmp_path: Path) -> None:
     service = CapabilitySetupService(tmp_path, host=host())
     try:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-exec python3 scripts/deploy.py install "$@"
+project_root="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$project_root/scripts/bootstrap.sh" "$@"

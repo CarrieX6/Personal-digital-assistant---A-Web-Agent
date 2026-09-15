@@ -5102,6 +5102,102 @@ textarea:focus {
 .migration-rule > svg,
 .plan-reason > svg { flex: 0 0 auto; }
 
+.runtime-checks {
+  margin-top: 14px;
+  padding-top: 16px;
+  border-top: 1px solid #e6ece9;
+}
+
+.runtime-checks-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 11px;
+}
+
+.runtime-checks-heading strong { font-size: 14px; }
+.runtime-checks-heading p { margin: 4px 0 0; color: #718078; font-size: 12px; line-height: 1.5; }
+.runtime-checks-heading code {
+  max-width: 46%;
+  padding: 7px 9px;
+  overflow-wrap: anywhere;
+  color: #315b4c;
+  background: #eef5f2;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.runtime-check-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.runtime-check-list article {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  background: #f8faf9;
+  border: 1px solid #e3eae6;
+  border-radius: 12px;
+}
+
+.runtime-check-list article.needs-action { background: #fffaf0; border-color: #efdca9; }
+.runtime-check-icon {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  color: #0b7456;
+  background: #e2f2eb;
+  border-radius: 8px;
+}
+.needs-action .runtime-check-icon { color: #8a6212; background: #fff0c8; }
+.runtime-check-copy { min-width: 0; flex: 1; }
+.runtime-check-copy > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.runtime-check-copy strong { font-size: 12px; }
+.runtime-check-copy em { color: #557268; font-size: 10px; font-style: normal; font-weight: 700; }
+.needs-action .runtime-check-copy em { color: #8a6212; }
+.runtime-check-copy p { margin: 5px 0 0; color: #53665e; font-size: 11px; line-height: 1.45; }
+.runtime-check-copy small { display: block; margin-top: 5px; color: #849088; font-size: 10px; line-height: 1.45; }
+.runtime-check-copy ol { margin: 8px 0 0; padding-left: 18px; color: #6c5b2d; font-size: 10px; line-height: 1.55; }
+.runtime-check-copy > a { display: inline-block; margin-top: 8px; color: #0b7456; font-size: 11px; font-weight: 700; }
+
+.repair-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.repair-command code {
+  min-width: 0;
+  padding: 8px;
+  overflow-wrap: anywhere;
+  color: #4e452c;
+  background: white;
+  border: 1px solid #ead9aa;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.repair-command button {
+  min-width: 72px;
+  min-height: 44px;
+  padding: 0 10px;
+  color: #315b4c;
+  background: white;
+  border: 1px solid #cbdad3;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .installer-layout {
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) minmax(380px, 1.3fr);
@@ -5690,10 +5786,14 @@ textarea:focus {
   .setup-hero,
   .setup-quick-grid,
   .host-facts,
+  .runtime-check-list,
   .install-catalog,
   .migration-flow {
     grid-template-columns: 1fr;
   }
+
+  .runtime-checks-heading { flex-direction: column; }
+  .runtime-checks-heading code { max-width: 100%; }
 
   .setup-hero {
     flex-direction: column;

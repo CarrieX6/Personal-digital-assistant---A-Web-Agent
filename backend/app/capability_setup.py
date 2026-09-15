@@ -16,7 +16,7 @@ from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +54,19 @@ class CapabilitySetupError(ValueError):
     """Raised when a local capability cannot be safely installed."""
 
 
+class HostDependency(BaseModel):
+    id: str
+    name: str
+    status: Literal["ready", "missing", "outdated", "optional"]
+    detected: str | None = None
+    required: str
+    required_for: str
+    blocking: bool = True
+    repair_command: str | None = None
+    repair_steps: list[str] = Field(default_factory=list)
+    docs_url: str | None = None
+
+
 class HostFacts(BaseModel):
     system: str
     release: str
@@ -71,6 +84,8 @@ class HostFacts(BaseModel):
     disk_free_gb: float
     is_dgx_spark: bool = False
     validation_note: str
+    runtime_dependencies: list[HostDependency] = Field(default_factory=list)
+    quickstart_command: str = "./scripts/quickstart.sh"
 
 
 class InstallStepPublic(BaseModel):
@@ -333,6 +348,107 @@ def _capture(command: list[str], timeout: float = 4) -> str | None:
     return completed.stdout.strip()
 
 
+def _homebrew_binary_version(
+    formula: str,
+    binary: str,
+    *arguments: str,
+) -> str | None:
+    """Discover keg-only Homebrew runtimes that are not present in PATH."""
+
+    if platform.system() != "Darwin":
+        return None
+    brew = shutil.which("brew")
+    if not brew:
+        for candidate in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+            if Path(candidate).is_file():
+                brew = candidate
+                break
+    if not brew:
+        return None
+    prefix = _capture([brew, "--prefix", formula])
+    if not prefix:
+        return None
+    executable = Path(prefix) / "bin" / binary
+    if not executable.is_file():
+        return None
+    return _capture([str(executable), *arguments])
+
+
+def _parsed_version(value: str | None) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", value or "")
+    if not match:
+        return None
+    return tuple(int(item or 0) for item in match.groups())
+
+
+def _runtime_dependencies(
+    *,
+    system: str,
+    python_version: str,
+    node_version: str | None,
+) -> list[HostDependency]:
+    python_ok = (_parsed_version(python_version) or (0, 0, 0)) >= (3, 11, 0)
+    node_ok = (_parsed_version(node_version) or (0, 0, 0)) >= (22, 13, 0)
+    git_version = _capture(["git", "--version"])
+    git_ok = git_version is not None
+
+    if system == "Darwin":
+        python_command = "brew install python@3.12"
+        node_command = "brew install node@22"
+        git_command = "brew install git"
+        package_hint = "若未安装 Homebrew，请先打开 https://brew.sh/ 按官方说明安装。"
+    elif system == "Windows":
+        python_command = "winget install --id Python.Python.3.12 -e"
+        node_command = "winget install --id OpenJS.NodeJS.LTS -e"
+        git_command = "winget install --id Git.Git -e"
+        package_hint = "安装后请重新打开 PowerShell，再运行一键启动脚本。"
+    else:
+        python_command = "请按发行版文档安装 Python 3.11/3.12 与 python3-venv"
+        node_command = "请从 https://nodejs.org/ 安装 Node.js 22 LTS"
+        git_command = "请使用系统包管理器安装 Git"
+        package_hint = "Linux 发行版差异较大，先按链接完成运行时安装，再重新检测。"
+
+    return [
+        HostDependency(
+            id="python",
+            name="Python",
+            status="ready" if python_ok else "outdated",
+            detected=python_version,
+            required="3.11–3.13（推荐 3.12）",
+            required_for="Agent API、模型安装和本地任务",
+            repair_command=None if python_ok else python_command,
+            repair_steps=[] if python_ok else [package_hint, "安装完成后重新运行环境检测。"],
+            docs_url="https://www.python.org/downloads/",
+        ),
+        HostDependency(
+            id="node",
+            name="Node.js + pnpm",
+            status="ready" if node_ok else ("outdated" if node_version else "missing"),
+            detected=node_version,
+            required="Node.js 22.13+（项目通过 Corepack 调用 pnpm）",
+            required_for="Web 控制台构建与运行",
+            repair_command=None if node_ok else node_command,
+            repair_steps=(
+                []
+                if node_ok
+                else [package_hint, "安装后运行 corepack pnpm --version，再重新检测。"]
+            ),
+            docs_url="https://nodejs.org/en/download",
+        ),
+        HostDependency(
+            id="git",
+            name="Git",
+            status="ready" if git_ok else "missing",
+            detected=git_version,
+            required="2.39+",
+            required_for="从 GitHub 下载、更新和协作开发",
+            repair_command=None if git_ok else git_command,
+            repair_steps=[] if git_ok else [package_hint, "安装完成后重新打开终端。"],
+            docs_url="https://git-scm.com/downloads",
+        ),
+    ]
+
+
 def detect_host() -> HostFacts:
     system = platform.system()
     architecture = platform.machine().lower()
@@ -362,7 +478,10 @@ def detect_host() -> HostFacts:
     cuda_match = re.search(r"release\s+([0-9.]+)", cuda_output or "")
     cuda_toolkit = cuda_match.group(1) if cuda_match else None
     docker_available = shutil.which("docker") is not None
-    node_version = _capture(["node", "--version"])
+    python_version = platform.python_version()
+    node_version = _capture(["node", "--version"]) or _homebrew_binary_version(
+        "node@22", "node", "--version"
+    )
 
     memory_gb: float | None = None
     try:
@@ -409,7 +528,7 @@ def detect_host() -> HostFacts:
         system=system,
         release=platform.release(),
         architecture=architecture,
-        python_version=platform.python_version(),
+        python_version=python_version,
         node_version=node_version,
         profile=profile,
         profile_label=profile_label,
@@ -422,6 +541,14 @@ def detect_host() -> HostFacts:
         disk_free_gb=round(shutil.disk_usage(PROJECT_ROOT).free / (1024**3), 1),
         is_dgx_spark=is_dgx_spark,
         validation_note=validation_note,
+        runtime_dependencies=_runtime_dependencies(
+            system=system,
+            python_version=python_version,
+            node_version=node_version,
+        ),
+        quickstart_command=(
+            ".\\scripts\\quickstart.ps1" if system == "Windows" else "./scripts/quickstart.sh"
+        ),
     )
 
 
@@ -811,6 +938,7 @@ class CapabilitySetupService:
                 license_urls=[
                     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0",
                     "https://huggingface.co/h94/IP-Adapter",
+                    "https://huggingface.co/latent-consistency/lcm-lora-sdxl",
                 ],
                 steps=self._public_steps(self._recipe(capability_id)) if supported else [],
                 validation_checks=["固定模型清单", "本地只读加载", "真实推理", "质量门禁", "峰值内存"],
@@ -911,11 +1039,14 @@ class CapabilitySetupService:
                     (python, "scripts/manage_photo_style.py", "plan-real"),
                 ),
                 _CommandStep(
-                    "download", "准备 SDXL + IP-Adapter", "下载约 9.84 GiB 权重并执行 MPS smoke test。",
+                    "download", "准备 SDXL + IP-Adapter", "下载约 9.84 GiB 固定权重并执行哈希校验。",
                     18, "downloading",
                     (python, "scripts/manage_photo_style.py", "prepare-macos-mps", "--accept-model-licenses"),
                 ),
-                _CommandStep("validate", "验证真实 Provider", "确认非 Fake、本地只读与质量门禁。", 92, "validating"),
+                _CommandStep(
+                    "validate", "验证真实 Provider", "检查本机 MPS smoke 记录、非 Fake 与本地只读状态。",
+                    92, "validating",
+                ),
             ]
         if capability_id == "photo-style-transfer" and self.host.profile == "windows-nvidia":
             return [

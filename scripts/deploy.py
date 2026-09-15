@@ -97,7 +97,26 @@ def resolve_pnpm() -> list[str]:
     )
 
 
+def augment_runtime_path() -> None:
+    if platform.system() != "Darwin" or not shutil.which("brew"):
+        return
+    candidates: list[str] = []
+    for formula in ("node@22", "python@3.12"):
+        try:
+            prefix = capture(["brew", "--prefix", formula])
+        except DeploymentError:
+            continue
+        for suffix in ("bin", "libexec/bin"):
+            directory = Path(prefix) / suffix
+            if directory.is_dir():
+                candidates.append(str(directory))
+    if candidates:
+        current = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join([*candidates, current])
+
+
 def ensure_node() -> list[str]:
+    augment_runtime_path()
     if not shutil.which("node"):
         raise DeploymentError("未找到 Node.js，请安装 Node.js 22.13+。")
     version = parse_version(capture(["node", "--version"]))

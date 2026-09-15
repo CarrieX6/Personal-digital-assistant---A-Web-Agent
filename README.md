@@ -216,6 +216,9 @@ tests/                        前端渲染测试
 
 ## 本地启动
 
+从环境检测、缺失依赖修复、GitHub Release 安装包到模型安装的完整教程见
+[从 GitHub 下载到一键运行](docs/guides/installation.md)。
+
 ### 环境要求
 
 - Node.js 22+
@@ -227,10 +230,12 @@ tests/                        前端渲染测试
 ### macOS / Linux 一键启动
 
 ```bash
-chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh --profile core --photo-style skip
-./scripts/start.sh
+./scripts/quickstart.sh --install-system-deps
 ```
+
+macOS 也可双击仓库根目录的 `WebAgent.command`。只查看环境缺口可运行
+`./scripts/bootstrap.sh --plan`；脚本会给出当前系统的修复命令，不会静默安装模型或接受
+第三方许可证。
 
 打开 `http://localhost:3000/` 后进入“设置”，先查看目标机预检，再逐项安装空间模型、
 语义记忆和真实 SDXL + IP-Adapter。安装任务、进度和失败记录保存在本机 SQLite；模型
@@ -245,9 +250,10 @@ chmod +x scripts/setup.sh scripts/start.sh
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1 --profile core --photo-style skip
-.\scripts\start.ps1
+.\scripts\quickstart.ps1 --install-system-deps
 ```
+
+解压 GitHub Release 后也可双击 `WebAgent-Windows.cmd`。
 
 脚本会建立 `.venv`、安装前后端依赖并同时启动 API 与控制台。Windows Defender
 Firewall 首次询问时，只允许 Python 访问“专用网络”。NVIDIA GPU 的 SDXL 安装和
