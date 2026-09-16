@@ -162,6 +162,19 @@ def provider_gate_local_validation_status(
     return status if validated_accelerator == accelerator else "pending"
 
 
+def device_validation_status(path: Path, accelerator: str | None = None) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return "pending"
+    if payload.get("status") != "engineering_smoke_passed":
+        return "pending"
+    validated_accelerator = str(payload.get("accelerator") or "").lower()
+    if accelerator and validated_accelerator != accelerator:
+        return "pending"
+    return "engineering_smoke_passed"
+
+
 def style_layer_scale(scale: float) -> dict[str, dict[str, list[float]]]:
     return {
         "down": {"block_2": [0.0, scale]},
@@ -444,6 +457,7 @@ class NativeSDXLStyleProvider:
         if normalized_accelerator not in {"auto", "cuda", "mps"}:
             raise ValueError("accelerator must be auto, cuda or mps")
         self.model_root = model_root
+        self.device_validation_path = model_root / "device-validation.json"
         self.manifest_path = manifest_path
         self.gate_path = gate_path
         self.lock_path = lock_path
@@ -505,9 +519,8 @@ class NativeSDXLStyleProvider:
             and bool(accelerator_status.get("available"))
         )
         resolved_accelerator = accelerator_status.get("resolved")
-        local_validation = provider_gate_local_validation_status(
-            self.gate_path,
-            str(resolved_accelerator) if resolved_accelerator else None,
+        local_validation = self._local_validation_status(
+            str(resolved_accelerator) if resolved_accelerator else None
         )
         return {
             "name": self.name,
@@ -546,6 +559,15 @@ class NativeSDXLStyleProvider:
             "load_error": self._load_error,
             "preflight_errors": [*gate_errors, *model_errors][:8],
         }
+
+    def _local_validation_status(self, accelerator: str | None) -> str:
+        status = provider_gate_local_validation_status(self.gate_path, accelerator)
+        if status == "pending":
+            status = device_validation_status(
+                self.device_validation_path,
+                accelerator,
+            )
+        return status
 
     def stylize(
         self,
@@ -816,11 +838,8 @@ class NativeSDXLStyleProvider:
                         "algorithm": "sdxl_img2img_ip_adapter_style_layers_v2",
                         "production_quality": False,
                         "quality_gate": "accepted_upstream",
-                        "local_quality_validation": (
-                            provider_gate_local_validation_status(
-                                self.gate_path,
-                                self._resolved_accelerator,
-                            )
+                        "local_quality_validation": self._local_validation_status(
+                            self._resolved_accelerator
                         ),
                         "model_download_required": True,
                         "model_versions": {

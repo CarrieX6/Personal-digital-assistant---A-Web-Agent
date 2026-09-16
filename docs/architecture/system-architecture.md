@@ -1,11 +1,11 @@
 # 个人数字助手系统架构
 
 作者：**Zhuofan Xie**  
-更新日期：2026-07-29
+更新日期：2026-09-14
 
 ## 1. 产品目标
 
-用户在手机端通过飞书、微信或企业微信发送自然语言指令，家中电脑上的 Agent 接收
+用户在手机端通过飞书、微信或企业微信发送自然语言指令，目标电脑上的 Agent 接收
 指令、读取记忆、调用已经安装的本地功能与模型，并把结果返回原聊天窗口。
 
 核心原则：
@@ -16,6 +16,11 @@
 - **异步可恢复**：耗时任务可以排队、查询、重试，并在完成后主动通知；
 - **最小权限**：外部渠道只能调用已授权能力，高风险动作必须审批；
 - **结果可降级**：聊天内不能实时展示 3D 时，自动提供图片、视频或安全链接。
+- **完整节点可迁移**：Web、Agent、飞书、数据和模型都在同一目标机运行；不依赖另一台
+  Mac 作为固定控制或数据入口。
+
+物理部署采用“单机完整节点、进程/容器隔离”，详见
+[单机完整节点架构与迁移方案](../guides/full-node-migration.md)。
 
 ## 2. 逻辑架构
 
@@ -32,6 +37,7 @@ flowchart TB
         ORC["Agent Orchestrator"]
         MEM["Memory Service"]
         REG["Capability Registry"]
+        SETUP["Setup & Model Installer"]
         QUEUE["Local Job Queue"]
         RUN["Model / Tool Runtime"]
         ASSET["Personal Asset Store"]
@@ -45,6 +51,8 @@ flowchart TB
     SEC --> ORC
     ORC <--> MEM
     ORC --> REG
+    SETUP --> REG
+    SETUP --> RUN
     REG --> QUEUE
     QUEUE --> RUN
     RUN --> ASSET
@@ -144,8 +152,10 @@ permissions:
   local_files: capability-sandbox
 ```
 
-安装器未来需要校验版本、哈希、许可、依赖冲突、磁盘占用和设备能力。模型下载必须
-由用户明确选择，不能由聊天中的任意文本静默触发。
+当前设置中心已经实现目标机预检、安装计划、许可证确认、白名单动作、SQLite 任务、
+脱敏日志、取消/重试入口与重启中断标记。模型下载必须由本机所有者明确选择，不能由
+聊天中的任意文本静默触发。尚待完成模型卸载、签名制品、SBOM、自动回滚和 DGX Spark
+实机档位。
 
 ### 3.6 Local Job Queue
 

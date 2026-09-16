@@ -7,10 +7,11 @@ import { FeishuSettingsDialog } from "./components/FeishuSettingsDialog";
 import { MemoryManagerDialog } from "./components/MemoryManagerDialog";
 import { ModelSettingsDialog } from "./components/ModelSettingsDialog";
 import { PhotoStyleStudio } from "./components/PhotoStyleStudio";
+import { SetupCenter } from "./components/SetupCenter";
 import { SpatialStudio } from "./components/SpatialStudio";
 import { ToolLibrary } from "./components/ToolLibrary";
 
-type View = "agent" | "tools" | "spatial" | "style";
+type View = "agent" | "tools" | "spatial" | "style" | "setup";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:8000";
@@ -123,8 +124,8 @@ export default function Home() {
           <button
             className="settings-trigger icon-settings"
             type="button"
-            aria-label="打开模型设置"
-            onClick={() => setSettingsOpen(true)}
+            aria-label="打开设置与模型安装"
+            onClick={() => setActiveView("setup")}
           >
             <AppIcon name="settings" width="17" height="17" />
             <span>设置</span>
@@ -157,6 +158,14 @@ export default function Home() {
               <AppIcon name="tools" width="21" height="21" />
               <span>工具库</span>
             </button>
+            <button
+              type="button"
+              className={activeView === "setup" ? "active" : ""}
+              onClick={() => setActiveView("setup")}
+            >
+              <AppIcon name="settings" width="21" height="21" />
+              <span>设置</span>
+            </button>
           </div>
           <div className="rail-privacy" title="图片、记忆和生成资产默认保存在本机">
             <span />
@@ -184,6 +193,7 @@ export default function Home() {
               onOpenStyle={() => openStyle()}
               onOpenModelSettings={() => setSettingsOpen(true)}
               onOpenChannelSettings={() => setExternalSettingsOpen(true)}
+              onOpenCapabilitySetup={() => setActiveView("setup")}
             />
           ) : activeView === "spatial" ? (
             <div className="tool-detail-view">
@@ -201,7 +211,7 @@ export default function Home() {
                 requestedAssetId={requestedSpatialAssetId}
               />
             </div>
-          ) : (
+          ) : activeView === "style" ? (
             <div className="tool-detail-view">
               <button
                 className="back-to-library"
@@ -217,6 +227,14 @@ export default function Home() {
                 requestedAssetId={requestedStyleAssetId}
               />
             </div>
+          ) : (
+            <SetupCenter
+              apiBase={API_BASE}
+              health={health}
+              onOpenModelSettings={() => setSettingsOpen(true)}
+              onOpenChannelSettings={() => setExternalSettingsOpen(true)}
+              onOpenMemorySettings={() => setMemoryManagerOpen(true)}
+            />
           )}
         </div>
       </section>

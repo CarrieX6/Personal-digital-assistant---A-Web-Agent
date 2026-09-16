@@ -8,7 +8,9 @@
 
 本项目已经接入 [Zuheng Zhao 的 Flux-GS Skill](https://github.com/zhaozuheng0726/Flux-gs-skill)
 适配层，但没有把整套训练源码、WebGL 大文件、模型输出或 CUDA 编译产物复制进个人
-数字助手仓库。主项目负责安全编排，独立 Flux-GS 服务负责 GPU 训练和 Web 发布：
+数字助手仓库。主项目负责安全编排，隔离的 Flux-GS 服务负责 GPU 训练和 Web 发布。
+完整迁移默认把两者部署在**同一台目标电脑**，通过回环地址或本机容器网络通信；跨电脑
+Provider 仅保留给开发联调，不属于正式交付拓扑：
 
 ```text
 Web / 飞书自然语言
@@ -21,7 +23,7 @@ FluxGSService（dataset_id 转受控路径、owner、幂等键）
         ↓
 FluxGSHttpProvider（X-Tenant-ID / X-Owner-ID / X-API-Key）
         ↓
-独立 Linux + NVIDIA GPU Flux-GS 服务
+目标机内隔离的 Linux + NVIDIA GPU Flux-GS 服务
         ↓
 训练 comp.json → 静态 WebGL Viewer → demo_url
 ```
@@ -56,8 +58,8 @@ NVIDIA GPU、训练任务和静态站点发布。若直接塞进 FastAPI/LangGra
 - 权重、数据集、编译缓存和 Web 资产显著放大主仓库；
 - 训练权限、GPU 配额和许可证边界无法独立治理。
 
-因此主 Agent 只持有任务契约，GPU 服务可以部署在同机 Linux 工作站、Windows 的 Linux
-GPU 容器/WSL 环境，或受控的远程 NVIDIA 节点。这个边界也让后续把最小线程池替换为
+因此主 Agent 只持有任务契约，GPU 服务应部署在同一 Linux 工作站，或目标 Windows
+电脑的 Linux GPU 容器/WSL 环境。进程边界不等于物理分机；这个边界也让后续把最小线程池替换为
 Celery、RQ、Slurm 或企业已有任务平台时，不必改 Agent Tool Schema。
 
 ## 3. 输入数据要求

@@ -12,6 +12,7 @@ from backend.app.sdxl_style_provider import (
     NativeSDXLStyleProvider,
     accelerator_memory_mib,
     content_dimensions,
+    device_validation_status,
     harmonize_style_palette,
     lcm_scheduler_config,
     map_native_parameters,
@@ -83,6 +84,24 @@ def test_accelerator_resolution_keeps_cuda_and_mps_explicit() -> None:
     torch.cuda.available = False
     assert resolve_torch_accelerator(torch, "auto") == "mps"
     assert resolve_torch_accelerator(torch, "cuda") is None
+
+
+def test_device_validation_is_scoped_to_the_actual_accelerator(tmp_path: Path) -> None:
+    report = tmp_path / "device-validation.json"
+    report.write_text(
+        json.dumps(
+            {
+                "status": "engineering_smoke_passed",
+                "production_quality": False,
+                "accelerator": "mps",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert device_validation_status(report, "mps") == "engineering_smoke_passed"
+    assert device_validation_status(report, "cuda") == "pending"
+    assert device_validation_status(tmp_path / "missing.json", "mps") == "pending"
 
 
 def test_mps_memory_diagnostics_use_driver_allocation() -> None:
@@ -238,9 +257,6 @@ def test_native_provider_loads_mps_without_cuda_cpu_offload(
         def to(self, device: str):
             self.to_device = device
             return self
-
-        def enable_attention_slicing(self) -> None:
-            self.attention_slicing = True
 
         def maybe_free_model_hooks(self) -> None:
             return None

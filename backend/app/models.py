@@ -459,6 +459,7 @@ class SpatialSceneCreateResponse(BaseModel):
 class PhotoStyleCreateResponse(BaseModel):
     asset: AssetPublic
     job: JobPublic
+    reused: bool = False
 
 
 class PhotoStyleProviderStatus(BaseModel):

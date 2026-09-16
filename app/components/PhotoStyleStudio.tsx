@@ -37,7 +37,7 @@ type StyleJob = {
   error: string | null;
 };
 
-type CreateResponse = { asset: StyleAsset; job: StyleJob };
+type CreateResponse = { asset: StyleAsset; job: StyleJob; reused?: boolean };
 
 type ProviderStatus = {
   name: string;
@@ -55,6 +55,11 @@ type PhotoStyleStudioProps = {
 type ImagePreview = {
   url: string;
   label: string;
+};
+
+type PendingSubmission = {
+  fingerprint: string;
+  idempotencyKey: string;
 };
 
 const supportedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -89,6 +94,13 @@ function resolveUrl(apiBase: string, path: string | null) {
   return `${apiBase.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
 
+function newIdempotencyKey() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 async function errorMessage(response: Response) {
   try {
     const data = (await response.json()) as { detail?: string };
@@ -111,7 +123,10 @@ export function PhotoStyleStudio({
 }: PhotoStyleStudioProps) {
   const contentInputRef = useRef<HTMLInputElement>(null);
   const styleInputRef = useRef<HTMLInputElement>(null);
+  const jobCardRef = useRef<HTMLElement>(null);
   const objectUrlsRef = useRef<string[]>([]);
+  const submissionLockRef = useRef(false);
+  const pendingSubmissionRef = useRef<PendingSubmission | null>(null);
   const [contentFile, setContentFile] = useState<File | null>(null);
   const [contentPreview, setContentPreview] = useState("");
   const [styleFiles, setStyleFiles] = useState<File[]>([]);
@@ -133,6 +148,10 @@ export function PhotoStyleStudio({
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null);
   const [error, setError] = useState("");
+  const [submissionNotice, setSubmissionNotice] = useState("");
+  const currentJobActive = Boolean(
+    currentJob && ["queued", "running"].includes(currentJob.status),
+  );
 
   const rememberUrl = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
@@ -230,9 +249,11 @@ export function PhotoStyleStudio({
         setCurrentJob(nextJob);
         onConnectionChange(true);
         if (nextJob.status === "completed") {
+          setSubmissionNotice("图片风格化已完成，可以在下方资产库中预览结果。");
           await loadAssets();
           setSelectedAssetId(nextJob.asset_id);
         } else if (nextJob.status === "failed") {
+          setSubmissionNotice("任务执行失败，没有创建新的重复任务。");
           setError(nextJob.error || nextJob.message);
           await loadAssets();
         }
@@ -279,9 +300,19 @@ export function PhotoStyleStudio({
 
   async function createTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!contentFile || !styleFiles.length || uploading) return;
+    if (
+      !contentFile ||
+      !styleFiles.length ||
+      uploading ||
+      currentJobActive ||
+      submissionLockRef.current
+    ) {
+      return;
+    }
+    submissionLockRef.current = true;
     setUploading(true);
     setError("");
+    setSubmissionNotice("正在上传图片并创建任务，请勿重复点击。");
     const payload = new FormData();
     payload.append("content_file", contentFile);
     styleFiles.forEach((file) => payload.append("style_files", file));
@@ -293,21 +324,76 @@ export function PhotoStyleStudio({
     payload.append("style_strength", String(styleStrength));
     payload.append("content_strength", String(contentStrength));
     payload.append("detail_strength", String(detailStrength));
+    const fingerprint = JSON.stringify({
+      content: [
+        contentFile.name,
+        contentFile.size,
+        contentFile.lastModified,
+        contentFile.type,
+      ],
+      styles: styleFiles.map((file) => [
+        file.name,
+        file.size,
+        file.lastModified,
+        file.type,
+      ]),
+      title: title.trim(),
+      prompt: prompt.trim(),
+      mode,
+      quality,
+      stylePreset,
+      styleStrength,
+      contentStrength,
+      detailStrength,
+    });
+    const previousSubmission = pendingSubmissionRef.current;
+    const idempotencyKey =
+      previousSubmission?.fingerprint === fingerprint
+        ? previousSubmission.idempotencyKey
+        : newIdempotencyKey();
+    pendingSubmissionRef.current = { fingerprint, idempotencyKey };
     try {
       const response = await fetch(`${apiBase}/api/photo-style-transfers`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
         body: payload,
       });
-      if (!response.ok) throw new Error(await errorMessage(response));
+      if (!response.ok) {
+        if (
+          response.status < 500 &&
+          ![408, 425, 429].includes(response.status)
+        ) {
+          pendingSubmissionRef.current = null;
+        }
+        throw new Error(await errorMessage(response));
+      }
       const created = (await response.json()) as CreateResponse;
+      pendingSubmissionRef.current = null;
       setCurrentJob(created.job);
-      setAssets((current) => [created.asset, ...current]);
+      setAssets((current) => [
+        created.asset,
+        ...current.filter((asset) => asset.id !== created.asset.id),
+      ]);
+      setSubmissionNotice(
+        created.reused
+          ? "检测到重复提交，已继续显示原任务，没有重复创建。"
+          : "任务已创建，正在本机队列中生成。完成前不能重复提交。",
+      );
       onConnectionChange(true);
+      window.requestAnimationFrame(() => {
+        jobCardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
     } catch (requestError) {
       setError(
         requestError instanceof Error ? requestError.message : "图片上传失败。",
       );
+      setSubmissionNotice(
+        pendingSubmissionRef.current
+          ? "提交结果暂未确认。再次点击会安全续接同一请求，不会重复创建任务。"
+          : "任务未创建，请检查配置后重试。",
+      );
     } finally {
+      submissionLockRef.current = false;
       setUploading(false);
     }
   }
@@ -320,6 +406,8 @@ export function PhotoStyleStudio({
     setTitle("");
     setPrompt("");
     setStylePreset("auto");
+    pendingSubmissionRef.current = null;
+    if (!currentJobActive) setSubmissionNotice("");
     if (contentInputRef.current) contentInputRef.current.value = "";
     if (styleInputRef.current) styleInputRef.current.value = "";
   }
@@ -385,7 +473,11 @@ export function PhotoStyleStudio({
       </section>
 
       <div className="style-workspace">
-        <form className="style-form-card" onSubmit={createTransfer}>
+        <form
+          className="style-form-card"
+          onSubmit={createTransfer}
+          aria-busy={uploading || currentJobActive}
+        >
           <div className="section-heading compact">
             <div>
               <p className="eyebrow">01 · Compose</p>
@@ -532,10 +624,15 @@ export function PhotoStyleStudio({
                 !contentFile ||
                 !styleFiles.length ||
                 uploading ||
+                currentJobActive ||
                 providerStatus?.ready !== true
               }
             >
-              {uploading ? "正在提交…" : "开始图片风格化"}
+              {uploading
+                ? "正在上传并创建任务…"
+                : currentJobActive
+                  ? "当前任务生成中…"
+                  : "开始图片风格化"}
             </button>
             <button
               className="style-clear-button"
@@ -548,6 +645,14 @@ export function PhotoStyleStudio({
               清空本次配置
             </button>
           </div>
+          {submissionNotice ? (
+            <p className="style-submit-status" role="status" aria-live="polite">
+              {uploading || currentJobActive ? (
+                <span className="style-submit-spinner" aria-hidden="true" />
+              ) : null}
+              <span>{submissionNotice}</span>
+            </p>
+          ) : null}
           <p className="style-retain-note">
             提交后会保留当前图片、名称和描述，便于调整参数后继续生成。
           </p>
@@ -637,7 +742,11 @@ export function PhotoStyleStudio({
       </div>
 
       {currentJob ? (
-        <section className={`job-card ${currentJob.status}`} aria-live="polite">
+        <section
+          ref={jobCardRef}
+          className={`job-card ${currentJob.status}`}
+          aria-live="polite"
+        >
           <div>
             <p className="eyebrow">Style task</p>
             <strong>{currentJob.message}</strong>

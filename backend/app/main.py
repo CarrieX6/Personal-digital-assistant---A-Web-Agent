@@ -34,6 +34,10 @@ from .assets import (
     SpatialSceneService,
     register_asset_tools,
 )
+from .capability_setup import (
+    CapabilitySetupService,
+    create_capability_setup_router,
+)
 from .llm import LLMError
 from .channel_settings import (
     FeishuSettingsError,
@@ -124,6 +128,7 @@ DEFAULT_IDENTITY_REGISTRY_PATH = (
 DEFAULT_ASSET_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 WEB_OWNER_ID = "local"
 WEB_SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
 def _web_thread_id(session_id: str) -> str:
@@ -131,6 +136,16 @@ def _web_thread_id(session_id: str) -> str:
     if not WEB_SESSION_PATTERN.fullmatch(safe_session_id):
         raise HTTPException(status_code=422, detail="会话 ID 格式无效。")
     return f"web:{safe_session_id}"
+
+
+def _request_idempotency_key(request: Request) -> str | None:
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is None:
+        return None
+    key = raw_key.strip()
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+        raise HTTPException(status_code=422, detail="幂等键格式无效。")
+    return key
 
 
 def _public_session_id(thread_id: str) -> str:
@@ -223,6 +238,7 @@ def create_app(
     feishu_runtime: FeishuChannelRuntime | None = None,
     viewer_service: LanViewerService | None = None,
     identity_registry: IdentityBindingRegistry | None = None,
+    capability_setup_service: CapabilitySetupService | None = None,
 ) -> FastAPI:
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
@@ -271,6 +287,14 @@ def create_app(
         selected_spatial_service,
         data_path=channel_data_path,
     )
+    selected_capability_setup_service = (
+        capability_setup_service
+        or CapabilitySetupService(
+            channel_data_path,
+            style_probe=selected_style_service.provider_status,
+            flux_probe=selected_flux_gs_service.provider.status,
+        )
+    )
     selected_feishu_runtime = feishu_runtime or FeishuChannelRuntime(
         selected_feishu_settings_service,
         runner,
@@ -294,6 +318,7 @@ def create_app(
             yield
         finally:
             await selected_feishu_runtime.stop()
+            selected_capability_setup_service.close()
             selected_viewer_service.close()
             runner.close()
             llm_runtime.close()
@@ -324,7 +349,7 @@ def create_app(
         ),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Idempotency-Key"],
     )
     app.state.registry = registry
     app.state.runner = runner
@@ -338,7 +363,11 @@ def create_app(
     app.state.channel_store = selected_channel_store
     app.state.viewer_service = selected_viewer_service
     app.state.identity_registry = selected_identity_registry
+    app.state.capability_setup_service = selected_capability_setup_service
     app.include_router(create_flux_gs_router())
+    app.include_router(
+        create_capability_setup_router(selected_capability_setup_service)
+    )
 
     @app.get("/health", response_model=HealthResponse)
     def health(request: Request) -> HealthResponse:
@@ -857,6 +886,7 @@ def create_app(
                     prompt=prompt,
                     seed=seed,
                 ),
+                idempotency_key=_request_idempotency_key(request),
             )
         except AssetError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

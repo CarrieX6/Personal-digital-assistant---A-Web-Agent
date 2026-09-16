@@ -9,7 +9,7 @@
 ```text
 手机微信 / 飞书发送自然语言指令
                 ↓
-家中电脑接收并鉴权
+目标电脑接收并鉴权
                 ↓
 Agent 理解任务、读取记忆并选择本地功能
                 ↓
@@ -35,8 +35,8 @@ Demo。
 | 身份与工作区绑定 | P0 基础已实现 | 一个飞书 Open ID 一个独立工作区，绑定当前本机节点；Root 可查看和启停，OAuth 用户门户与多电脑路由待实现 |
 | 结果回传适配 | 局部实现 | 富文本、状态、2.5D 封面 + Viewer 卡片、风格化预览与下载文件、两类失败重试；Outbox 与固定公网域名待实现 |
 | 会话与长期记忆 | 增强 MVP | SQLite 按用户/渠道/会话隔离；Run 与用户事件原子落库，崩溃后按 Run 独立 Checkpoint 对账恢复；上下文使用真实本地 Tokenizer 和强制 Schema 的结构化滚动摘要，正则抽取仅作可观测兜底；长期 claim 与 evidence 分表、时态化、加密并支持审计；已加入敏感召回硬门禁、词法/槽位/语义 RRF+MMR 混合召回、离线评测和效用反馈 |
-| 工具库 | UI MVP | 已区分已安装、未安装、待上线；通用安装器、版本、依赖与许可管理尚未实现 |
-| Flux-GS 多视角 3D | 适配层已合入、真实 GPU 待部署 | 已注册数据集校验、训练创建、状态查询，并接入统一飞书功能菜单；训练仍需独立 Linux + NVIDIA GPU 服务，单图转 3D 前置链路尚未实现 |
+| 设置与模型安装 | 增强 MVP | 目标机预检、真实能力状态、安装计划、许可确认、白名单执行、SQLite 进度、重启中断恢复和安装后验证已接入；卸载、升级、签名制品与 Spark 实机档位待完成 |
+| Flux-GS 多视角 3D | 适配层已合入、真实 GPU 待部署 | 已注册数据集校验、训练创建、状态查询，并接入统一飞书功能菜单；完整迁移时训练 Provider 应作为目标机内的隔离 Linux + NVIDIA 服务，DGX Spark ARM64 尚未通过门禁，单图转 3D 前置链路尚未实现 |
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
 ## 总体架构
@@ -57,7 +57,8 @@ flowchart LR
 
 完整的模块边界、数据流和安全边界见
 [系统架构文档](docs/architecture/system-architecture.md)，上下文记忆链路见
-[分层长短期记忆设计](docs/architecture/layered-memory.md)。
+[分层长短期记忆设计](docs/architecture/layered-memory.md)。目标电脑独立承载控制、数据与
+模型的部署决策见[单机完整节点架构与迁移方案](docs/guides/full-node-migration.md)。
 
 ## 当前可运行能力
 
@@ -115,7 +116,7 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 
 当前已经使用独立的 `lark-channel-sdk` 实现飞书企业自建应用长连接：
 
-- 家中电脑只需主动连接飞书，无需暴露公网 IP 或部署公开 Webhook；
+- 目标电脑只需主动连接飞书，无需依赖另一台 Mac 中转，也无需暴露公网 IP 或部署公开 Webhook；
 - App Secret 与 LLM Key 一样写入系统钥匙串，配置文件不保存明文；
 - 使用飞书消息 ID 和本地 SQLite 双层去重；
 - 仅允许白名单 Open ID 调用，群聊默认关闭；
@@ -150,6 +151,8 @@ WebP 作为文件发送；直接发送多张图片时也会自动创建风格化
 macOS 与 Windows 的一键安装/启动方式见
 [本地部署指南](docs/guides/deployment.md)，新能力接入约定见
 [Capability 接入指南](docs/guides/capability-integration.md)。
+换电脑时，Web、Agent、飞书、数据和模型必须迁移到同一目标节点，详见
+[单机完整节点架构与迁移方案](docs/guides/full-node-migration.md)。
 Flux-GS 的独立 GPU 服务部署、数据集映射、许可门禁和飞书调用见
 [Flux-GS Capability 接入与部署](docs/guides/flux-gs-capability.md)。
 
@@ -186,12 +189,14 @@ app/
     AgentConsole.tsx          Web Agent、图片附件、任务进度
     FeishuSettingsDialog.tsx  飞书凭证、白名单与长连接设置
     ModelSettingsDialog.tsx   模型供应商和密钥配置
+    SetupCenter.tsx           主机预检、能力安装、进度恢复和整机迁移引导
     SpatialStudio.tsx         空间照片生成与个人资产库
     SpatialViewer.tsx         低功耗 Three.js 视差 Viewer
 backend/
   app/
     agent.py                  Agent Runner、执行轨迹、Demo Planner
     llm.py                    OpenAI 兼容 Tool Calling
+    capability_setup.py       声明式模型安装、兼容门禁和持久化安装任务
     tools.py                  工具注册表
     assets.py                 深度模型、任务、资产与文件安全
     channel_settings.py       飞书配置与 App Secret 安全存储
@@ -211,6 +216,9 @@ tests/                        前端渲染测试
 
 ## 本地启动
 
+从环境检测、缺失依赖修复、GitHub Release 安装包到模型安装的完整教程见
+[从 GitHub 下载到一键运行](docs/guides/installation.md)。
+
 ### 环境要求
 
 - Node.js 22+
@@ -222,14 +230,19 @@ tests/                        前端渲染测试
 ### macOS / Linux 一键启动
 
 ```bash
-chmod +x scripts/setup.sh scripts/start.sh
-./scripts/setup.sh --accept-model-licenses
-./scripts/start.sh
+./scripts/quickstart.sh --install-system-deps
 ```
 
-默认安装档位为 `complete + real`：会安装空间主体分割与本地语义记忆，并根据平台准备
-真实 SDXL + IP-Adapter。完整前置条件、模型许可证、Windows Docker GPU Worker、数据
-备份/恢复和验收见[完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)。
+macOS 也可双击仓库根目录的 `WebAgent.command`。只查看环境缺口可运行
+`./scripts/bootstrap.sh --plan`；脚本会给出当前系统的修复命令，不会静默安装模型或接受
+第三方许可证。
+
+打开 `http://localhost:3000/` 后进入“设置”，先查看目标机预检，再逐项安装空间模型、
+语义记忆和真实 SDXL + IP-Adapter。安装任务、进度和失败记录保存在本机 SQLite；模型
+许可必须由本机所有者明确接受。在已经过验证的 macOS/Windows 档位进行无人值守完整
+安装时，仍可使用 `./scripts/setup.sh --accept-model-licenses`；Linux/DGX Spark 先使用 core
+档位，由设置中心阻断未经真机验证的模型路径。完整前置条件、Windows Docker GPU Worker、
+数据备份/恢复和验收见[完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)。
 
 ### Windows 10 / 11 一键启动
 
@@ -237,13 +250,15 @@ chmod +x scripts/setup.sh scripts/start.sh
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1 --accept-model-licenses
-.\scripts\start.ps1
+.\scripts\quickstart.ps1 --install-system-deps
 ```
+
+解压 GitHub Release 后也可双击 `WebAgent-Windows.cmd`。
 
 脚本会建立 `.venv`、安装前后端依赖并同时启动 API 与控制台。Windows Defender
 Firewall 首次询问时，只允许 Python 访问“专用网络”。NVIDIA GPU 的 SDXL 安装和
-故障排查见[跨平台部署指南](docs/guides/deployment.md)。
+故障排查见[跨平台部署指南](docs/guides/deployment.md)。基础服务启动后在 Web“设置”中
+逐项安装模型；无人值守环境可改用 `.\scripts\setup.ps1 --accept-model-licenses`。
 
 图片风格化默认依赖独立的
 [`frogi-m/pic-style`](https://github.com/frogi-m/pic-style) 服务。推荐在 NVIDIA
@@ -267,7 +282,7 @@ Windows 使用对应的 `.\scripts\photo-style.ps1`。真实模型准备必须�
 `prepare-windows-gpu --accept-model-licenses`，或在 Apple Silicon Mac 执行
 `prepare-macos-mps --accept-model-licenses`。MPS 当前属于工程验证路径，必须继续完成固定
 样本、稳定性、统一内存、功耗和人工质量门禁，不能继承 Windows CUDA 的验证结论。
-远程 GPU 可用 `configure-remote --url https://...` 写入不含密钥的 Provider 配置。
+`configure-remote` 仅保留给开发期 Provider 联调，不属于目标电脑独立运行的完整迁移。
 完整步骤见[图片风格化独立服务部署与迁移](docs/guides/photo-style-deployment.md)。
 
 ### 手机临时公网 HTTPS 预览

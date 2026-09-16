@@ -147,6 +147,19 @@ SDXL、IP-Adapter、LCM-LoRA 许可证后，才能显式运行：
 - 是否发生 CPU fallback、黑图、NaN、OOM、构图/身份破坏；
 - preview/standard 两档、连续十次以及任务结束后的内存回收。
 
+当前安装器已经把第一轮非个人合成图 smoke 纳入 `prepare-macos-mps`；也可在模型已准备后
+单独重跑：
+
+```bash
+./scripts/photo-style.sh validate-macos-mps
+```
+
+M4/16GB 适配额外启用 VAE tiling+slicing 与 640 像素预览预算，并保留 PyTorch 2 SDPA。
+Diffusers 0.35 在 IP-Adapter 加载后启用 attention slicing 会覆盖适配器专用 processor，
+因此该组合不启用 attention slicing。每个任务仍在隔离 Worker 中执行并于完成后退出，避免 SDXL 常驻影响
+Agent、飞书和 Viewer。工程 smoke 通过只会写入本机忽略目录中的
+`device-validation.json`，不会自动宣称达到生产质量。
+
 Hugging Face 的 MPS 指南确认 Diffusers 可通过 PyTorch `mps` 使用 Apple Silicon，并建议
 在统一内存压力下启用 attention slicing；PyTorch 也提供 MPS 可用性检查、allocator 和
 CPU fallback 环境变量。它们证明“框架路径存在”，不能替代本项目的 SDXL + IP-Adapter

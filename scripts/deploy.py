@@ -97,7 +97,26 @@ def resolve_pnpm() -> list[str]:
     )
 
 
+def augment_runtime_path() -> None:
+    if platform.system() != "Darwin" or not shutil.which("brew"):
+        return
+    candidates: list[str] = []
+    for formula in ("node@22", "python@3.12"):
+        try:
+            prefix = capture(["brew", "--prefix", formula])
+        except DeploymentError:
+            continue
+        for suffix in ("bin", "libexec/bin"):
+            directory = Path(prefix) / suffix
+            if directory.is_dir():
+                candidates.append(str(directory))
+    if candidates:
+        current = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join([*candidates, current])
+
+
 def ensure_node() -> list[str]:
+    augment_runtime_path()
     if not shutil.which("node"):
         raise DeploymentError("未找到 Node.js，请安装 Node.js 22.13+。")
     version = parse_version(capture(["node", "--version"]))
@@ -309,8 +328,8 @@ def prepare_real_photo_style(
         )
         return
     raise DeploymentError(
-        "本机没有受支持的真实图片风格化加速器。请在 NVIDIA GPU 电脑部署，"
-        "或用 --photo-style-url https://... 配置远程 GPU 服务。"
+        "本机没有经过验证的真实图片风格化档位。完整迁移必须在当前目标机部署"
+        "本地 Provider；--photo-style-url 只保留给开发期远程联调。"
     )
 
 

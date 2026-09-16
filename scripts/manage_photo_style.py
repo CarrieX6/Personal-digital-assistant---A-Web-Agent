@@ -1042,10 +1042,72 @@ def prepare_macos_mps(*, accept_model_licenses: bool) -> None:
             "PYTORCH_ENABLE_MPS_FALLBACK": "1",
         },
     )
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    validate_macos_mps()
     print(
-        "MPS 模型与配置已准备，但 production_quality 仍为 false。请重启 Agent，"
-        "完成固定样本 smoke、十次稳定性、统一内存、功耗和人工质量门禁。"
+        "MPS 模型、配置与非个人样本 smoke 已完成，但 production_quality 仍为 false。"
+        "请重启 Agent，并继续完成真实样本、十次稳定性、统一内存、功耗和人工质量门禁。"
     )
+
+
+def validate_macos_mps() -> None:
+    info = doctor(DEFAULT_SERVICE_ROOT, 18000)
+    if "macos-mps-native" not in info["supported_real_profiles"]:
+        raise DeploymentError("真实 MPS smoke 只支持 Apple Silicon 与可用的 PyTorch MPS。")
+    model_root = PROJECT_ROOT / "backend" / "models" / "photo-style"
+    inputs = model_root / "smoke-inputs"
+    results = model_root / "smoke-results"
+    content = inputs / "content.png"
+    style = inputs / "style.png"
+    output = results / "macos-mps-install-smoke.png"
+    run(
+        [
+            sys.executable,
+            PROJECT_ROOT / "backend" / "scripts" / "create_photo_style_smoke_inputs.py",
+            "--output",
+            inputs,
+        ],
+        cwd=PROJECT_ROOT,
+    )
+    started = time.monotonic()
+    run(
+        [
+            sys.executable,
+            PROJECT_ROOT / "backend" / "scripts" / "smoke_photo_style_sdxl.py",
+            "--content",
+            content,
+            "--style",
+            style,
+            "--output",
+            output,
+            "--quality",
+            "preview",
+            "--accelerator",
+            "mps",
+        ],
+        cwd=PROJECT_ROOT,
+    )
+    report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+    provider_metadata = report.get("provider_metadata") or {}
+    validation = {
+        "schema_version": "photo_style_device_validation_v1",
+        "status": "engineering_smoke_passed",
+        "production_quality": False,
+        "validated_at": utc_now(),
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "accelerator": "mps",
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "provider": report.get("provider"),
+        "model": report.get("model"),
+        "runtime": provider_metadata.get("runtime") or {},
+        "output": str(output.relative_to(PROJECT_ROOT)),
+    }
+    (model_root / "device-validation.json").write_text(
+        json.dumps(validation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"MPS engineering smoke passed: {output}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1083,6 +1145,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="准备 Apple Silicon MPS 依赖与模型；不会自动越过质量门禁",
     )
     mps_parser.add_argument("--accept-model-licenses", action="store_true")
+    subparsers.add_parser(
+        "validate-macos-mps",
+        help="使用非个人固定样本执行一次真实 MPS 推理并记录本机工程门禁",
+    )
     remote_parser = subparsers.add_parser(
         "configure-remote",
         help="配置受保护的远程 GPU Provider；不在命令行接收密钥",
@@ -1138,6 +1204,8 @@ def main() -> None:
             prepare_macos_mps(
                 accept_model_licenses=args.accept_model_licenses,
             )
+        elif args.command == "validate-macos-mps":
+            validate_macos_mps()
         elif args.command == "configure-remote":
             configure_remote_agent(args.url, args.tenant)
         else:

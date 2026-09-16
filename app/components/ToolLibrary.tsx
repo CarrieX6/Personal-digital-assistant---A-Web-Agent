@@ -28,6 +28,7 @@ type ToolLibraryProps = {
   onOpenStyle: () => void;
   onOpenModelSettings: () => void;
   onOpenChannelSettings: () => void;
+  onOpenCapabilitySetup: () => void;
 };
 
 const catalog = [
@@ -127,6 +128,7 @@ export function ToolLibrary({
   onOpenStyle,
   onOpenModelSettings,
   onOpenChannelSettings,
+  onOpenCapabilitySetup,
 }: ToolLibraryProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [photoStyleProvider, setPhotoStyleProvider] =
@@ -320,7 +322,14 @@ export function ToolLibrary({
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>
                 ) : tool.id === "photo-style-transfer" ? (
-                  <button type="button" onClick={onOpenStyle}>
+                  <button
+                    type="button"
+                    onClick={
+                      tool.status === "installed" || tool.status === "testing"
+                        ? onOpenStyle
+                        : onOpenCapabilitySetup
+                    }
+                  >
                     {tool.status === "installed"
                       ? "打开工具"
                       : tool.status === "testing"
@@ -339,13 +348,14 @@ export function ToolLibrary({
                     <AppIcon name="chevron" width="15" height="15" />
                   </button>
                 ) : tool.id === "flux-gs" ? (
-                  <span>
-                    {tool.status === "installed"
-                      ? "可从 Agent 或飞书调用"
-                      : tool.status === "testing"
-                        ? "仅可验证接入链路"
-                        : "请先部署独立 GPU 服务"}
-                  </span>
+                  tool.status === "installed" ? (
+                    <span>可从 Agent 或飞书调用</span>
+                  ) : (
+                    <button type="button" onClick={onOpenCapabilitySetup}>
+                      {tool.status === "testing" ? "查看验证边界" : "查看安装计划"}
+                      <AppIcon name="chevron" width="15" height="15" />
+                    </button>
+                  )
                 ) : tool.status === "coming" ? (
                   <button type="button" disabled>
                     尚未开放
