@@ -1,7 +1,7 @@
 # 调研与实现中心
 
 作者：**Zhuofan Xie**
-更新日期：2026-09-15
+更新日期：2026-09-28
 
 本文件是项目技术调研与实现进度的统一入口。它回答四个问题：
 
@@ -73,7 +73,8 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 ### P0：先打通个人数字助手主链路
 
 - [ ] `LEARN-001`：建立个人数字助手分层知识库与学习导航。
-- [ ] `AGENT-001`：确定 Agent Orchestrator 架构和工具执行循环。
+- [ ] `AGENT-001`：确定 Agent Orchestrator 架构和工具执行循环（长期生产化项仍在推进）。
+- [x] `RELIABILITY-001`：完成 P0 可靠性基线并合入 `main`。
 - [ ] `REPORT-001`：完成个人数字助手阶段审计、贡献归属和公司汇报材料。
 - [ ] `CHANNEL-001`：完成飞书长连接文本消息闭环 PoC。
 - [ ] `SEC-001`：建立外部聊天控制的身份、权限与威胁模型。
@@ -123,18 +124,19 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `👀 评审中` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 已整合原子 Run 持久化、八节点崩溃恢复、Checkpoint 身份校验、人工处置状态和写工具幂等保护；当前 PR #25 继续补任务执行租约、跨进程抢占、恢复边界、运维指标，待合并后验收强制超时、审批过期、Outbox、价格版本化费用和并发预算 |
-| `COST-001` | P1 | Agent Token 如何记录、预算和优化 | `✅ 已决策` | `👀 评审中` | Zhuofan Xie | [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 新增 `token_usage.sqlite3`、供应商真实/估算用量记录、Run 级可选预算门禁、阶段汇总、`/api/usage/tokens` 和控制台展示；见[Token 用量、预算与节省策略](architecture/token-usage-and-optimization.md)，待供应商价格版本表、成本告警和多进程并发验收 |
+| `RELIABILITY-001` | P0 | 多进程幂等、任务恢复/重试、运维指标和飞书媒体回传稳定性 | `✅ 已决策` | `✅ 已完成` | Zhuofan Xie | [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 已于 2026-09-28 合入 `main`（合并提交 `47bef29`）；专项测试 6 passed，编译与 diff 检查通过；见[P0 可靠性与运维基线](architecture/p0-reliability-and-operations.md)。后续 Outbox、指数退避/死信、Prometheus/Otel 和多节点压测属于生产化增强 |
+| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `🧱 局部实现` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 已整合原子 Run 持久化、八节点崩溃恢复、Checkpoint 身份校验、人工处置状态和写工具幂等保护；P0 可靠性基线已由 [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 合入，仍待强制超时、审批过期、Outbox、价格版本化费用和并发预算 |
+| `COST-001` | P1 | Agent Token 如何记录、预算和优化 | `✅ 已决策` | `✅ 已完成` | Zhuofan Xie | [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 已合入 `main`，新增 `token_usage.sqlite3`、供应商真实/估算用量记录、Run 级可选预算门禁、阶段汇总、`/api/usage/tokens` 和控制台展示；见[Token 用量、预算与节省策略](architecture/token-usage-and-optimization.md)。价格版本表与成本告警列为后续增强 |
 | `AGENT-002` | P1 | 单 Agent、多 Agent 和确定性工作流的使用边界 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 场景边界、通信成本、调试与评测方案 |
-| `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并空间照片失败任务复用原始图片的一键重试；当前 PR #25 增加 SQLite 原子预留、worker lease、跨进程 claim、queued 自动恢复、running 租约回收、空间/风格任务统一恢复和 P0 回归测试；待抽象为持久化通用 Job、取消、指数退避、死信和 Outbox |
+| `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并空间照片失败任务复用原始图片的一键重试；P0 基线由 [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 合入，增加 SQLite 原子预留、worker lease、跨进程 claim、queued 自动恢复、running 租约回收和空间/风格任务统一恢复；仍待通用 Job、取消、指数退避、死信和 Outbox |
 | `EVAL-001` | P1 | 如何评价规划正确率、工具调用成功率和任务完成率 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准任务集、指标、回归测试入口 |
 
 ## 5. 外部控制与结果回传
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态和任务回收；当前 PR #25 增加图片资源多路 fallback/短重试、出站统一 UUID 重试、消息级空间任务幂等和 `/ready`/`/api/ops/metrics`；待真实断网/休眠/恢复实验与指标 |
-| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6)、[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8)、[PR #11](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/11)、[PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 已覆盖基础媒体、预览关联、空间/风格任务重试、owner/chat 隔离、Viewer、持久化风格草稿和多图输入；当前 PR #25 增加飞书图片下载 fallback、出站媒体短重试和稳定错误提示；待真实手机回归、通用 Presenter、Outbox 和视频降级 |
+| `CHANNEL-001` | P0 | 飞书长连接、权限、白名单、幂等和文本回复 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6) 已合并配置 UI、安全凭证、SQLite 去重、Open ID 白名单、keepalive、自动重连状态和任务回收；P0 媒体与发送稳定性已由 [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 合入，增加图片资源多路 fallback/短重试、出站统一 UUID 重试、消息级空间任务幂等和 `/ready`/`/api/ops/metrics`；待真实断网/休眠/恢复实验与指标 |
+| `CHANNEL-002` | P1 | 图片、文件、视频、卡片、进度和失败如何回传 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | [PR #6](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/6)、[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8)、[PR #11](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/11)、[PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 已覆盖基础媒体、预览关联、空间/风格任务重试、owner/chat 隔离、Viewer、持久化风格草稿和多图输入；P0 飞书图片下载 fallback、出站媒体短重试和稳定错误提示已由 [PR #25](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/25) 合入；待真实手机回归、通用 Presenter、Outbox 和视频降级 |
 | `CHANNEL-003` | P2 | 企业微信、公众号、小程序如何接入 | `🟠 初步结论` | `⬜ 未开始` | 待领取 | 官方路径对比、主体要求、成本与限制 |
 | `CHANNEL-004` | P1 | Web 控制台如何同步显示手机端收发消息 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 2026-07-29 已将主页重构为图文对话工作台；[PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并飞书图片预览、卡片语义化展示和按 `chat_id` 删除只读镜像；待真机验收、群聊 sender 边界、隐私保留策略和统一 Message 迁移 |
 | `PREVIEW-001` | P1 | 手机如何安全预览空间照片、GLB、PLY 和 3DGS | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已实现独立 `8766` 只读 Viewer、HMAC 链接、文件白名单、触控/陀螺仪、手机尺寸适配、TryCloudflare 自动重连与飞书“刷新预览链接”；开发期 Token 最长 7 天。上线前仍需固定域名 Named Tunnel、可撤销分享记录、访问审计、弱网与 iOS/Android 真机测试，GLB/3DGS 未接入 |
