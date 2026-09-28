@@ -614,6 +614,19 @@ class PhotoStyleService:
         self._futures: set[Future[None]] = set()
         self._future_lock = threading.Lock()
         self._idempotency_locks = tuple(threading.Lock() for _ in range(64))
+        self.worker_id = f"style:{os.getpid()}:{uuid4().hex[:12]}"
+        self._resume_pending_jobs()
+
+    def _resume_pending_jobs(self) -> None:
+        for row in self.repository.list_job_rows(limit=500):
+            if row["kind"] == "photo_style_transfer" and row["status"] == "queued":
+                self._submit_job(row["asset_id"], row["id"])
+
+    def _submit_job(self, asset_id: str, job_id: str) -> None:
+        future = self.executor.submit(self._process, asset_id, job_id)
+        with self._future_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
 
     def create_transfer(
         self,
@@ -719,27 +732,18 @@ class PhotoStyleService:
             asset_id = str(uuid4())
             job_id = str(uuid4())
         directory = self.asset_dir / asset_id
-        directory.mkdir(parents=True, exist_ok=bool(idempotency_key))
-        os.chmod(directory, 0o700)
         try:
             content = SpatialSceneService._resize_for_output(content)
-            content_path = directory / "source.webp"
-            content.save(content_path, "WEBP", quality=94, method=6)
-            os.chmod(content_path, 0o600)
             style_files: list[str] = []
             for index, style in enumerate(styles, start=1):
-                style.thumbnail((768, 768), Image.Resampling.LANCZOS)
-                style_path = directory / f"style-{index}.webp"
-                style.save(style_path, "WEBP", quality=92, method=6)
-                os.chmod(style_path, 0o600)
-                style_files.append(style_path.name)
+                style_files.append(f"style-{index}.webp")
 
             metadata = {
                 "width": content.width,
                 "height": content.height,
-                "source_file": content_path.name,
+                "source_file": "source.webp",
                 "style_files": style_files,
-                "preview_file": content_path.name,
+                "preview_file": "source.webp",
                 "result_file": None,
                 "manifest_file": None,
                 "model_name": self.provider.model_name,
@@ -747,7 +751,7 @@ class PhotoStyleService:
                 "parameters": selected_parameters.public_dict(),
                 "idempotency_fingerprint": request_fingerprint,
             }
-            self.repository.create_asset_and_job(
+            inserted = self.repository.create_asset_and_job(
                 asset_id=asset_id,
                 job_id=job_id,
                 name=safe_title or "图片风格化",
@@ -755,17 +759,41 @@ class PhotoStyleService:
                 owner_id=owner_id,
                 kind="photo_style_transfer",
                 queued_message="图片风格化任务已进入本地处理队列。",
+                expected_fingerprint=request_fingerprint,
             )
+            if not inserted:
+                return PhotoStyleCreateResponse(
+                    asset=self.asset_library.get_asset(asset_id, owner_id=owner_id),
+                    job=self.asset_library.get_job(job_id, owner_id=owner_id),
+                    reused=True,
+                )
+            directory.mkdir(parents=True, exist_ok=False)
+            os.chmod(directory, 0o700)
+            content_path = directory / "source.webp"
+            content.save(content_path, "WEBP", quality=94, method=6)
+            os.chmod(content_path, 0o600)
+            for index, style in enumerate(styles, start=1):
+                style.thumbnail((768, 768), Image.Resampling.LANCZOS)
+                style_path = directory / f"style-{index}.webp"
+                style.save(style_path, "WEBP", quality=92, method=6)
+                os.chmod(style_path, 0o600)
         except Exception:
             import shutil
 
             shutil.rmtree(directory, ignore_errors=True)
+            if self.repository.get_asset_row(asset_id, owner_id) is not None:
+                self.repository.fail_asset(asset_id)
+                self.repository.update_job(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    stage="failed",
+                    message="原始图片保存失败，请重试。",
+                    error="原始图片保存失败。",
+                )
             raise
 
-        future = self.executor.submit(self._process, asset_id, job_id)
-        with self._future_lock:
-            self._futures.add(future)
-        future.add_done_callback(self._forget_future)
+        self._submit_job(asset_id, job_id)
         return PhotoStyleCreateResponse(
             asset=self.asset_library.get_asset(asset_id),
             job=self.asset_library.get_job(job_id),
@@ -880,10 +908,7 @@ class PhotoStyleService:
         if not started:
             return refreshed, False
 
-        future = self.executor.submit(self._process, job.asset_id, job_id)
-        with self._future_lock:
-            self._futures.add(future)
-        future.add_done_callback(self._forget_future)
+        self._submit_job(job.asset_id, job_id)
         return refreshed, True
 
     @staticmethod
@@ -965,7 +990,11 @@ class PhotoStyleService:
             self._futures.discard(future)
 
     def _process(self, asset_id: str, job_id: str) -> None:
+        if not self.repository.claim_job(job_id, self.worker_id):
+            return
+
         def progress(value: int, stage: str, message: str) -> None:
+            self.repository.refresh_job_lease(job_id, self.worker_id)
             self.repository.update_job(
                 job_id,
                 status="running",

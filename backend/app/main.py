@@ -91,6 +91,7 @@ from .models import (
     SourceImagePublic,
     SpatialSceneCreateResponse,
     ToolInfo,
+    TokenUsageReportResponse,
     ViewerLinkPublic,
 )
 from .memory import (
@@ -101,6 +102,7 @@ from .memory import (
     MemoryType,
     SESSION_SUMMARY_SCHEMA_VERSION,
 )
+from .observability import MetricsRegistry, configure_logging, monotonic_ms
 from .settings import (
     LLMRuntimeManager,
     SettingsError,
@@ -109,6 +111,7 @@ from .settings import (
 )
 from .style_transfer import PhotoStyleService, StyleParameters, register_style_tools
 from .tokenization import ContextWindowExceededError
+from .token_usage import TokenUsageStore, configured_run_token_budget
 from .tools import ToolError, ToolRegistry, build_default_registry
 
 
@@ -240,6 +243,7 @@ def create_app(
     identity_registry: IdentityBindingRegistry | None = None,
     capability_setup_service: CapabilitySetupService | None = None,
 ) -> FastAPI:
+    configure_logging()
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
         DEFAULT_ASSET_DATA_PATH
@@ -251,9 +255,16 @@ def create_app(
     register_style_tools(registry, selected_style_service)
     selected_flux_gs_service = flux_gs_service or FluxGSService()
     register_flux_gs_tools(registry, selected_flux_gs_service)
+    channel_data_path = trace_path.parent
+    token_usage_store = TokenUsageStore(channel_data_path / "token_usage.sqlite3")
     selected_settings_service = settings_service or create_default_settings_service(
-        DEFAULT_SETTINGS_PATH
+        DEFAULT_SETTINGS_PATH,
+        usage_store=token_usage_store,
     )
+    if getattr(selected_settings_service, "usage_store", None) is None:
+        selected_settings_service.usage_store = token_usage_store
+    if planner is not None and hasattr(planner, "usage_store"):
+        planner.usage_store = token_usage_store
     llm_runtime = LLMRuntimeManager(
         selected_settings_service,
         registry,
@@ -264,6 +275,7 @@ def create_app(
         registry,
         selected_planner,
         JsonlTraceStore(trace_path),
+        usage_store=token_usage_store,
         image_loader=lambda source_image_id, owner_id: (
             selected_spatial_service.read_source_image(
                 source_image_id,
@@ -271,7 +283,6 @@ def create_app(
             )
         ),
     )
-    channel_data_path = trace_path.parent
     selected_feishu_settings_service = feishu_settings_service or (
         create_default_feishu_settings_service(
             channel_data_path / DEFAULT_FEISHU_SETTINGS_PATH.name
@@ -325,6 +336,7 @@ def create_app(
             selected_style_service.close()
             selected_flux_gs_service.close()
             selected_spatial_service.close()
+            token_usage_store.close()
 
     app = FastAPI(
         title="Agent Lab API",
@@ -335,6 +347,27 @@ def create_app(
         version="0.5.0",
         lifespan=lifespan,
     )
+    metrics = MetricsRegistry()
+
+    @app.middleware("http")
+    async def record_http_metrics(request: Request, call_next):
+        started = monotonic_ms()
+        metrics.increment("http_requests_total")
+        try:
+            response = await call_next(request)
+        except Exception:
+            metrics.increment("http_requests_5xx")
+            raise
+        finally:
+            metrics.observe_ms(
+                "http_request_duration",
+                monotonic_ms() - started,
+            )
+        if response.status_code >= 500:
+            metrics.increment("http_requests_5xx")
+        elif response.status_code >= 400:
+            metrics.increment("http_requests_4xx")
+        return response
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -353,6 +386,7 @@ def create_app(
     )
     app.state.registry = registry
     app.state.runner = runner
+    app.state.token_usage_store = token_usage_store
     app.state.settings_service = selected_settings_service
     app.state.llm_runtime = llm_runtime
     app.state.spatial_service = selected_spatial_service
@@ -364,6 +398,7 @@ def create_app(
     app.state.viewer_service = selected_viewer_service
     app.state.identity_registry = selected_identity_registry
     app.state.capability_setup_service = selected_capability_setup_service
+    app.state.metrics = metrics
     app.include_router(create_flux_gs_router())
     app.include_router(
         create_capability_setup_router(selected_capability_setup_service)
@@ -396,6 +431,37 @@ def create_app(
             tool_count=len(current_registry.list_tools()),
             feishu_status=request.app.state.feishu_runtime.public_status().status,
         )
+
+    @app.get("/ready")
+    def readiness(request: Request) -> dict[str, object]:
+        runtime_status = request.app.state.llm_runtime.public_status()
+        feishu_status = request.app.state.feishu_runtime.public_status()
+        checks = {
+            "api": True,
+            "llm_configured": runtime_status.status
+            in {"ready", "testing", "degraded", "configured_not_enabled"},
+            "assets_store": request.app.state.spatial_service.repository.database_path.exists(),
+        }
+        # Feishu is optional for local Web use and therefore is reported, not
+        # used as a hard readiness gate.
+        return {
+            "ready": all(checks.values()),
+            "checks": checks,
+            "feishu": feishu_status.status,
+        }
+
+    @app.get("/api/ops/metrics")
+    def operational_metrics(request: Request) -> dict[str, object]:
+        _require_local_root(request)
+        spatial: SpatialSceneService = request.app.state.spatial_service
+        return {
+            "metrics": request.app.state.metrics.snapshot(),
+            "jobs": spatial.repository.job_counts(),
+            "feishu": request.app.state.feishu_runtime.public_status().model_dump(
+                mode="json"
+            ),
+            "token_usage": request.app.state.token_usage_store.summary().as_dict(),
+        }
 
     @app.get("/api/tools", response_model=list[ToolInfo])
     def list_tools(request: Request) -> list[ToolInfo]:
@@ -1259,6 +1325,33 @@ def create_app(
         runner: AgentRunner = request.app.state.runner
         return AgentRunListResponse(
             runs=runner.list_runs(status=status, limit=limit)
+        )
+
+    @app.get("/api/usage/tokens", response_model=TokenUsageReportResponse)
+    def token_usage_report(
+        request: Request,
+        run_id: str | None = Query(default=None, max_length=100),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> TokenUsageReportResponse:
+        """Return content-free token telemetry for the local Web owner."""
+
+        store: TokenUsageStore = request.app.state.token_usage_store
+        summary = store.summary(owner_id=WEB_OWNER_ID, run_id=run_id)
+        data = summary.as_dict()
+        data["max_budget_tokens"] = configured_run_token_budget()
+        return TokenUsageReportResponse(
+            summary=data,
+            events=[
+                {
+                    **event,
+                    "is_estimate": bool(event["is_estimate"]),
+                }
+                for event in store.events(
+                    owner_id=WEB_OWNER_ID,
+                    run_id=run_id,
+                    limit=limit,
+                )
+            ],
         )
 
     @app.get("/api/agent/runs/{run_id}", response_model=AgentRunResponse)

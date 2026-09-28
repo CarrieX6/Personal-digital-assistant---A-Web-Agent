@@ -18,6 +18,7 @@ from langgraph.types import Command, interrupt
 from .agent import Planner, PlanningResult, ToolObservation, _elapsed_ms
 from .models import ToolCall, TraceStep
 from .tools import ToolError, ToolExecutionContext, ToolRegistry
+from .token_usage import bind_usage_stage
 
 
 LOGGER = logging.getLogger(__name__)
@@ -570,12 +571,14 @@ class LangGraphOrchestrator:
             vision_inputs = self._transient_vision_inputs.get(state["run_id"])
             if vision_inputs:
                 planning_context["_vision_inputs"] = vision_inputs
-            plan = plan_with_context(
-                planning_context,
-                tool_schemas,
-            )
+            with bind_usage_stage("plan"):
+                plan = plan_with_context(
+                    planning_context,
+                    tool_schemas,
+                )
         else:
-            plan = self.planner.plan(state["message"], tool_schemas)
+            with bind_usage_stage("plan"):
+                plan = self.planner.plan(state["message"], tool_schemas)
         selected = " → ".join(call.name for call in plan.tool_calls)
         available_tools = len(state["selected_tool_names"])
         detail = (
@@ -903,21 +906,24 @@ class LangGraphOrchestrator:
         else:
             continue_plan = getattr(self.planner, "continue_plan", None)
             if callable(continue_plan):
-                next_plan = continue_plan(
-                    state["message"],
-                    current_plan,
-                    round_observations,
-                    self._selected_tool_schemas(state),
-                )
-            else:
-                next_plan = PlanningResult(
-                    tool_calls=[],
-                    direct_answer=self.planner.compose_answer(
+                with bind_usage_stage("decide"):
+                    next_plan = continue_plan(
                         state["message"],
                         current_plan,
                         round_observations,
-                    ),
+                        self._selected_tool_schemas(state),
+                    )
+            else:
+                next_plan = PlanningResult(
+                    tool_calls=[],
+                    direct_answer=None,
                 )
+                with bind_usage_stage("decide"):
+                    next_plan.direct_answer = self.planner.compose_answer(
+                        state["message"],
+                        current_plan,
+                        round_observations,
+                    )
 
         if next_plan.tool_calls and state["replan_count"] >= self.max_replans:
             return {
@@ -929,11 +935,12 @@ class LangGraphOrchestrator:
 
         answer = next_plan.direct_answer or ""
         if not next_plan.tool_calls and not answer:
-            answer = self.planner.compose_answer(
-                state["message"],
-                current_plan,
-                round_observations,
-            )
+            with bind_usage_stage("final"):
+                answer = self.planner.compose_answer(
+                    state["message"],
+                    current_plan,
+                    round_observations,
+                )
 
         steps = list(state["steps"])
         steps.append(

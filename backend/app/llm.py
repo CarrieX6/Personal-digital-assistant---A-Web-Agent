@@ -4,6 +4,7 @@ import json
 import os
 import time
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -13,6 +14,15 @@ from .models import ToolCall
 from .tokenization import (
     RequestTokenGateResult,
     enforce_request_token_gate,
+    get_default_token_counter,
+)
+from .token_usage import (
+    TokenBudgetExceeded,
+    TokenUsageStore,
+    estimate_request_tokens,
+    json_size_tokens,
+    parse_provider_usage,
+    reserve_token_budget,
 )
 
 
@@ -187,6 +197,7 @@ class OpenAICompatiblePlanner:
         client: httpx.Client | None = None,
         context_window_tokens: int | None = None,
         reserved_output_tokens: int | None = None,
+        usage_store: TokenUsageStore | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -215,6 +226,8 @@ class OpenAICompatiblePlanner:
             upper=min(32_768, self.context_window_tokens // 2),
         )
         self.last_request_token_gate: RequestTokenGateResult | None = None
+        self.usage_store = usage_store
+        self.token_counter = get_default_token_counter()
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout_seconds)
 
@@ -501,9 +514,19 @@ class OpenAICompatiblePlanner:
             context_window_tokens=self.context_window_tokens,
             reserved_output_tokens=selected_output_limit,
         )
+        try:
+            reserve_token_budget(
+                estimate_request_tokens(
+                    self.last_request_token_gate.serialized_byte_upper_bound,
+                    selected_output_limit,
+                )
+            )
+        except TokenBudgetExceeded as exc:
+            raise LLMError(str(exc)) from exc
 
         vision_request = _has_vision_parts(messages)
         body: Any = None
+        started_at = time.perf_counter()
         for attempt in range(3):
             try:
                 response = self.client.post(
@@ -554,6 +577,33 @@ class OpenAICompatiblePlanner:
 
         if not isinstance(message, dict):
             raise LLMError("模型响应格式不正确。")
+        usage = parse_provider_usage(body.get("usage") if isinstance(body, dict) else None)
+        if usage is None:
+            input_tokens = max(
+                1,
+                self.token_counter.count(
+                    json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+                ),
+            )
+            output_tokens = json_size_tokens(message)
+            total_tokens = input_tokens + output_tokens
+            is_estimate = True
+        else:
+            input_tokens, output_tokens, total_tokens = usage
+            is_estimate = False
+        if self.usage_store is not None:
+            self.usage_store.record(
+                provider=urlsplit(self.base_url).netloc or "custom",
+                model=self.model_name,
+                tokenizer=getattr(self.token_counter, "identifier", None),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                is_estimate=is_estimate,
+                estimated_input_tokens=self.last_request_token_gate.serialized_byte_upper_bound,
+                estimated_output_tokens=selected_output_limit,
+                latency_ms=max(0, round((time.perf_counter() - started_at) * 1000)),
+            )
         return {
             key: message[key]
             for key in ("role", "content", "tool_calls")
@@ -704,6 +754,7 @@ def _bounded_int(
 
 def build_planner_from_env(
     client: httpx.Client | None = None,
+    usage_store: TokenUsageStore | None = None,
 ) -> Planner:
     api_key = os.getenv("LLM_API_KEY", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()
@@ -722,4 +773,5 @@ def build_planner_from_env(
         model=model,
         timeout_seconds=timeout,
         client=client,
+        usage_store=usage_store,
     )

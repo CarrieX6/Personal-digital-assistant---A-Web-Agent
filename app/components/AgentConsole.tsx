@@ -64,6 +64,18 @@ type AgentRun = {
   answer: string;
   steps: TraceStep[];
   total_duration_ms: number;
+  token_usage?: {
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    estimated_input_tokens: number;
+    estimated_output_tokens: number;
+    actual_calls: number;
+    estimated_calls: number;
+    latency_ms: number;
+    max_budget_tokens?: number | null;
+  } | null;
   approval?: {
     tool?: string;
     description?: string;
@@ -1677,8 +1689,22 @@ function LocalMessageBubble({
           <details className="run-details">
             <summary>
               <span>查看 LangGraph 执行轨迹</span>
-              <small>{item.run.total_duration_ms} ms</small>
+              <small>
+                {item.run.total_duration_ms} ms
+                {item.run.token_usage
+                  ? ` · ${item.run.token_usage.total_tokens} tokens`
+                  : ""}
+              </small>
             </summary>
+            {item.run.token_usage ? (
+              <div className="run-token-usage">
+                Token 用量：输入 {item.run.token_usage.input_tokens} / 输出{" "}
+                {item.run.token_usage.output_tokens}；
+                {item.run.token_usage.estimated_calls > 0
+                  ? `其中 ${item.run.token_usage.estimated_calls} 次为估算值。`
+                  : "供应商返回了完整用量。"}
+              </div>
+            ) : null}
             <ol>
               {item.run.steps.map((step) => (
                 <li key={`${step.index}-${step.label}`}>

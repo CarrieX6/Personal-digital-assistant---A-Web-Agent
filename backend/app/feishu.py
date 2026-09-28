@@ -918,12 +918,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"markdown": answer},
             {"uuid": self._uuid(run_id, "root-approval-result")},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -1745,7 +1745,8 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"card": card.data},
             {
@@ -1753,7 +1754,6 @@ class FeishuChannelRuntime:
                 "uuid": self._uuid(message_id, "feature-menu"),
             },
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -2376,6 +2376,7 @@ class FeishuChannelRuntime:
                 original_name=file_name or "feishu-image.jpg",
                 title="飞书空间照片",
                 owner_id=self._owner_id(sender_id),
+                idempotency_key=f"feishu:{chat_id}:{sender_id}:{message_id}",
             )
             self.store.attach_event_media(
                 message_id,
@@ -2670,7 +2671,8 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"card": card.data},
             {
@@ -2678,7 +2680,6 @@ class FeishuChannelRuntime:
                 "uuid": self._uuid(message_id, f"retry-spatial-{job_id}"),
             },
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -2723,34 +2724,48 @@ class FeishuChannelRuntime:
                     GetImageRequest.builder().image_key(file_key).build(),
                 ))
             for resource, request in requests:
-                try:
-                    response = await resource.aget(request)
-                    code = getattr(response, "code", None)
-                    if code in {None, 0}:
-                        payload = await self._response_file_bytes(response)
+                for attempt in range(2):
+                    try:
+                        response = await resource.aget(request)
+                        code = getattr(response, "code", None)
+                        if code in {None, 0}:
+                            payload = await self._response_file_bytes(response)
+                            if payload:
+                                return payload
+                        errors.append(
+                            (code, str(getattr(response, "msg", "") or ""))
+                        )
+                    except Exception as exc:
+                        errors.append((None, type(exc).__name__))
+                    if attempt == 0:
+                        await asyncio.sleep(0.35)
+
+        # Some SDK versions expose a channel-level downloader even when the
+        # generated IM client route is unavailable. It also makes local fakes
+        # and future SDK upgrades follow the same fallback path.
+        downloader = getattr(channel, "download_resource", None)
+        if callable(downloader):
+            for linked_message_id in (message_id, None):
+                for attempt in range(2):
+                    try:
+                        payload = await downloader(
+                            file_key,
+                            resource_type=resource_type,
+                            message_id=linked_message_id,
+                        )
                         if payload:
                             return payload
-                    errors.append(
-                        (code, str(getattr(response, "msg", "") or ""))
-                    )
-                except Exception as exc:
-                    errors.append((None, type(exc).__name__))
-        else:
-            for linked_message_id in (message_id, None):
-                payload = await channel.download_resource(
-                    file_key,
-                    resource_type=resource_type,
-                    message_id=linked_message_id,
-                )
-                if payload:
-                    return payload
+                    except Exception as exc:
+                        errors.append((None, type(exc).__name__))
+                    if attempt == 0:
+                        await asyncio.sleep(0.35)
 
         permission_denied = any(code == 99991672 for code, _ in errors)
         suffix = "（平台错误码 99991672）" if permission_denied else ""
         raise FeishuResourceError(
-            "无法下载飞书图片或图片文件。请在开发者后台开通 im:resource，"
-            "并开通 im:message:readonly（或 im:message），发布新版本后"
-            f"重新授权再试{suffix}。"
+            "无法下载飞书图片或图片文件。请在开发者后台检查机器人消息资源读取/"
+            "媒体下载权限（例如 im:resource，具体名称以租户后台显示为准），发布新版本并重新授权后"
+            f"再试{suffix}。"
         )
 
     @staticmethod
@@ -3095,12 +3110,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"card": card.data},
             {"reply_to": message_id, "uuid": self._uuid(message_id, phase)},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -3132,6 +3147,27 @@ class FeishuChannelRuntime:
             self._status = "error"
             self._last_error = self._safe_error(exc)
 
+    async def _send_with_retry(
+        self,
+        channel: FeishuChannelLike,
+        chat_id: str,
+        payload: dict[str, Any],
+        opts: dict[str, Any],
+    ) -> Any:
+        """Retry transient outbound failures while preserving the SDK UUID."""
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = await channel.send(chat_id, payload, opts)
+                self._ensure_send_success(result)
+                return result
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.4 * (2**attempt))
+        assert last_error is not None
+        raise last_error
+
     async def _send_reply(
         self,
         chat_id: str,
@@ -3142,12 +3178,9 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
-            chat_id,
-            {"text": text},
-            {"reply_to": message_id, "uuid": uuid},
+        await self._send_with_retry(
+            channel, chat_id, {"text": text}, {"reply_to": message_id, "uuid": uuid}
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -3166,12 +3199,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"markdown": markdown},
             {"reply_to": message_id, "uuid": uuid},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -3192,12 +3225,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"image": {"source": str(path)}},
             {"reply_to": message_id, "uuid": uuid},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -3221,12 +3254,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"file": {"source": str(path), "file_name": file_name}},
             {"reply_to": message_id, "uuid": uuid},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
@@ -3543,12 +3576,12 @@ class FeishuChannelRuntime:
         channel = self._channel
         if channel is None:
             raise RuntimeError("飞书长连接当前不可用")
-        result = await channel.send(
+        await self._send_with_retry(
+            channel,
             chat_id,
             {"card": card},
             {"reply_to": message_id, "uuid": uuid},
         )
-        self._ensure_send_success(result)
         self.store.record_event(
             chat_id=chat_id,
             sender_id=None,
