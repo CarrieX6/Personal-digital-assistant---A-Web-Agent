@@ -102,6 +102,7 @@ from .memory import (
     MemoryType,
     SESSION_SUMMARY_SCHEMA_VERSION,
 )
+from .observability import MetricsRegistry, configure_logging, monotonic_ms
 from .settings import (
     LLMRuntimeManager,
     SettingsError,
@@ -242,6 +243,7 @@ def create_app(
     identity_registry: IdentityBindingRegistry | None = None,
     capability_setup_service: CapabilitySetupService | None = None,
 ) -> FastAPI:
+    configure_logging()
     registry = build_default_registry()
     selected_spatial_service = spatial_service or SpatialSceneService(
         DEFAULT_ASSET_DATA_PATH
@@ -345,6 +347,27 @@ def create_app(
         version="0.5.0",
         lifespan=lifespan,
     )
+    metrics = MetricsRegistry()
+
+    @app.middleware("http")
+    async def record_http_metrics(request: Request, call_next):
+        started = monotonic_ms()
+        metrics.increment("http_requests_total")
+        try:
+            response = await call_next(request)
+        except Exception:
+            metrics.increment("http_requests_5xx")
+            raise
+        finally:
+            metrics.observe_ms(
+                "http_request_duration",
+                monotonic_ms() - started,
+            )
+        if response.status_code >= 500:
+            metrics.increment("http_requests_5xx")
+        elif response.status_code >= 400:
+            metrics.increment("http_requests_4xx")
+        return response
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -375,6 +398,7 @@ def create_app(
     app.state.viewer_service = selected_viewer_service
     app.state.identity_registry = selected_identity_registry
     app.state.capability_setup_service = selected_capability_setup_service
+    app.state.metrics = metrics
     app.include_router(create_flux_gs_router())
     app.include_router(
         create_capability_setup_router(selected_capability_setup_service)
@@ -407,6 +431,37 @@ def create_app(
             tool_count=len(current_registry.list_tools()),
             feishu_status=request.app.state.feishu_runtime.public_status().status,
         )
+
+    @app.get("/ready")
+    def readiness(request: Request) -> dict[str, object]:
+        runtime_status = request.app.state.llm_runtime.public_status()
+        feishu_status = request.app.state.feishu_runtime.public_status()
+        checks = {
+            "api": True,
+            "llm_configured": runtime_status.status
+            in {"ready", "testing", "degraded", "configured_not_enabled"},
+            "assets_store": request.app.state.spatial_service.repository.database_path.exists(),
+        }
+        # Feishu is optional for local Web use and therefore is reported, not
+        # used as a hard readiness gate.
+        return {
+            "ready": all(checks.values()),
+            "checks": checks,
+            "feishu": feishu_status.status,
+        }
+
+    @app.get("/api/ops/metrics")
+    def operational_metrics(request: Request) -> dict[str, object]:
+        _require_local_root(request)
+        spatial: SpatialSceneService = request.app.state.spatial_service
+        return {
+            "metrics": request.app.state.metrics.snapshot(),
+            "jobs": spatial.repository.job_counts(),
+            "feishu": request.app.state.feishu_runtime.public_status().model_dump(
+                mode="json"
+            ),
+            "token_usage": request.app.state.token_usage_store.summary().as_dict(),
+        }
 
     @app.get("/api/tools", response_model=list[ToolInfo])
     def list_tools(request: Request) -> list[ToolInfo]:

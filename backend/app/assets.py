@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import shutil
 import sqlite3
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -410,12 +412,27 @@ class AssetRepository:
                     message TEXT NOT NULL,
                     asset_id TEXT NOT NULL,
                     error TEXT,
+                    worker_id TEXT,
+                    lease_until REAL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(asset_id) REFERENCES assets(id)
                 )
                 """
             )
+            job_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "worker_id" not in job_columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN worker_id TEXT")
+            if "lease_until" not in job_columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN lease_until REAL")
+            if "attempt_count" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS assets_created_idx "
                 "ON assets(created_at DESC)"
@@ -425,8 +442,14 @@ class AssetRepository:
                 "ON jobs(created_at DESC)"
             )
             interrupted_at = _now()
+            now_epoch = time.time()
             interrupted_jobs = connection.execute(
-                "SELECT asset_id FROM jobs WHERE status IN ('queued', 'running')"
+                """
+                SELECT asset_id FROM jobs
+                WHERE status = 'running'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                """,
+                (now_epoch,),
             ).fetchall()
             if interrupted_jobs:
                 connection.execute(
@@ -437,9 +460,10 @@ class AssetRepository:
                         message = '任务因本地服务重启而中断，可以重新生成。',
                         error = '本地服务重启中断任务。',
                         updated_at = ?
-                    WHERE status IN ('queued', 'running')
+                    WHERE status = 'running'
+                      AND (lease_until IS NULL OR lease_until < ?)
                     """,
-                    (interrupted_at,),
+                    (interrupted_at, now_epoch),
                 )
                 connection.executemany(
                     """
@@ -474,12 +498,20 @@ class AssetRepository:
         owner_id: str = "local",
         kind: str = "spatial_scene",
         queued_message: str = "任务已进入本地处理队列。",
-    ) -> None:
+        expected_fingerprint: str | None = None,
+    ) -> bool:
+        """Reserve an asset/job atomically across processes.
+
+        Returns ``True`` for the process that inserted the reservation and
+        ``False`` when an identical idempotent reservation already exists.
+        A reused key with a different payload is rejected before any file is
+        written, so concurrent workers cannot overwrite one another's inputs.
+        """
         timestamp = _now()
         with self._lock, self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
-                INSERT INTO assets
+                INSERT OR IGNORE INTO assets
                 (id, owner_id, kind, name, status, metadata_json,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'processing', ?, ?, ?)
@@ -494,12 +526,26 @@ class AssetRepository:
                     timestamp,
                 ),
             )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    "SELECT metadata_json FROM assets WHERE id = ? AND owner_id = ?",
+                    (asset_id, owner_id),
+                ).fetchone()
+                if row is None:
+                    raise AssetError("任务幂等预留失败，请稍后重试。")
+                if expected_fingerprint:
+                    stored = json.loads(row["metadata_json"]).get(
+                        "idempotency_fingerprint"
+                    )
+                    if stored and stored != expected_fingerprint:
+                        raise AssetError("这个幂等键已经用于另一组输入。")
+                return False
             connection.execute(
                 """
                 INSERT INTO jobs
                 (id, kind, status, progress, stage, message, asset_id, error,
-                 created_at, updated_at)
-                VALUES (?, ?, 'queued', 0, 'queued', ?, ?, NULL, ?, ?)
+                 worker_id, lease_until, attempt_count, created_at, updated_at)
+                VALUES (?, ?, 'queued', 0, 'queued', ?, ?, NULL, NULL, NULL, 0, ?, ?)
                 """,
                 (
                     job_id,
@@ -510,6 +556,42 @@ class AssetRepository:
                     timestamp,
                 ),
             )
+            return True
+
+    def claim_job(self, job_id: str, worker_id: str, *, lease_seconds: int = 900) -> bool:
+        """Atomically claim a queued job so multiple processes share one queue."""
+
+        lease_until = time.time() + max(30, int(lease_seconds))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'running', stage = 'preparing',
+                    message = '任务正在执行。', worker_id = ?,
+                    lease_until = ?, attempt_count = attempt_count + 1,
+                    updated_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (worker_id, lease_until, _now(), job_id),
+            )
+            return cursor.rowcount == 1
+
+    def refresh_job_lease(self, job_id: str, worker_id: str, *, lease_seconds: int = 900) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs SET lease_until = ?, updated_at = ?
+                WHERE id = ? AND status = 'running' AND worker_id = ?
+                """,
+                (time.time() + max(30, int(lease_seconds)), _now(), job_id, worker_id),
+            )
+
+    def job_counts(self) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
+            ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
 
     def update_job(
         self,
@@ -540,6 +622,8 @@ class AssetRepository:
             # previous lifecycle.  Leaving it behind produces contradictory
             # API state such as ``status=completed`` with a restart error.
             assignments.append("error = NULL")
+        if status in {"queued", "completed", "failed"}:
+            assignments.extend(["worker_id = NULL", "lease_until = NULL"])
         values.append(job_id)
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -568,7 +652,8 @@ class AssetRepository:
                 UPDATE jobs
                 SET status = 'queued', progress = 0, stage = 'queued',
                     message = '任务已重新进入本地处理队列。',
-                    error = NULL, updated_at = ?
+                    error = NULL, worker_id = NULL, lease_until = NULL,
+                    updated_at = ?
                 WHERE id = ? AND status = 'failed'{owner_clause}
                 """,
                 values,
@@ -744,7 +829,21 @@ class SpatialSceneService:
         )
         self._futures: set[Future[None]] = set()
         self._future_lock = threading.Lock()
+        self.worker_id = f"spatial:{os.getpid()}:{uuid4().hex[:12]}"
         self._cleanup_stale_source_images()
+        self._resume_pending_jobs()
+
+    def _resume_pending_jobs(self) -> None:
+        """Re-submit durable queued jobs after a process restart."""
+        for row in self.repository.list_job_rows(limit=500):
+            if row["kind"] == "spatial_scene" and row["status"] == "queued":
+                self._submit_job(row["asset_id"], row["id"])
+
+    def _submit_job(self, asset_id: str, job_id: str) -> None:
+        future = self.executor.submit(self._process, asset_id, job_id)
+        with self._future_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
 
     def _cleanup_stale_source_images(self, max_age_seconds: int = 24 * 60 * 60) -> None:
         cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
@@ -994,18 +1093,24 @@ class SpatialSceneService:
         owner_id: str = "local",
         idempotency_key: str | None = None,
     ) -> SpatialSceneCreateResponse:
-        existing = self._existing_idempotent_scene(
-            owner_id=owner_id,
-            idempotency_key=idempotency_key,
-        )
-        if existing is not None:
-            return existing
         if not image_bytes:
             raise AssetError("请选择一张图片。")
         if len(image_bytes) > MAX_UPLOAD_BYTES:
             raise AssetError("图片不能超过 20MB。")
 
         image = self._decode_image(image_bytes)
+        safe_title = _safe_title(title, Path(original_name).stem or "空间照片")
+        request_fingerprint = self._request_fingerprint(
+            image_bytes,
+            title=safe_title,
+        )
+        existing = self._existing_idempotent_scene(
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+            expected_fingerprint=request_fingerprint,
+        )
+        if existing is not None:
+            return existing
         if idempotency_key:
             asset_id, job_id = self._idempotent_scene_ids(
                 owner_id,
@@ -1014,37 +1119,51 @@ class SpatialSceneService:
         else:
             asset_id = str(uuid4())
             job_id = str(uuid4())
-        directory = self.asset_dir / asset_id
-        directory.mkdir(parents=True, exist_ok=bool(idempotency_key))
-        os.chmod(directory, 0o700)
-        source_path = directory / "source.webp"
-
         image = self._resize_for_output(image)
-        image.save(source_path, "WEBP", quality=94, method=6)
-        os.chmod(source_path, 0o600)
-        fallback_title = Path(original_name).stem or "空间照片"
         metadata = {
             "width": image.width,
             "height": image.height,
-            "source_file": source_path.name,
-            "preview_file": source_path.name,
+            "source_file": "source.webp",
+            "preview_file": "source.webp",
             "depth_file": None,
             "background_file": None,
             "foreground_file": None,
             "manifest_file": None,
             "model_name": None,
+            "idempotency_fingerprint": request_fingerprint,
         }
-        self.repository.create_asset_and_job(
+        inserted = self.repository.create_asset_and_job(
             asset_id=asset_id,
             job_id=job_id,
-            name=_safe_title(title, fallback_title),
+            name=safe_title,
             metadata=metadata,
             owner_id=owner_id,
+            expected_fingerprint=request_fingerprint,
         )
-        future = self.executor.submit(self._process, asset_id, job_id)
-        with self._future_lock:
-            self._futures.add(future)
-        future.add_done_callback(self._forget_future)
+        if not inserted:
+            return SpatialSceneCreateResponse(
+                asset=self.get_asset(asset_id, owner_id=owner_id),
+                job=self.get_job(job_id, owner_id=owner_id),
+            )
+        directory = self.asset_dir / asset_id
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+            os.chmod(directory, 0o700)
+            source_path = directory / "source.webp"
+            image.save(source_path, "WEBP", quality=94, method=6)
+            os.chmod(source_path, 0o600)
+        except Exception:
+            self.repository.fail_asset(asset_id)
+            self.repository.update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                stage="failed",
+                message="原始图片保存失败，请重试。",
+                error="原始图片保存失败。",
+            )
+            raise AssetError("原始图片保存失败，请重试。")
+        self._submit_job(asset_id, job_id)
         return SpatialSceneCreateResponse(
             asset=self.get_asset(asset_id),
             job=self.get_job(job_id),
@@ -1066,6 +1185,7 @@ class SpatialSceneService:
         *,
         owner_id: str,
         idempotency_key: str | None,
+        expected_fingerprint: str | None = None,
     ) -> SpatialSceneCreateResponse | None:
         if not idempotency_key:
             return None
@@ -1074,17 +1194,36 @@ class SpatialSceneService:
         job_row = self.repository.get_job_row(job_id, owner_id)
         if asset_row is None or job_row is None:
             return None
+        if expected_fingerprint is not None:
+            stored = json.loads(asset_row["metadata_json"]).get(
+                "idempotency_fingerprint"
+            )
+            if isinstance(stored, str) and stored != expected_fingerprint:
+                raise AssetError("这个幂等键已经用于另一组图片。")
         return SpatialSceneCreateResponse(
             asset=self.get_asset(asset_id, owner_id=owner_id),
             job=self.get_job(job_id, owner_id=owner_id),
         )
+
+    @staticmethod
+    def _request_fingerprint(image_bytes: bytes, *, title: str) -> str:
+        digest = hashlib.sha256()
+        digest.update(b"spatial-image-v1")
+        digest.update(len(image_bytes).to_bytes(8, "big"))
+        digest.update(image_bytes)
+        digest.update(title.encode("utf-8"))
+        return digest.hexdigest()
 
     def _forget_future(self, future: Future[None]) -> None:
         with self._future_lock:
             self._futures.discard(future)
 
     def _process(self, asset_id: str, job_id: str) -> None:
+        if not self.repository.claim_job(job_id, self.worker_id):
+            return
+
         def progress(value: int, stage: str, message: str) -> None:
+            self.repository.refresh_job_lease(job_id, self.worker_id)
             self.repository.update_job(
                 job_id,
                 status="running",
@@ -1328,10 +1467,7 @@ class SpatialSceneService:
         if not started:
             return refreshed, False
 
-        future = self.executor.submit(self._process, job.asset_id, job_id)
-        with self._future_lock:
-            self._futures.add(future)
-        future.add_done_callback(self._forget_future)
+        self._submit_job(job.asset_id, job_id)
         return refreshed, True
 
     def list_assets(
