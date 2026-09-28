@@ -41,6 +41,39 @@ class TraceStep(BaseModel):
     output: dict[str, Any] | None = None
 
 
+class TokenUsageSummaryPublic(BaseModel):
+    """Content-free model usage telemetry attached to one Agent Run."""
+
+    calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    estimated_input_tokens: int = Field(default=0, ge=0)
+    estimated_output_tokens: int = Field(default=0, ge=0)
+    actual_calls: int = Field(default=0, ge=0)
+    estimated_calls: int = Field(default=0, ge=0)
+    latency_ms: int = Field(default=0, ge=0)
+    max_budget_tokens: int | None = Field(default=None, ge=1)
+
+
+class TokenUsageEventPublic(BaseModel):
+    stage: str
+    provider: str | None = None
+    model: str | None = None
+    tokenizer: str | None = None
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    is_estimate: bool
+    latency_ms: int = Field(ge=0)
+    created_at: float
+
+
+class TokenUsageReportResponse(BaseModel):
+    summary: TokenUsageSummaryPublic
+    events: list[TokenUsageEventPublic]
+
+
 class AgentRunResponse(BaseModel):
     run_id: str
     status: Literal[
@@ -55,6 +88,7 @@ class AgentRunResponse(BaseModel):
     steps: list[TraceStep]
     total_duration_ms: int = Field(ge=0)
     approval: dict[str, Any] | None = None
+    token_usage: TokenUsageSummaryPublic | None = None
 
 
 class AgentRunDecisionRequest(BaseModel):

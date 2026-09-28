@@ -104,12 +104,12 @@ Channel Adapter 只负责：
 当前 `AgentRunner` 已使用 LangGraph `StateGraph` 实现
 `plan → policy → execute_tool → observe → decide` 受控循环，并以 SQLite
 Checkpointer 按会话保存执行状态。当前已加入工具 Schema、步数、重规划、连续错误、
-总运行时间和递归上限。高风险 Tool 已可通过 LangGraph Interrupt 暂停，在 Web Root
+总运行时间、递归上限，以及按 Run 记录的 Token 用量和可选预算门禁。高风险 Tool 已可通过 LangGraph Interrupt 暂停，在 Web Root
 或飞书审批后从 Checkpoint 恢复；SQLite 执行账本负责重放幂等。下一阶段增加：
 
 - 正在执行节点的进程级失败恢复；
 - 异步任务提交后立即返回；
-- 审批过期、审计和费用预算；
+- 审批过期、价格版本化费用和并发预算；
 - 结果 Presenter 选择。
 
 ### 3.4 Memory Service

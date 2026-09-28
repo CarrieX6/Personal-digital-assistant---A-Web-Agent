@@ -123,7 +123,8 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 | ID | 优先级 | 调研问题 | 调研状态 | 实现状态 | 负责人 | 交付与验收 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `🧱 局部实现` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 整合原子 Run 持久化、八节点崩溃恢复、Checkpoint 身份校验、人工处置状态和写工具幂等保护，并通过 186 项后端回归；待强制超时、审批过期、Outbox 和费用预算 |
+| `AGENT-001` | P0 | 自研循环、ReAct、Planner-Executor、Graph Workflow 如何选择 | `✅ 已决策` | `🧱 局部实现` | Zhuofan Xie | [PR #12](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/12) 整合原子 Run 持久化、八节点崩溃恢复、Checkpoint 身份校验、人工处置状态和写工具幂等保护，并通过 186 项后端回归；待强制超时、审批过期、Outbox、价格版本化费用和并发预算 |
+| `COST-001` | P1 | Agent Token 如何记录、预算和优化 | `✅ 已决策` | `🟡 开发中` | Zhuofan Xie | 当前分支新增 `token_usage.sqlite3`、供应商真实/估算用量记录、Run 级可选预算门禁、阶段汇总、`/api/usage/tokens` 和控制台展示；见[Token 用量、预算与节省策略](architecture/token-usage-and-optimization.md)，待 PR 评审、供应商价格版本表、成本告警和多进程并发验收 |
 | `AGENT-002` | P1 | 单 Agent、多 Agent 和确定性工作流的使用边界 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 场景边界、通信成本、调试与评测方案 |
 | `JOB-001` | P0 | 通用任务状态机、取消、重试、恢复与通知如何设计 | `🟠 初步结论` | `🧱 局部实现` | Zhuofan Xie | [PR #8](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/8) 已合并空间照片失败任务复用原始图片的一键重试、原子抢占防重复执行、Web 恢复入口和 API 测试；待抽象为通用 Job、取消、进程级恢复、退避和通知策略 |
 | `EVAL-001` | P1 | 如何评价规划正确率、工具调用成功率和任务完成率 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 基准任务集、指标、回归测试入口 |

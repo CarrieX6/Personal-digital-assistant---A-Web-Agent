@@ -35,6 +35,8 @@
   一个外部账号一个隔离工作区、Root 管理、本机节点绑定与多电脑 Control Plane 演进。
 - [分层长短期记忆设计](architecture/layered-memory.md)：工作记忆、滚动摘要、
   类型化长期记忆、混合检索、时间有效性、证据追踪与结果反馈闭环。
+- [Token 用量、预算与节省策略](architecture/token-usage-and-optimization.md)：供应商用量
+  记录、Run 预算门禁、上下文压缩、工具 Schema 限缩和成本优化路线。
 
 ### 配置指南
 

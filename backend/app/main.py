@@ -91,6 +91,7 @@ from .models import (
     SourceImagePublic,
     SpatialSceneCreateResponse,
     ToolInfo,
+    TokenUsageReportResponse,
     ViewerLinkPublic,
 )
 from .memory import (
@@ -109,6 +110,7 @@ from .settings import (
 )
 from .style_transfer import PhotoStyleService, StyleParameters, register_style_tools
 from .tokenization import ContextWindowExceededError
+from .token_usage import TokenUsageStore, configured_run_token_budget
 from .tools import ToolError, ToolRegistry, build_default_registry
 
 
@@ -251,9 +253,16 @@ def create_app(
     register_style_tools(registry, selected_style_service)
     selected_flux_gs_service = flux_gs_service or FluxGSService()
     register_flux_gs_tools(registry, selected_flux_gs_service)
+    channel_data_path = trace_path.parent
+    token_usage_store = TokenUsageStore(channel_data_path / "token_usage.sqlite3")
     selected_settings_service = settings_service or create_default_settings_service(
-        DEFAULT_SETTINGS_PATH
+        DEFAULT_SETTINGS_PATH,
+        usage_store=token_usage_store,
     )
+    if getattr(selected_settings_service, "usage_store", None) is None:
+        selected_settings_service.usage_store = token_usage_store
+    if planner is not None and hasattr(planner, "usage_store"):
+        planner.usage_store = token_usage_store
     llm_runtime = LLMRuntimeManager(
         selected_settings_service,
         registry,
@@ -264,6 +273,7 @@ def create_app(
         registry,
         selected_planner,
         JsonlTraceStore(trace_path),
+        usage_store=token_usage_store,
         image_loader=lambda source_image_id, owner_id: (
             selected_spatial_service.read_source_image(
                 source_image_id,
@@ -271,7 +281,6 @@ def create_app(
             )
         ),
     )
-    channel_data_path = trace_path.parent
     selected_feishu_settings_service = feishu_settings_service or (
         create_default_feishu_settings_service(
             channel_data_path / DEFAULT_FEISHU_SETTINGS_PATH.name
@@ -325,6 +334,7 @@ def create_app(
             selected_style_service.close()
             selected_flux_gs_service.close()
             selected_spatial_service.close()
+            token_usage_store.close()
 
     app = FastAPI(
         title="Agent Lab API",
@@ -353,6 +363,7 @@ def create_app(
     )
     app.state.registry = registry
     app.state.runner = runner
+    app.state.token_usage_store = token_usage_store
     app.state.settings_service = selected_settings_service
     app.state.llm_runtime = llm_runtime
     app.state.spatial_service = selected_spatial_service
@@ -1259,6 +1270,33 @@ def create_app(
         runner: AgentRunner = request.app.state.runner
         return AgentRunListResponse(
             runs=runner.list_runs(status=status, limit=limit)
+        )
+
+    @app.get("/api/usage/tokens", response_model=TokenUsageReportResponse)
+    def token_usage_report(
+        request: Request,
+        run_id: str | None = Query(default=None, max_length=100),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> TokenUsageReportResponse:
+        """Return content-free token telemetry for the local Web owner."""
+
+        store: TokenUsageStore = request.app.state.token_usage_store
+        summary = store.summary(owner_id=WEB_OWNER_ID, run_id=run_id)
+        data = summary.as_dict()
+        data["max_budget_tokens"] = configured_run_token_budget()
+        return TokenUsageReportResponse(
+            summary=data,
+            events=[
+                {
+                    **event,
+                    "is_estimate": bool(event["is_estimate"]),
+                }
+                for event in store.events(
+                    owner_id=WEB_OWNER_ID,
+                    run_id=run_id,
+                    limit=limit,
+                )
+            ],
         )
 
     @app.get("/api/agent/runs/{run_id}", response_model=AgentRunResponse)

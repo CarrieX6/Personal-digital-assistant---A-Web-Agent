@@ -26,6 +26,7 @@ from .models import (
     ProviderPreset,
 )
 from .tools import ToolRegistry
+from .token_usage import TokenUsageStore
 
 
 PROVIDERS = [
@@ -228,10 +229,12 @@ class SettingsService:
         repository: SettingsRepository,
         secret_store: SecretStore,
         http_client: httpx.Client | None = None,
+        usage_store: TokenUsageStore | None = None,
     ) -> None:
         self.repository = repository
         self.secret_store = secret_store
         self.http_client = http_client
+        self.usage_store = usage_store
 
     def catalog(
         self,
@@ -304,7 +307,10 @@ class SettingsService:
     def build_planner(self) -> Planner:
         stored = self.repository.load()
         if stored is None:
-            return build_planner_from_env(client=self.http_client)
+            return build_planner_from_env(
+                client=self.http_client,
+                usage_store=self.usage_store,
+            )
         if not stored.enabled:
             return DemoPlanner()
         api_key = self.secret_store.get()
@@ -412,6 +418,7 @@ class SettingsService:
             model=stored.model,
             timeout_seconds=stored.timeout_seconds,
             client=self.http_client,
+            usage_store=self.usage_store,
         )
 
     @staticmethod
@@ -434,7 +441,10 @@ class SettingsService:
         return normalized
 
 
-def create_default_settings_service(settings_path: Path) -> SettingsService:
+def create_default_settings_service(
+    settings_path: Path,
+    usage_store: TokenUsageStore | None = None,
+) -> SettingsService:
     data_dir = settings_path.parent
     secret_store = HybridSecretStore(
         KeyringSecretStore(settings_path),
@@ -443,7 +453,11 @@ def create_default_settings_service(settings_path: Path) -> SettingsService:
             data_dir / ".secret_master_key",
         ),
     )
-    return SettingsService(SettingsRepository(settings_path), secret_store)
+    return SettingsService(
+        SettingsRepository(settings_path),
+        secret_store,
+        usage_store=usage_store,
+    )
 
 
 class LLMRuntimeManager:

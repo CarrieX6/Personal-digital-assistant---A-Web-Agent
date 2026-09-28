@@ -13,8 +13,14 @@ from typing import Any, Callable, Literal, Protocol
 from uuid import uuid4
 
 from .context import ContextBuilder
-from .models import AgentRunResponse, ToolCall, TraceStep
+from .models import AgentRunResponse, TokenUsageSummaryPublic, ToolCall, TraceStep
 from .memory import MemoryPolicyError, SQLiteMemoryStore
+from .token_usage import (
+    TokenUsageStore,
+    TokenUsageContext,
+    configured_run_token_budget,
+    use_usage_context,
+)
 from .tools import ToolExecutionContext, ToolRegistry
 
 
@@ -409,6 +415,7 @@ class AgentRunner:
         checkpoint_path: Path | None = None,
         context_builder: ContextBuilder | None = None,
         image_loader: Callable[[str, str], tuple[str, bytes]] | None = None,
+        usage_store: TokenUsageStore | None = None,
     ) -> None:
         self.registry = registry
         self.planner = planner
@@ -427,6 +434,7 @@ class AgentRunner:
         if context_builder is not None and memory_store is not None:
             self.memory_store.set_token_counter(context_builder.token_counter)
         self.image_loader = image_loader
+        self.usage_store = usage_store
         from .orchestration import LangGraphOrchestrator
 
         self.orchestrator = LangGraphOrchestrator(
@@ -454,6 +462,7 @@ class AgentRunner:
     ) -> AgentRunResponse:
         run_started = time.perf_counter()
         owner_id = self.memory_store.resolve_verified_subject_id(owner_id)
+        run_id = str(uuid4())
         project_id = (
             project_id.strip()[:160]
             if isinstance(project_id, str) and project_id.strip()
@@ -471,19 +480,29 @@ class AgentRunner:
             channel=channel,
             project_id=project_id,
         )
-        conversation = self.memory_store.context(
+        usage_context = TokenUsageContext(
             owner_id=owner_id,
+            run_id=run_id,
             thread_id=thread_id,
             channel=channel,
             project_id=project_id,
-            query=message,
-            raw_history_token_budget=(
-                self.context_builder.config.recent_history_tokens
-            ),
-            summary_token_budget=(
-                self.context_builder.config.session_summary_tokens
-            ),
+            stage="context",
+            max_total_tokens=configured_run_token_budget(),
         )
+        with use_usage_context(usage_context):
+            conversation = self.memory_store.context(
+                owner_id=owner_id,
+                thread_id=thread_id,
+                channel=channel,
+                project_id=project_id,
+                query=message,
+                raw_history_token_budget=(
+                    self.context_builder.config.recent_history_tokens
+                ),
+                summary_token_budget=(
+                    self.context_builder.config.session_summary_tokens
+                ),
+            )
         if self._is_memory_command(message):
             return self._run_memory_command(
                 message=message,
@@ -671,7 +690,6 @@ class AgentRunner:
             selected_tool_schemas=selected_tool_schemas,
         )
 
-        run_id = str(uuid4())
         initial_user_metadata: dict[str, Any] = {}
         if generic_attachments:
             initial_user_metadata["attachments"] = [
@@ -731,14 +749,15 @@ class AgentRunner:
 
         self.orchestrator.planner = self.planner
         try:
-            graph_state = self.orchestrator.invoke(
-                message=message,
-                context=execution_context,
-                run_id=run_id,
-                planner_context=built_context.to_planner_context(),
-                selected_tool_names=list(built_context.selected_tool_names),
-                vision_inputs=vision_inputs,
-            )
+            with use_usage_context(usage_context):
+                graph_state = self.orchestrator.invoke(
+                    message=message,
+                    context=execution_context,
+                    run_id=run_id,
+                    planner_context=built_context.to_planner_context(),
+                    selected_tool_names=list(built_context.selected_tool_names),
+                    vision_inputs=vision_inputs,
+                )
         except Exception:
             self.reconcile_incomplete_runs()
             raise
@@ -1014,13 +1033,14 @@ class AgentRunner:
         started = time.perf_counter()
         self.orchestrator.planner = self.planner
         try:
-            graph_state = self.orchestrator.continue_from_checkpoint(
-                run_id=run_id,
-                context=context,
-                checkpoint_thread_id=(
-                    record.checkpoint_thread_id or record.thread_id
-                ),
-            )
+            with use_usage_context(self._usage_context_for_record(record)):
+                graph_state = self.orchestrator.continue_from_checkpoint(
+                    run_id=run_id,
+                    context=context,
+                    checkpoint_thread_id=(
+                        record.checkpoint_thread_id or record.thread_id
+                    ),
+                )
             response = self._response_from_state(
                 graph_state,
                 started_at=started,
@@ -1213,19 +1233,20 @@ class AgentRunner:
         started = time.perf_counter()
         self.orchestrator.planner = self.planner
         try:
-            graph_state = self.orchestrator.resume(
-                run_id=run_id,
-                context=context,
-                approved=approved,
-                actor_id=(
-                    "root"
-                    if is_admin
-                    else requester_owner_id or record.owner_id
-                ),
-                checkpoint_thread_id=(
-                    record.checkpoint_thread_id or record.thread_id
-                ),
-            )
+            with use_usage_context(self._usage_context_for_record(record)):
+                graph_state = self.orchestrator.resume(
+                    run_id=run_id,
+                    context=context,
+                    approved=approved,
+                    actor_id=(
+                        "root"
+                        if is_admin
+                        else requester_owner_id or record.owner_id
+                    ),
+                    checkpoint_thread_id=(
+                        record.checkpoint_thread_id or record.thread_id
+                    ),
+                )
             response = self._response_from_state(
                 graph_state,
                 started_at=started,
@@ -1279,7 +1300,34 @@ class AgentRunner:
             ],
             total_duration_ms=_elapsed_ms(started_at),
             approval=approval if status == "waiting_approval" else None,
+            token_usage=self._token_usage_summary(graph_state["run_id"]),
         )
+
+    def _token_usage_summary(self, run_id: str) -> TokenUsageSummaryPublic | None:
+        if self.usage_store is None:
+            return None
+        summary = self.usage_store.summary(run_id=run_id)
+        if summary.calls == 0:
+            return None
+        data = summary.as_dict()
+        data["max_budget_tokens"] = configured_run_token_budget()
+        return TokenUsageSummaryPublic.model_validate(data)
+
+    def _usage_context_for_record(self, record: Any) -> TokenUsageContext:
+        context = TokenUsageContext(
+            owner_id=record.owner_id,
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            channel=record.channel,
+            project_id=record.project_id,
+            stage="resume",
+            max_total_tokens=configured_run_token_budget(),
+        )
+        if self.usage_store is not None:
+            context.spent_tokens = self.usage_store.summary(
+                run_id=record.run_id
+            ).total_tokens
+        return context
 
     def _persist_response(
         self,
@@ -1518,6 +1566,7 @@ class AgentRunner:
                 )
             ],
             total_duration_ms=_elapsed_ms(started_at),
+            token_usage=self._token_usage_summary(run_id),
         )
         self._persist_response(
             response,
