@@ -4,6 +4,10 @@
 更新日期：2026-08-27
 关联任务：`MEMORY-001`、`MEMORY-002`
 
+> 2026-10-08 工程阅读入口：[数据、记忆、上下文与 Token](../handbook/04-memory-context-token.md)。
+> 原始消息、摘要、长期 claim/evidence、Checkpoint 和资产是不同数据层；
+> 本文主要实现归属仍为 Xianggang Ma，新增导读不改变作者归属。
+
 ## 1. 结论
 
 项目在原有 owner/thread 隔离、显式长期记忆和 LangGraph Checkpoint 基础上，采用

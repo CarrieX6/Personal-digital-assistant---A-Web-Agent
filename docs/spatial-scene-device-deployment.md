@@ -1,7 +1,11 @@
 # 空间照片端侧部署与资产格式技术文档
 
 作者：**Zhuofan Xie**  
-更新日期：2026-07-24
+更新日期：2026-10-08
+
+当前实现复核基线：main@29e9865。新手操作、源码阅读与两个预览入口的区别见
+[图像能力工程手册](handbook/05-image-capabilities.md)。
+锁屏相关章节是早期技术调研，不是当前产品交付重点；当前主链路为 Web/飞书调用与结果消费。
 
 ## 1. 目标与结论
 
@@ -33,9 +37,11 @@ source.webp       原始彩色图的安全重编码版本
 depth.png         8-bit 相对深度，白色表示较近
 foreground.webp  带透明通道的近景层
 background.webp  遮挡区域经过补全的背景层
+foreground-mask.png  主体分割蒙版，便于质量检查
 ```
 
-当前 `scene.json` 示例：
+当前 `scene.json` 核心字段示例（为字段子集；实际还记录 `foreground_mask`、分割模型、
+启发式质量分数和警告，以生成的 manifest 为准）：
 
 ```json
 {
@@ -61,8 +67,9 @@ background.webp  遮挡区域经过补全的背景层
 
 ### 3.1 完整处理链路
 
-当前版本使用一个预训练单目深度网络，加上传统图像处理和 Three.js 实时渲染，
-没有使用文生图模型，也没有使用第二个分割或修复网络。
+当前版本使用预训练单目深度网络，并将完整主体分割交给 Apple Vision/BiRefNet；
+分割不可用时可降级为深度阈值蒙版。背景补全仍为传统图像处理，无额外生成式修复网络。
+Web 使用 Three.js，手机专用签名 Viewer 使用轻量 CSS 分层位移。
 
 ```mermaid
 flowchart TD
@@ -71,14 +78,16 @@ flowchart TD
     C --> D["Depth Anything V2 Small 相对深度推理"]
     D --> E["双三次插值回原分辨率"]
     E --> F["2%–98% 分位裁剪、归一化、轻微平滑"]
-    F --> G["Otsu + 第 70 百分位生成近景硬蒙版"]
+    B --> S["Apple Vision / BiRefNet 完整主体蒙版"]
+    F --> G["主体蒙版优先，Otsu 深度阈值作降级"]
+    S --> G
     G --> H["形态学扩张/收缩 + Alpha 羽化"]
     H --> I["生成 foreground.webp"]
-    H --> J["扩大遮挡区域 + 四邻域颜色传播补背景"]
+    H --> J["扩大遮挡区域 + 八邻域颜色传播补背景"]
     J --> K["生成 background.webp"]
     I --> L["scene.json + 本地资产库"]
     K --> L
-    L --> M["Three.js 双平面 + 透视相机小范围移动"]
+    L --> M["Web Three.js 双平面 / 手机 CSS 图层视差"]
 ```
 
 当前真正运行的主要代码：
@@ -135,7 +144,9 @@ model = model.to(device).eval()
 Apple Silicon MPS → NVIDIA CUDA → CPU
 ```
 
-模型第一次运行时从 Hugging Face 下载，之后从本机缓存读取。当前没有启用
+完整部署会先准备固定本地模型；未预下载的开发配置可能在首次推理联网下载。
+具体离线状态以部署预检与 local-files 配置为准，不能仅凭缓存目录推断离线完整。
+当前深度实现没有启用
 `autocast`、FP16、INT8、ONNX、Core ML 或 TensorRT，属于以兼容性优先的 FP32
 推理实现。
 

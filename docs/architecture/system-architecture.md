@@ -1,7 +1,11 @@
 # 个人数字助手系统架构
 
 作者：**Zhuofan Xie**  
-更新日期：2026-09-14
+更新日期：2026-10-08
+
+代码核对基线：协作仓库 main@29e9865；本次为文档与源码一致性复核，非全部设备/渠道实机复测。
+新手主路径见[从零复现与代码导读](../handbook/README.md)。
+本文前两节描述产品目标；第 5 节记录当前代码。微信、试衣、宠物、完整视频导出等目标不等于已实现。
 
 ## 1. 产品目标
 
@@ -90,6 +94,10 @@ Channel Adapter 只负责：
 
 它不包含 Agent 规划和具体模型逻辑。
 
+以上是目标职责划分，不是所有代码已按此拆成独立服务。当前 `feishu.py` 同时承载菜单、
+附件工作流、任务监控和结果呈现；部分确定性请求直接调用本地服务，不经过 Agent 图。
+后续可抽取 Gateway/Presenter/Workflow 以减少渠道与能力的耦合。
+
 ### 3.2 Identity & Policy
 
 - 允许用户和会话白名单；
@@ -101,14 +109,19 @@ Channel Adapter 只负责：
 
 ### 3.3 Agent Orchestrator
 
-当前 `AgentRunner` 已使用 LangGraph `StateGraph` 实现
-`plan → policy → execute_tool → observe → decide` 受控循环，并以 SQLite
-Checkpointer 按会话保存执行状态。当前已加入工具 Schema、步数、重规划、连续错误、
-总运行时间、递归上限，以及按 Run 记录的 Token 用量和可选预算门禁。高风险 Tool 已可通过 LangGraph Interrupt 暂停，在 Web Root
-或飞书审批后从 Checkpoint 恢复；SQLite 执行账本负责重放幂等。下一阶段增加：
+当前 `AgentRunner` 使用八节点 LangGraph `StateGraph`：
+`plan / policy / approval / execute_tool / observe / decide / finalize / fail`。
+每个 Run 有独立 Checkpoint 标识；业务会话另由 SQLiteMemoryStore 管理。
+首轮与续规划可使用 LLM，模型提出动作，代码检查工具、参数、风险和预算。
+owner 检查还分布在身份层、Runner 和资产服务，不是全部集中于 policy。
+工具相关性筛选用于成本与上下文控制，当前 policy 尚未单独检查原生 Tool Call 是否属于
+本轮筛选名单；完整的角色/能力授权与允许工具集合门禁仍需补充，不能以模型 Schema 代替安全控制。
+高风险 Tool 通过 interrupt 暂停，再从同一 Run 恢复；工具账本阻止不安全重放。
+空间/风格化任务创建后立即移交后台，不让 LLM 循环轮询。
+120 秒是节点间合作式检查，不是强制进程取消。下一阶段增加：
 
 - 正在执行节点的进程级失败恢复；
-- 异步任务提交后立即返回；
+- 单工具强制超时、取消与公平并发调度；
 - 审批过期、价格版本化费用和并发预算；
 - 结果 Presenter 选择。
 
@@ -123,14 +136,18 @@ Checkpointer 按会话保存执行状态。当前已加入工具 Schema、步数
 | 任务记忆 | 输入、工具轨迹、结果、错误 | 长期可审计 |
 | 资产记忆 | 图片、3D 资产和派生关系 | 由用户管理 |
 
-首版已经使用 SQLite 保存按 `owner_id` 隔离的显式长期记忆，以及按
-`owner_id + thread_id` 隔离的最近会话。飞书私聊和群聊中的同一用户分别拥有独立
-会话上下文；长期记忆仍归属于该用户。当前支持查看、全部删除和清空当前会话，后续
-补充单条删除、导出、敏感字段加密和自动保留期限。
+当前已支持 owner/thread 隔离、结构化滚动摘要、长期 claim/evidence、时态替代关系、
+敏感召回门禁、混合检索与使用反馈，并提供单条 CRUD、导出和记忆正文/扩展元数据加密。
+飞书私聊和群聊分别维护上下文，长期记忆仍按用户与作用域管理；Web 当前使用 local Root。
+摘要和长期记忆均为非可信上下文，不能代替审批和权限。自动保留策略、统一渠道消息事实表和
+更大规模质量评测仍需补充。分层记忆主要实现人为 Xianggang Ma，
+详见[分层记忆](layered-memory.md)及[教学导读](../handbook/04-memory-context-token.md)。
 
 ### 3.5 Capability Registry
 
 每个功能使用独立清单描述：
+
+以下 YAML 为目标契约示意，不是可直接执行的安装清单；当前 ToolSpec/CapabilityInfo 及安装白名单以源码为准。
 
 ```yaml
 id: spatial-photo
@@ -159,7 +176,9 @@ permissions:
 
 ### 3.6 Local Job Queue
 
-当前空间照片已有 SQLite 任务与单工作线程。后续通用化为：
+当前空间照片与风格化已有持久化 Job/Asset、事务原子预留、worker claim/lease、
+失败保留输入及用户重试；空间 queued 任务启动时可重新提交，租约过期的 running
+标记中断。默认生成并发有限，不是通用分布式队列。后续通用化为：
 
 ```text
 queued → preparing → running → packaging → completed
@@ -179,6 +198,9 @@ queued → preparing → running → packaging → completed
 
 根据渠道能力自动选择结果形式：
 
+下面为完整目标。当前已实现空间封面 + Viewer、风格化结果图/文件；
+空间 MP4、3D turntable 与通用 Presenter 尚未统一实现。
+
 ```text
 image           → JPEG/WebP 预览 + 原图文件
 spatial-scene   → 封面 + 视角演示 MP4 + Web Viewer 链接
@@ -186,7 +208,10 @@ spatial-scene   → 封面 + 视角演示 MP4 + Web Viewer 链接
 report          → 摘要卡片 + PDF/Markdown 文件
 ```
 
-Viewer 链接必须带短时签名，不直接暴露 `backend/data` 路径。局域网模式可以要求手机
+当前专用 Viewer 链接带 HMAC 签名，不直接暴露 `backend/data` 路径，默认 12 小时有效、
+可配置上限 7 天。签名密钥持久化不代表链接永久有效，也不提供用户登录或任意分享撤销。
+Web 预览用 Three.js 双平面，手机专用链接使用轻量 CSS 分层位移，两者不是同一渲染器。
+局域网模式可以要求手机
 与电脑处于同一网络；远程模式需要经过认证的反向代理、隧道或中继服务。
 
 ## 4. 端到端消息时序
@@ -209,7 +234,7 @@ sequenceDiagram
     G-->>C: 已接收，任务排队中
     Q->>R: 本地深度估计与分层
     R-->>Q: 进度与资产 ID
-    Q->>P: 生成缩略图/视频/签名链接
+    Q->>P: 生成封面/签名链接（视频为规划）
     P->>G: 渠道结果包
     G->>C: 更新卡片并发送预览
     C->>U: 查看结果
@@ -219,23 +244,28 @@ sequenceDiagram
 
 | 目标模块 | 当前代码 | 状态 |
 | --- | --- | --- |
-| Agent Orchestrator | `backend/app/agent.py`、`backend/app/orchestration.py` | LangGraph 受控循环 + SQLite Checkpointer；支持观察重规划、硬预算、Interrupt 审批、跨重启恢复和工具执行账本，待运行中恢复与费用预算 |
-| Capability Registry | `backend/app/tools.py` | 基础注册、Schema 导出和调用前基础校验；缺角色权限、超时、版本和副作用等级 |
+| Agent Orchestrator | `backend/app/agent.py`、`backend/app/orchestration.py` | 八节点有界循环、独立 Run Checkpoint、审批恢复、执行账本、异步移交；待强制取消、公平并发和费用版本 |
+| Capability Registry | `backend/app/tools.py`、`models.py` | Tool Schema 子集校验、风险/审批/幂等声明、Capability 信息；待细粒度角色授权、超时和市场版本治理 |
 | LLM Planner | `backend/app/llm.py` | OpenAI-compatible MVP；供应商兼容性待评测 |
-| Job Queue | `backend/app/assets.py` | 空间照片专用；通用恢复和 Outbox 未实现 |
-| Asset Store | `backend/app/assets.py` | 空间照片资产已加入 owner 隔离；本地 HTTP 接口鉴权与签名访问未完成 |
+| Job Queue | `backend/app/assets.py`、`style_transfer.py` | 两类任务持久化、原子预留/claim、lease、中断/用户重试；HTTP 幂等覆盖不完整，通用队列和 Outbox 待完成 |
+| Asset Store | `backend/app/assets.py` | owner 隔离与受控文件读写，专用 Viewer 签名已实现；Root HTTP 用户认证与 workspace 授权仍待完成 |
 | Web Control UI | `app/components/AgentConsole.tsx` | Web 会话列表和消息已改为服务端 SQLite 唯一数据源；飞书仍为渠道日志只读镜像 |
-| Channel Gateway | `backend/app/feishu.py`、`channel_settings.py` | 飞书文本、单图下载、空间任务、封面回传和卡片 MVP；统一 Adapter、Outbox、文件/视频待实现 |
-| Memory Service | `backend/app/memory.py` | SQLite 会话、消息、长期记忆和持久化 Agent Run；已按用户/渠道/会话隔离，待飞书统一消息迁移、导出、加密和保留策略 |
-| Preview Export | 尚无 | 待开发 |
-| Capability Installer | 尚无 | 待开发 |
+| Channel Gateway | `backend/app/feishu.py`、`channel_settings.py` | 文本、多图/草稿、空间封面/Viewer、风格化结果图/文件、卡片与短重试；统一 Adapter、Outbox 和视频待实现 |
+| Memory Service | `backend/app/memory.py`、`context.py`、`retrieval.py` | 分层记忆、claim/evidence、摘要、混合检索、加密、CRUD/导出；待统一渠道事实表与保留策略 |
+| Preview Export | `backend/app/lan_viewer.py`、`app/components/SpatialViewer.tsx` | 签名手机 CSS Viewer 与 Web Three.js；待固定公网交付、身份化分享和通用视频导出 |
+| Capability Installer | `backend/app/capability_setup.py`、`scripts/deploy.py` | 预检、计划、许可、白名单动作、持久化进度、重试/取消、验证；待升级/卸载/回滚与完整设备验收 |
+| Token/Operations | `backend/app/token_usage.py`、`observability.py` | 阶段用量、actual/estimate 区分、可选 Run 预算、健康/Ready/JSON 指标；待费用、长期监控和告警 |
 
 从当前代码逐阶段走向目标架构的学习、实现和验收顺序见
+[工程手册](../handbook/README.md)；原有长期学习规划见
 [从零到可运行个人数字助手](../learning/implementation-roadmap.md)。
 
 ## 6. 安全边界
 
 外部聊天控制意味着“远程用户可以让本地电脑执行动作”，必须先于功能扩展建设安全层：
+
+以下是安全目标，不是所有项均已完成。当前 Web 仍是本机 Root，签名 Viewer 为持有者访问；
+未来用户认证、链接撤销、全局限流、完整红队与生产审计需要独立交付。
 
 1. 只接受已绑定用户和允许的会话；
 2. 平台事件验签，消息 ID 幂等；

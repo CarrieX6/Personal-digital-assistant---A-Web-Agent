@@ -4,6 +4,11 @@
 
 一个本地优先、可由外部聊天软件远程控制的个人数字助手框架。
 
+> **新成员从这里开始：**[从零复现与代码导读](docs/handbook/README.md)。
+> 按启动、请求链路、Agent、记忆/Token、图像能力、飞书和扩展七章推进；
+> 每一步说明操作、预期结果、设计原因和源码入口。只想先启动网页，使用
+> [第一章的 core 快速启动](docs/handbook/01-first-run.md)，不必先下载全部模型。
+
 项目的最终目标是打通下面这条完整链路：
 
 ```text
@@ -18,9 +23,13 @@ Agent 理解任务、读取记忆并选择本地功能
 图片 / 视频 / 文件 / 安全预览链接返回聊天窗口
 ```
 
-当前版本已经完成 Web Agent、模型供应商配置、工具调用、本地异步任务、个人资产库
-和空间照片功能。这些模块将作为未来“功能库”的第一批能力，而不是彼此孤立的
-Demo。
+当前代码已包含 Web Agent、模型配置、有界工具循环、分层记忆、图像异步任务与资产库，
+并接入空间照片、真实图片风格化 Provider、飞书媒体交互及 Flux-GS 适配层。
+“已有代码”“目标设备已部署”“真实用户验收通过”是不同状态，具体边界见下表和工程手册。
+
+贡献归属：Agent/Web、飞书、空间照片和部署工程由 **Zhuofan Xie** 重点推进；
+图片风格化与分层长短期记忆主要实现者为 **Xianggang Ma**；Flux-GS 原始功能贡献者为
+**Zuheng Zhao**。文档整理不改变模块贡献归属。
 
 ## 项目状态
 
@@ -40,6 +49,9 @@ Demo。
 | 微信/企业微信 | 调研阶段 | 优先使用官方开放能力，不接入个人微信非公开协议 |
 
 ## 总体架构
+
+下图是产品逻辑边界，不表示所有模块已拆成独立服务：微信、统一 Gateway/Presenter、
+全局限流、公平队列和通用视频输出仍是目标。当前请求实路径见工程手册第 2、6 章。
 
 ```mermaid
 flowchart LR
@@ -67,12 +79,13 @@ flowchart LR
 Agent 支持真实 LLM Tool Calling，也支持未配置模型时的规则演示模式。当前使用
 LangGraph 和 SQLite Checkpointer 执行受控循环：每次工具调用前进行 Policy 和
 Schema 校验，执行后观察结果，模型可以继续规划或完成；代码限制工具步数、重规划、
-连续错误、总运行时间和图递归次数。高风险 Tool 可通过 LangGraph Interrupt 暂停，
+连续错误、节点间运行时间和图递归次数；120 秒不是对阻塞节点的强制进程取消。
+高风险 Tool 可通过 LangGraph Interrupt 暂停，
 在 Web Root 控制台或飞书批准/拒绝后从 SQLite Checkpoint 恢复；执行账本避免重放
 造成重复副作用。每个 Run 拥有独立 Checkpoint 标识；启动时会把遗留运行分类为可恢复、
 待审批、已终态或需人工处置，Root 可继续或明确终止，不会盲目重放。会话历史按渠道、
 用户和聊天隔离，显式长期记忆按用户隔离。当前
-工具包括：
+工具与相关能力包括：
 
 - 文本统计与关键词提取；
 - 当前时间和能力列表；
@@ -91,7 +104,9 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 清理时删除超过 24 小时的暂存文件，其他会话不能引用这些图片。
 
 对于少数把函数调用写成 `<tool_call>{...}` 普通文本的 OpenAI 兼容模型，Planner
-只会在调用名属于当前轮已授权工具时将其规范化为真实 Tool Call。空间照片和图片
+只会在调用名属于当前轮选中的候选工具时将其规范化为真实 Tool Call。
+工具筛选不等于授权；原生 Tool Call 的本轮允许集合硬门禁仍需补齐，详见工程手册第 3 章。
+空间照片和图片
 风格化属于异步任务：创建成功后 Agent 立即把任务移交给 Web/渠道任务监控，不会在
 同一工具循环中反复查询状态并耗尽重规划次数。
 
@@ -102,9 +117,9 @@ Checkpoint 或长期记忆。明确要求空间照片或风格化时，LLM 仍�
 1. 校验 JPG、PNG 或 WebP，移除 EXIF，最长边缩至 1600px；
 2. 使用 `Depth Anything V2 Small` 在本机估计相对深度；
 3. 使用主体分割保护完整前景：macOS 14+ 默认 Apple Vision，Windows/Linux 可用
-   BiRefNet，本地语义分割失败后才降级为深度蒙版；
-4. 输出原图、深度图、前景、背景和 `scene.json`；
-5. Three.js 使用双层平面与小范围相机移动产生运动视差；
+   BiRefNet；auto 模式可在失败后降级为深度蒙版，显式模型模式失败则报错；
+4. 输出原图、深度图、主体蒙版、前景、背景和 `scene.json`；
+5. Web Three.js 使用双层平面与相机移动；手机专用 Viewer 使用 CSS 分层位移；
 6. 生成结果写入本地资产库，也可以由 Agent 直接调用。
 
 它是低成本的 2.5D MVP，不是完整 3D 重建。实现细节见
@@ -160,6 +175,9 @@ Flux-GS 的独立 GPU 服务部署、数据集映射、许可门禁和飞书调�
 
 聊天窗口不是完整的 WebGL/3D 运行环境，因此采用分级输出：
 
+下表是完整交付目标。当前空间照片输出封面和 Viewer，风格化输出图片/文件；
+空间视频、3D 旋转视频和通用进度 Presenter 不应被当作已经完成的功能。
+
 | 结果类型 | 聊天窗口内 | 点击后 |
 | --- | --- | --- |
 | 普通图片 | 直接发送图片 | 查看原图 |
@@ -209,6 +227,7 @@ docs/
   architecture/              系统架构、模块边界和路线图
   research/                  平台、模型、协议和产品调研
   learning/                  团队学习笔记与知识索引
+  handbook/                  从零复现、源码导读、验收与上线边界
 tests/                        前端渲染测试
 ```
 
@@ -221,11 +240,11 @@ tests/                        前端渲染测试
 
 ### 环境要求
 
-- Node.js 22+
+- Node.js 22.13+
 - pnpm
-- Python 3.11 或 3.12
-- 推荐至少 8GB 内存
-- Apple Silicon 优先使用 MPS，NVIDIA 优先使用 CUDA，否则回退 CPU
+- 启动器支持 Python 3.11–3.13，推荐 3.12
+- 基础 Web 至少 8GB 内存；真实生成模型需另按安装预检评估内存/磁盘
+- 按能力选择 MPS/CUDA/CPU，不能推断所有模型都支持 CPU 降级
 
 ### macOS / Linux 一键启动
 
@@ -239,7 +258,7 @@ macOS 也可双击仓库根目录的 `WebAgent.command`。只查看环境缺口�
 
 打开 `http://localhost:3000/` 后进入“设置”，先查看目标机预检，再逐项安装空间模型、
 语义记忆和真实 SDXL + IP-Adapter。安装任务、进度和失败记录保存在本机 SQLite；模型
-许可必须由本机所有者明确接受。在已经过验证的 macOS/Windows 档位进行无人值守完整
+许可必须由本机所有者明确接受。在通过预检并确认目标模型兼容的档位进行无人值守完整
 安装时，仍可使用 `./scripts/setup.sh --accept-model-licenses`；Linux/DGX Spark 先使用 core
 档位，由设置中心阻断未经真机验证的模型路径。完整前置条件、Windows Docker GPU Worker、
 数据备份/恢复和验收见[完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)。
@@ -491,6 +510,7 @@ Use $team-git-workflow in English to prepare this change for review
 
 ## 文档与资料
 
+- [从零复现与代码导读：功能、操作、为什么与如何实现](docs/handbook/README.md)
 - [调研与实现中心](docs/project-board.md)
 - [文档中心](docs/README.md)
 - [完整本地部署与迁移手册](docs/guides/complete-local-deployment.md)
