@@ -72,7 +72,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 
 ### P0：先打通个人数字助手主链路
 
-- [ ] `DOCS-REPRO-001`：补全协作库新手实操、功能说明、代码导读与文档/实现一致性。
+- [x] `DOCS-REPRO-001`：交付协作库新手实操、功能说明、代码导读与文档/实现一致性修订；新设备全链路实机验收另行安排。
 - [ ] `LEARN-001`：建立个人数字助手分层知识库与学习导航。
 - [ ] `AGENT-001`：确定 Agent Orchestrator 架构和工具执行循环（长期生产化项仍在推进）。
 - [x] `RELIABILITY-001`：完成 P0 可靠性基线并合入 `main`。
@@ -216,7 +216,7 @@ Pull Request 中，本看板只维护状态、负责人、依赖和链接，避�
 | `LEARN-AI-001` | P1 | 补充 AI 功能、模型选型和端侧部署正文 | `⬜ 未开始` | `⬜ 未开始` | 待领取 | 空间照片、虚拟试衣、虚拟宠物、生成模型、3D、性能和许可 |
 | `LEARN-OPS-001` | P1 | 补充可靠性、安全、运维和产品化正文 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已覆盖可靠性、权限、可观测性、Capability、供应链、数据、性能、测试、运维和 UX；基线待测 |
 | `LEARN-ROADMAP-001` | P0 | 建立从零学习到项目实现的连续阶段和验收门槛 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已映射当前代码、阶段 0–9、交付物和任务 ID；阶段实现待推进 |
-| `DOCS-REPRO-001` | P0 | 协作库文档如何让新手按步骤复现，并定位实现与上线边界 | `🟠 初步结论` | `👀 评审中` | Zhuofan Xie | 2026-10-08 基于 main@29e9865 新增[工程手册](handbook/README.md)：启动、请求、八节点、记忆/Token、图像、飞书和扩展/运维；修正架构与模型说明的过期实现状态。[PR #27](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/27)，分支 codex/docs-beginner-handbook；用户已审阅并授权修订后合并，按反馈移除文档中心旧汇报入口；源码/链接与专项测试复核见[记录](handbook/validation-2026-10-08.md)。尚未合并或完成新电脑全链路实机验收；个人学习白皮书不搬入公开协作库 |
+| `DOCS-REPRO-001` | P0 | 协作库文档如何让新手按步骤复现，并定位实现与上线边界 | `🟠 初步结论` | `✅ 已完成` | Zhuofan Xie | 2026-10-08 [PR #27](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/27) 经用户审阅、修订后合入 main@9a68fea；交付七章[工程手册](handbook/README.md)、源码导读与架构/模型说明修正，按反馈移除旧汇报推荐入口，原功能分支已清理。文档专项验收：19 份文档、236 个相对文件链接与围栏检查无错误，检查器 8 项测试通过；详见[记录](handbook/validation-2026-10-08.md)。完成状态仅指文档交付，未做新电脑全链路、真实渠道或生产验收；新版 PPT 和个人学习白皮书不纳入本次交付 |
 | `LEARN-RESEARCH-001` | P0 | 审查资料完整性、证据质量与时效更新机制 | `🟠 初步结论` | `🟡 开发中` | Zhuofan Xie | 已完成本轮覆盖审查，修正 MCP/Android 时效信息，登记微信/HarmonyOS/框架横评缺口 |
 | `REPORT-001` | P0 | 如何用可验证结果、用户故事和清晰归属完成阶段汇报 | `🔁 需更新` | `🟡 开发中` | Zhuofan Xie | [PR #15](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/15) 合入的[2026-08 汇报初稿](reports/personal-digital-assistant-stage-report-2026-08.md)仅作为历史材料保留，已从文档中心推荐入口移除。新版待按“总体介绍 → 功能成果 → 技术攻关 → 工程价值 → 总结”重排，补总体架构、真实 Web 截图和风格化参考图，合并重复内容；证据索引放备查附录，个人/团队贡献与历史指标口径分开；新版 PPT 不纳入 PR #27，跨平台无本轮实机测试证据，不计入汇报成果 |
 

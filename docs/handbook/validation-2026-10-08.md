@@ -8,13 +8,15 @@
 
 ## 基线与范围
 
-- GitHub main 与本地 origin/main 的提交均为 `29e9865b23f0ea1c5ba02511c5fc7ec82da2ae23`。
+- 初轮审查基线：开始时 GitHub main 与本地 origin/main 的提交均为 `29e9865b23f0ea1c5ba02511c5fc7ec82da2ae23`。
 - 使用独立文档工作区/分支 `codex/docs-beginner-handbook`，未修改应用执行代码、个人数据或模型。
 - 上一轮 PPT 及其他工作区修改未加入本次提交。
 - 本轮补全工程手册、入口导航及已有架构/空间模型文档；不是复制个人学习白皮书。
 - 图片风格化/分层记忆主要贡献者 Xianggang Ma；Flux-GS 原始贡献者 Zuheng Zhao。
-- 已推送独立文档分支并创建[草稿 PR #27](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/27)，
-  看板进入评审中；尚未合并 main，本记录不是生产验收完成声明。
+- 初轮推送独立文档分支并创建[PR #27](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/27)，
+  看板最初为评审中。用户审阅、修订和文档检查后，GitHub 于 2026-10-08 确认合并，
+  合并提交为 `9a68fea68921940c9c9f68b73611b0b8390666a3`；本地 main 已同步该提交，
+  原远程和本地功能分支已删除。本记录是文档交付复核，不是生产验收完成声明。
 
 ## 评审修订
 
