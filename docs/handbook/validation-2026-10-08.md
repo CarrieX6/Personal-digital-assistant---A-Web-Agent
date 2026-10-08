@@ -13,6 +13,8 @@
 - 上一轮 PPT 及其他工作区修改未加入本次提交。
 - 本轮补全工程手册、入口导航及已有架构/空间模型文档；不是复制个人学习白皮书。
 - 图片风格化/分层记忆主要贡献者 Xianggang Ma；Flux-GS 原始贡献者 Zuheng Zhao。
+- 已推送独立文档分支并创建[草稿 PR #27](https://github.com/CarrieX6/Personal-digital-assistant---A-Web-Agent/pull/27)，
+  看板进入评审中；尚未合并 main，本记录不是生产验收完成声明。
 
 ## 修正的重要不一致
 
